@@ -172,7 +172,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=pull_mod.DEFAULT_CONCURRENCY,
         help=(
             f"concurrent requests (default: {pull_mod.DEFAULT_CONCURRENCY}; "
-            "the polite floor — raising it is a deliberate choice)"
+            "v0.1 is sequential-only — values >1 are accepted but not yet "
+            "implemented)"
         ),
     )
     pull_p.add_argument(

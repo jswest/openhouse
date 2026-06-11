@@ -268,11 +268,14 @@ def pull_pdfs_year(
     (SPEC §6.5) with one entry per DocID: URL, HTTP status, byte size, sha256,
     and the single entry-time ``fetched_at`` threaded in from the caller.
 
-    Resumability: a target whose destination file already exists and is non-empty
-    is treated as present-and-size-consistent and **skipped** with no network
-    request (we never re-download merely to compare bytes — a truncated transfer
-    leaves a zero-byte file, which fails the non-empty check and is refetched).
-    ``force`` re-downloads regardless. ``types`` filters which families to fetch.
+    Resumability: a target whose file is already present and whose size matches
+    the recorded manifest entry is **skipped** with no network request. A present
+    file with *no* manifest entry (a prior run whose manifest write was lost) is
+    backfilled into the manifest from the file itself rather than re-downloaded;
+    a present file whose size *disagrees* with the manifest (a partial transfer)
+    is re-downloaded. A previously recorded 404 is honored without re-requesting
+    it. ``force`` re-downloads regardless. ``types`` filters which families to
+    fetch.
 
     A **404 is non-fatal**: it is recorded in the manifest with its status (a
     recorded gap, never a silent one) and the run continues. A 403 / exhausted
@@ -292,57 +295,86 @@ def pull_pdfs_year(
     # 404s) so a Ctrl-C mid-year never loses what was already learned.
     manifest = _load_manifest(manifest_path)
 
-    fetched = skipped = not_found = filtered = 0
-    for target in enumerate_targets(xml_path, year):
-        if target.family not in selected:
-            filtered += 1
-            continue
+    fetched = skipped = not_found = filtered = backfilled = 0
+    # The manifest is written in a ``finally`` so an interrupted year (Ctrl-C, a
+    # 403, exhausted backoff) never loses what was already fetched — on resume
+    # the on-disk files are reconciled against it (SPEC §3: safe to Ctrl-C).
+    try:
+        for target in enumerate_targets(xml_path, year):
+            if target.family not in selected:
+                filtered += 1
+                continue
 
-        dest = year_dir / target.family / f"{target.doc_id}.pdf"
-        if dest.exists() and dest.stat().st_size > 0 and not force:
-            skipped += 1
-            # A present, size-consistent file needs no manifest churn; keep any
-            # existing entry as-is.
-            continue
+            entry = manifest.get(target.doc_id)
+            dest = year_dir / target.family / f"{target.doc_id}.pdf"
 
-        url = pdf_url_for(target)
-        # Pace before every *network* request (polite floor, SPEC §3). Skipped /
-        # filtered targets cost no request, so they consume no pacing delay; the
-        # across-year delay is held separately by pull()'s per-year sleep.
-        sleep(delay)
-        response = polite_get(client, url, sleep=sleep, allow_not_found=True)
-        if response.status_code == 404:
-            # A 404 is the one non-fatal HTTP outcome — some index rows have no
-            # PDF. Record it with its status (a gap, never silent) and continue.
-            _record_404(manifest, target, url, fetched_at)
-            not_found += 1
-            continue
+            if not force:
+                # A previously recorded 404 has no file and no PDF to fetch;
+                # honor the recorded gap without re-requesting a known-dead URL
+                # (SPEC §11: a second run fetches nothing).
+                if entry is not None and entry.get("status") == 404:
+                    not_found += 1
+                    continue
+                if dest.exists() and dest.stat().st_size > 0:
+                    size = dest.stat().st_size
+                    if entry is not None and entry.get("bytes") == size:
+                        # Present and size-consistent with the manifest → skip.
+                        skipped += 1
+                        continue
+                    if entry is None:
+                        # On disk but unrecorded — a prior run's manifest write
+                        # was lost. Backfill from the file itself (its real size
+                        # + sha256) so it is never an unrecorded gap, rather than
+                        # re-download it.
+                        manifest[target.doc_id] = _entry_from_disk(
+                            target, pdf_url_for(target), dest, fetched_at
+                        )
+                        backfilled += 1
+                        continue
+                    # Present but size disagrees with the manifest → a partial /
+                    # corrupt transfer; fall through and re-download it.
 
-        content = response.content
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(content)
-        manifest[target.doc_id] = {
-            "doc_id": target.doc_id,
-            "filing_type": target.filing_type,
-            "family": target.family,
-            "url": url,
-            "status": response.status_code,
-            "bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
-            "fetched_at": fetched_at,
-        }
-        fetched += 1
+            url = pdf_url_for(target)
+            # Pace before every *network* request (polite floor, SPEC §3).
+            # Skipped / filtered / recorded-404 targets cost no request, so they
+            # consume no pacing delay; the across-year delay is held separately
+            # by pull()'s per-year sleep.
+            sleep(delay)
+            response = polite_get(client, url, sleep=sleep, allow_not_found=True)
+            if response.status_code == 404:
+                # A 404 is the one non-fatal HTTP outcome — some index rows have
+                # no PDF. Record it with its status (a gap, never silent).
+                _record_404(manifest, target, url, fetched_at)
+                not_found += 1
+                continue
 
-    _write_manifest(manifest_path, manifest, year, fetched_at)
+            content = response.content
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content)
+            manifest[target.doc_id] = {
+                "doc_id": target.doc_id,
+                "filing_type": target.filing_type,
+                "family": target.family,
+                "url": url,
+                "status": response.status_code,
+                "bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "fetched_at": fetched_at,
+            }
+            fetched += 1
+    finally:
+        _write_manifest(manifest_path, manifest, year, fetched_at)
+
     print(
-        f"{year}: PDFs — {fetched} fetched, {skipped} present/skipped, "
-        f"{not_found} not-found, {filtered} filtered "
+        f"{year}: PDFs — {fetched} fetched, {backfilled} backfilled, "
+        f"{skipped} present/skipped, {not_found} not-found, {filtered} filtered "
         f"(manifest: {manifest_path}).",
         file=sys.stderr,
     )
     return {
         "year": year,
         "fetched": fetched,
+        "backfilled": backfilled,
         "skipped": skipped,
         "not_found": not_found,
         "filtered": filtered,
@@ -368,6 +400,29 @@ def _record_404(
         f"at {url}; recorded in manifest, continuing.",
         file=sys.stderr,
     )
+
+
+def _entry_from_disk(
+    target: IndexTarget, url: str, dest: Path, fetched_at: str
+) -> dict:
+    """Backfill a manifest entry from a PDF already on disk.
+
+    Used on resume when a prior run downloaded the file but its manifest write
+    was lost (e.g. Ctrl-C before the year finished). The file on disk is the
+    truth, so record its real size + sha256 rather than leave it an unrecorded
+    gap or pay a redundant re-download.
+    """
+    content = dest.read_bytes()
+    return {
+        "doc_id": target.doc_id,
+        "filing_type": target.filing_type,
+        "family": target.family,
+        "url": url,
+        "status": 200,
+        "bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "fetched_at": fetched_at,
+    }
 
 
 def _load_manifest(manifest_path: Path) -> dict:
@@ -430,11 +485,18 @@ def pull(
         fetched_at = datetime.now().isoformat()
     ua = build_user_agent(contact=contact, user_agent=user_agent)
     print(f"pull: User-Agent: {ua}", file=sys.stderr)
-    if concurrency != DEFAULT_CONCURRENCY or delay != DEFAULT_DELAY_SECONDS:
+    if delay != DEFAULT_DELAY_SECONDS:
         print(
-            f"pull: politeness overridden — concurrency={concurrency}, "
-            f"delay={delay}s (default is {DEFAULT_CONCURRENCY} / "
-            f"{DEFAULT_DELAY_SECONDS}s).",
+            f"pull: delay overridden — {delay}s "
+            f"(polite floor is {DEFAULT_DELAY_SECONDS}s).",
+            file=sys.stderr,
+        )
+    if concurrency != DEFAULT_CONCURRENCY:
+        # v0.1 is sequential-only; the flag is accepted (SPEC §3 reserves it) but
+        # not yet wired, so say so plainly rather than imply parallel fetching.
+        print(
+            f"pull: --concurrency {concurrency} is not yet implemented; "
+            f"running sequentially (concurrency {DEFAULT_CONCURRENCY}).",
             file=sys.stderr,
         )
 

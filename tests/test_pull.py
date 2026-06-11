@@ -483,3 +483,119 @@ def test_pdf_paces_between_requests(tmp_path):
         client, 2024, tmp_path, FETCHED_AT, delay=2.5, sleep=sleeps.append
     )
     assert sleeps == [2.5, 2.5, 2.5, 2.5, 2.5]
+
+
+# ---------------------------------------------------------------------------
+# Resumability hardening (critic findings): manifest survives interruption,
+# present-but-unrecorded files are backfilled, recorded 404s aren't re-requested,
+# size-inconsistent files are refetched.
+# ---------------------------------------------------------------------------
+def test_pdf_manifest_written_even_when_year_interrupted(tmp_path):
+    """A mid-year 403 (PullError) must still leave a manifest of what was fetched.
+
+    Without the ``finally`` write, an interrupted ~95-min ``pull 2024`` would
+    download files but record none of them — and on resume those on-disk files
+    would be skipped, becoming permanent unrecorded gaps.
+    """
+    write_index(tmp_path)
+    calls = {"n": 0}
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, content=b"%PDF-one")
+        # The second PDF request refuses → polite_get raises PullError.
+        return httpx.Response(403)
+
+    client = make_client(flaky)
+    with pytest.raises(PullError):
+        pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    manifest_path = tmp_path / "raw" / "2024" / "pull-manifest.json"
+    assert manifest_path.exists()  # written despite the interruption
+    filings = json.loads(manifest_path.read_text())["filings"]
+    # Exactly the one file fetched before the 403 is recorded — not a silent gap.
+    assert len(filings) == 1
+    assert next(iter(filings.values()))["status"] == 200
+
+
+def test_pdf_present_but_unrecorded_file_is_backfilled_not_refetched(tmp_path):
+    """A file on disk with no manifest entry (a prior lost manifest write) is
+    backfilled from the file itself, not re-downloaded."""
+    year_dir = write_index(tmp_path)
+    body = b"%PDF-already-here"
+    ptr_pdf = year_dir / "ptr" / f"{PTR_DOC}.pdf"
+    ptr_pdf.parent.mkdir(parents=True)
+    ptr_pdf.write_bytes(body)  # present, but no manifest exists yet
+
+    handler = pdf_handler()
+    client = make_client(handler)
+    result = pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    # The already-present PTR was never requested over the network.
+    assert not any(f"ptr-pdfs/2024/{PTR_DOC}.pdf" in u for u in handler.urls)
+    assert result["backfilled"] == 1
+    entry = json.loads(
+        (year_dir / "pull-manifest.json").read_text()
+    )["filings"][PTR_DOC]
+    # Backfilled from the bytes actually on disk (its real size + sha256).
+    assert entry["bytes"] == len(body)
+    assert entry["sha256"] == hashlib.sha256(body).hexdigest()
+
+
+def test_pdf_recorded_404_not_re_requested_on_resume(tmp_path):
+    """SPEC §11: a second run fetches nothing — including known-404 rows."""
+    write_index(tmp_path)
+    handler = pdf_handler(not_found={PTR_DOC})
+    client = make_client(handler)
+
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+    first = list(handler.urls)
+    assert any(f"ptr-pdfs/2024/{PTR_DOC}.pdf" in u for u in first)
+
+    # Resume: the 404'd PTR is honored from the manifest, the FDs are present.
+    result = pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+    assert handler.urls == first  # not a single new request
+    assert result["not_found"] == 1
+
+
+def test_pdf_size_inconsistent_file_is_refetched(tmp_path):
+    """A present file whose size disagrees with the manifest (a partial transfer)
+    is re-downloaded, not trusted."""
+    year_dir = write_index(tmp_path)
+    handler = pdf_handler(fake_bytes=b"%PDF-full-body")
+    client = make_client(handler)
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+    before = len(handler.urls)
+
+    # Truncate the FD file so its size no longer matches the manifest entry.
+    fd_pdf = year_dir / "fd" / f"{FD_DOC}.pdf"
+    fd_pdf.write_bytes(b"xx")
+    result = pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    # The corrupt FD was refetched; the consistent files were not.
+    assert any(
+        f"financial-pdfs/2024/{FD_DOC}.pdf" in u for u in handler.urls[before:]
+    )
+    assert result["fetched"] == 1
+
+
+def test_concurrency_override_warns_not_implemented(tmp_path, capsys):
+    """`--concurrency >1` is accepted but says plainly it isn't wired (no false
+    promise of parallel fetching)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=make_index_zip(2024))
+
+    client = make_client(handler)
+    pull(
+        [2024],
+        data_dir=tmp_path,
+        index_only=True,
+        concurrency=4,
+        client=client,
+        sleep=no_sleep,
+    )
+    err = capsys.readouterr().err
+    assert "not yet implemented" in err
+    assert "running sequentially" in err
