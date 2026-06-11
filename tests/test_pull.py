@@ -621,6 +621,39 @@ def test_concurrency_override_warns_not_implemented(tmp_path, capsys):
     assert "running sequentially" in err
 
 
+def test_pdf_write_is_atomic_no_partial_pdf_on_interrupt(tmp_path, monkeypatch):
+    """A Ctrl-C mid-write leaves no half-written .pdf — only a complete file is
+    ever promoted into place, so resume never backfills a truncated body."""
+    write_index(tmp_path)
+    client = make_client(pdf_handler())
+
+    real_write = Path.write_bytes
+
+    def boom(self, data):
+        # Simulate Ctrl-C landing inside the body write (the .part scratch file).
+        if self.name.endswith(".part"):
+            raise KeyboardInterrupt
+        return real_write(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", boom)
+    with pytest.raises(KeyboardInterrupt):
+        pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    year_dir = tmp_path / "raw" / "2024"
+    # No complete .pdf was promoted, and no .part is masquerading as a body.
+    assert list(year_dir.rglob("*.pdf")) == []
+    # The manifest was still written by the finally (with what completed: none).
+    assert (year_dir / "pull-manifest.json").exists()
+
+
+def test_pdf_no_part_files_left_after_a_clean_run(tmp_path):
+    """A normal run leaves only finished .pdf files — no .part scratch behind."""
+    write_index(tmp_path)
+    client = make_client(pdf_handler())
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+    assert list((tmp_path / "raw" / "2024").rglob("*.part")) == []
+
+
 def test_pdf_progress_summarizes_each_family(tmp_path, capsys):
     """Each data type (ptr, fd) gets its own completed-progress line on stderr."""
     write_index(tmp_path)

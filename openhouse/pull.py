@@ -439,7 +439,13 @@ def _process_pdf_target(
 
     content = response.content
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(content)
+    # Atomic write: a Ctrl-C mid-write can only truncate the ``.part`` scratch
+    # file; ``dest`` is swapped in by an atomic rename, so it is always either
+    # absent or a complete PDF — never a half-written body that resume would
+    # backfill as if whole (SPEC §3: safe to Ctrl-C).
+    tmp = dest.with_name(f"{dest.name}.part")
+    tmp.write_bytes(content)
+    tmp.replace(dest)
     manifest[target.doc_id] = {
         "doc_id": target.doc_id,
         "filing_type": target.filing_type,
