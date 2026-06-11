@@ -208,10 +208,11 @@ openhouse pull 2024 --index-only
   a name or email. `--user-agent` overrides the whole header (the caller then owns
   identifying themselves). `pull` logs the UA in use to stderr at startup.
 - **No parsing of PDF bodies here.** `pull` only acquires bytes + the index.
-- **Progress.** The PDF-download phase shows a live per-family progress bar on
-  stderr (`<year> ptr: [####....] 123/451`, then `fd`), so the operator can see
-  where the crawl is in each data type; per-file chatter is folded into the bar
-  and an end-of-year summary. Suppressed when stderr is not a TTY (piped/logged).
+- **Progress.** The PDF-download phase shows a per-data-type `tqdm` progress bar
+  on stderr (`2024 ptr: …`, then `fd`) with a **measured ETA and rate**, so a
+  multi-hour crawl shows how long it has left (and a slow link is reflected); per-
+  file chatter is folded into the bar plus an end-of-year summary. Auto-suppressed
+  when stderr is not a TTY (piped/logged).
 - **Flags:** `--types ptr,fd` (default both), `--index-only`, `--data-dir PATH`
   (default `./data`), `--delay SECONDS` (default 2.5), `--concurrency N`
   (default 1 — exceeding the defaults is a deliberate, documented user choice),

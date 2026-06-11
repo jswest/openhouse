@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 import httpx
+from tqdm import tqdm
 
 from . import __version__
 from .index import IndexTarget, enumerate_targets
@@ -349,19 +350,26 @@ def pull_pdfs_year(
             targets = by_family[family]
             if family not in selected or not targets:
                 continue
-            total = len(targets)
-            # Live per-family bar so the operator can see where the crawl is in
-            # each data type; skips/backfills make it race ahead on a resume —
-            # exactly the "where are we" signal wanted. (TTY only; see helper.)
-            _render_progress(year, family, 0, total)
-            for done, target in enumerate(targets, start=1):
+            # A tqdm bar per data type (ptr, then fd) with a *measured* ETA, so a
+            # ~95-min crawl shows how long it has left (and a slow link is
+            # reflected, unlike a fixed-pace estimate). On a resume the instant
+            # skips race the bar ahead — exactly the "where are we" signal. tqdm
+            # auto-disables off a TTY (``disable=None``), so piped/redirected runs
+            # stay clean, matching the old behaviour.
+            progress = tqdm(
+                targets,
+                desc=f"{year} {family}",
+                unit="pdf",
+                file=sys.stderr,
+                disable=None,
+                leave=True,
+            )
+            for target in progress:
                 outcome = _process_pdf_target(
                     target, manifest, year_dir, client, fetched_at,
                     force=force, delay=delay, sleep=sleep,
                 )
                 counts[outcome] += 1
-                _render_progress(year, family, done, total)
-            _finish_progress(year, family, total)
     finally:
         _write_manifest(manifest_path, manifest, year, fetched_at)
 
@@ -457,38 +465,6 @@ def _process_pdf_target(
         "fetched_at": fetched_at,
     }
     return "fetched"
-
-
-_PROGRESS_WIDTH = 28
-
-
-def _render_progress(year: int, family: str, done: int, total: int) -> None:
-    """Draw a live per-family progress bar on stderr, in place (TTY only).
-
-    No-op when stderr is not a TTY (piped / redirected) so logs aren't polluted
-    with carriage returns — the per-family and per-year summary lines carry the
-    information there instead.
-    """
-    if total == 0 or not sys.stderr.isatty():
-        return
-    filled = _PROGRESS_WIDTH * done // total
-    bar = "#" * filled + "." * (_PROGRESS_WIDTH - filled)
-    print(
-        f"\r{year} {family}: [{bar}] {done}/{total} ({100 * done // total:3d}%)",
-        end="",
-        file=sys.stderr,
-        flush=True,
-    )
-
-
-def _finish_progress(year: int, family: str, total: int) -> None:
-    """Close a family's progress line with a completed summary (TTY or not).
-
-    On a TTY the leading ``\\r`` overwrites the live bar with the final line; in
-    a log it's a plain line, so non-interactive runs still get per-family marks.
-    """
-    prefix = "\r" if sys.stderr.isatty() else ""
-    print(f"{prefix}{year} {family}: {total}/{total} done.", file=sys.stderr)
 
 
 def _record_404(

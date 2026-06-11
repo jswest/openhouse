@@ -654,27 +654,27 @@ def test_pdf_no_part_files_left_after_a_clean_run(tmp_path):
     assert list((tmp_path / "raw" / "2024").rglob("*.part")) == []
 
 
-def test_pdf_progress_summarizes_each_family(tmp_path, capsys):
-    """Each data type (ptr, fd) gets its own completed-progress line on stderr."""
+def test_pdf_year_summary_reports_counts(tmp_path, capsys):
+    """The per-year summary line carries the totals (TTY-independent)."""
     write_index(tmp_path)
     client = make_client(pdf_handler())
     result = pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
 
     err = capsys.readouterr().err
-    # One "done" line per family (the live bar itself is TTY-only / suppressed
-    # under pytest capture, so we assert the durable per-family summary).
-    assert "2024 ptr: 1/1 done." in err
-    assert "2024 fd: 4/4 done." in err
+    assert "2024: PDFs — 5 fetched" in err
     # Family grouping didn't change the totals.
     assert result["fetched"] == 5
 
 
 def test_pdf_progress_bar_renders_on_a_tty(tmp_path, monkeypatch):
-    """When stderr is a TTY, a live bar with the family + a percentage is drawn."""
+    """On a TTY, tqdm draws a per-family bar (desc + percentage); off a TTY it
+    auto-disables so logs stay clean."""
     write_index(tmp_path)
     chunks: list[str] = []
 
     class FakeTTY:
+        encoding = "utf-8"
+
         def isatty(self):
             return True
 
@@ -689,6 +689,6 @@ def test_pdf_progress_bar_renders_on_a_tty(tmp_path, monkeypatch):
     pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
 
     out = "".join(chunks)
-    assert "\r" in out  # the bar redraws in place
-    assert "2024 fd:" in out
-    assert "[" in out and "]" in out and "%" in out  # a real bar with a percent
+    assert "\r" in out  # tqdm redraws the bar in place
+    assert "2024 ptr" in out and "2024 fd" in out  # one bar per data type
+    assert "%" in out and "pdf" in out  # a percentage and the unit label
