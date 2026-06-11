@@ -5,14 +5,14 @@ counterpart to ``pull``: it reads only ``raw/<year>/`` and writes only
 ``parsed/<year>/``, never touching the Clerk or the wall clock (the single
 entry-time ``fetched_at`` is threaded in, SPEC §9).
 
-Scope here (#6) is **metadata only** — every ``<Member>`` becomes a
+Two passes run here, both offline. First every ``<Member>`` becomes a
 schema-validated :class:`~openhouse.schemas.FilingMetadata` record with a
-computed ``filer_id`` (SPEC §6.2), and identity collisions are surfaced. The
-per-PDF classification pass (efiled / scanned / missing) + body extraction is #7
-(v0.3.0); the CLI flags ``--types`` / ``--strict`` are accepted now (so #7 needs
-not touch ``cli.py``) but do not yet change behavior. The manifest is shaped so
-#7 can ADD a ``pdf_class`` breakdown and ``parse_status`` tally without reshaping
-what is written here.
+computed ``filer_id`` (SPEC §6.2) and identity collisions are surfaced; then each
+on-disk PDF is classified ``efiled`` / ``scanned`` / ``missing`` by authoritative
+text extraction (SPEC §2.2). Body/field extraction is deferred to v0.3.0 — an
+``efiled`` PDF is classified, but its body stays ``null``. ``--types`` restricts
+which families are classified (out-of-scope filings stay unclassified yet still
+count toward the total); ``--strict`` exits non-zero if any filing errored.
 """
 
 from __future__ import annotations
@@ -31,6 +31,12 @@ from .schemas import SCHEMA_VERSION, UNKNOWN_FILING_LABEL, FilingMetadata
 # "exit non-zero if any filing errors"). Distinct from the argument-validation
 # exit (2, in cli.py) so the two failure modes are tellable apart.
 STRICT_ERROR_EXIT = 1
+
+# Exit code when *no* year in the range produced output (every year's index was
+# absent). A bare ``openhouse parse 2024`` that silently exits 0 having written
+# nothing is a footgun for `parse … && next-step`; non-zero says "nothing parsed".
+# A range where *some* years parsed and some were skipped still exits 0 (graceful).
+NOTHING_PARSED_EXIT = 1
 
 
 class ParseError(Exception):
@@ -99,6 +105,16 @@ def _detect_identity_warnings(records: list[FilingMetadata]) -> list[dict]:
     return warnings
 
 
+def _unparsed_entry(rec: FilingMetadata, reason: str) -> dict:
+    """One unparsed-manifest entry (SPEC §6.5).
+
+    Carries ``filer_id`` alongside ``doc_id`` so a no-DocID row (``doc_id == ""``)
+    — of which a year can have several — is still joinable back to its
+    ``filings.json`` record, which a bare empty ``doc_id`` could not do.
+    """
+    return {"doc_id": rec.doc_id, "filer_id": rec.filer_id, "reason": reason}
+
+
 def _classify_records(
     records: list[FilingMetadata], *, data_dir: Path, types: list[str]
 ) -> list[dict]:
@@ -139,7 +155,7 @@ def _classify_records(
             # No DocID → no body was ever fetchable; treat as missing (SPEC §6.5).
             rec.pdf_class = "missing"
             rec.parse_status = "ok"
-            unparsed.append({"doc_id": rec.doc_id, "reason": "missing"})
+            unparsed.append(_unparsed_entry(rec, "missing"))
         else:
             pdf_path = data_dir / rec.source_pdf
             try:
@@ -147,17 +163,17 @@ def _classify_records(
             except PdfExtractError:
                 rec.pdf_class = None
                 rec.parse_status = "error"
-                unparsed.append({"doc_id": rec.doc_id, "reason": "extract_failed"})
+                unparsed.append(_unparsed_entry(rec, "extract_failed"))
             else:
                 rec.pdf_class = pdf_class
                 rec.parse_status = "ok"
                 if pdf_class in ("scanned", "missing"):
-                    unparsed.append({"doc_id": rec.doc_id, "reason": pdf_class})
+                    unparsed.append(_unparsed_entry(rec, pdf_class))
 
         # Unknown FilingType is its own unparsed reason, independent of the PDF
         # outcome (the raw code is preserved on the record, never dropped).
         if in_scope and rec.filing_type.label == UNKNOWN_FILING_LABEL:
-            unparsed.append({"doc_id": rec.doc_id, "reason": "unknown_type"})
+            unparsed.append(_unparsed_entry(rec, "unknown_type"))
 
     return unparsed
 
@@ -322,6 +338,18 @@ def parse(
     stderr. With ``strict``, returns :data:`STRICT_ERROR_EXIT` if any filing in
     any year errored (``parse_status="error"``); otherwise returns ``0``.
     """
+    # A --types subset leaves the excluded family unclassified; `parse` rewrites
+    # filings.json wholesale ("re-parse, not migrate"), so a later partial run
+    # downgrades the other family's prior classification. Say so once, up front.
+    excluded = [f for f in ("ptr", "fd") if f not in types]
+    if excluded:
+        print(
+            f"note: --types excludes {', '.join(excluded)}; those filings are left "
+            f"unclassified (pdf_class=null) and a re-run without --types is needed "
+            f"for full classification.",
+            file=sys.stderr,
+        )
+
     summaries: list[dict] = []
     skipped: list[int] = []
     for year in years:
@@ -342,6 +370,15 @@ def parse(
         "skipped_years": skipped,
     }
     print(json.dumps(combined, indent=2, sort_keys=True))
+
+    if not summaries:
+        # Nothing was parsed at all — every requested year's index was missing.
+        print(
+            f"error: no years parsed; indices absent for {skipped} "
+            f"(run `openhouse pull` first).",
+            file=sys.stderr,
+        )
+        return NOTHING_PARSED_EXIT
 
     if strict and any_error:
         print(

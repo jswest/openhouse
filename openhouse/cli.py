@@ -1,9 +1,10 @@
 """Command-line interface: arg parsing, the shared year-range parser, dispatch.
 
-``pull`` now implements the full acquisition path — the index ZIP (issue #3) and
-the PDF bodies routed by FilingType (issue #4); ``parse`` / ``read`` remain stubs
-that print "not implemented" to stderr and exit non-zero, landing in later
-sub-issues.
+``pull`` implements the full acquisition path — the index ZIP (issue #3) and the
+PDF bodies routed by FilingType (issue #4). ``parse`` implements the offline
+normalization + PDF-classification pass (issues #6/#7); ``read`` remains a stub
+that prints "not implemented" to stderr and exits non-zero, landing in a later
+milestone.
 
 The year-range parser is shared infrastructure (SPEC §9). It is kept pure and
 wall-clock-free by taking ``current_year`` as a parameter, so it is testable
@@ -211,14 +212,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--types",
         default="ptr,fd",
         help=(
-            "comma-separated families to parse: ptr, fd, or both "
-            "(default: ptr,fd); reserved for the per-PDF body pass"
+            "comma-separated families to classify: ptr, fd, or both "
+            "(default: ptr,fd); an excluded family is left unclassified"
         ),
     )
     parse_p.add_argument(
         "--strict",
         action="store_true",
-        help="exit non-zero if any filing errors (reserved for the per-PDF pass)",
+        help="exit non-zero if any filing errors (e.g. a corrupt PDF)",
     )
 
     read_p = subparsers.add_parser(

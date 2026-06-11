@@ -28,9 +28,11 @@ four committed fixtures, the smallest e-filed body yields ~960 non-whitespace
 chars; both scanned bodies yield 0.
 
 The DocID-prefix heuristic (8-digit `1`/`2`/`3`/`4` → likely e-filed; 7-digit
-`8`/`9` → likely paper) is exposed as a separate `predict_from_doc_id()` helper
-and is a **fast pre-filter only** — it never makes the decision. `classify()`
-always decides by extraction.
+`8`/`9` → likely paper) is documented in SPEC §2.2 as a **fast pre-filter only**;
+it never makes the decision. `classify()` always decides by extraction. (An
+initial `predict_from_doc_id()` helper encoding the heuristic was cut in the
+`simplify-refactor` gate as currently-unused — it had no production consumer, and
+extraction-as-authoritative is independent of it; SPEC §2.2 keeps the knowledge.)
 
 ### Threshold: >= 20 non-whitespace chars → efiled
 

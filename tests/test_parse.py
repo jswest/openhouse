@@ -332,3 +332,38 @@ def test_no_strict_returns_zero_even_with_error(tmp_path, capsys):
         [2020], data_dir=tmp_path, types=["ptr", "fd"], strict=False, fetched_at=FETCHED_AT
     )
     assert rc == 0
+
+
+# --- integrator fixes (critic pass 1) -------------------------------------
+
+
+def test_parse_all_years_missing_returns_nonzero(tmp_path, capsys):
+    # Nothing pulled at all → `parse` must not report success (exit 0), or a
+    # `parse … && next-step` proceeds on no output. (A *partial* skip still 0.)
+    rc = parse(
+        [2024, 2025], data_dir=tmp_path, types=["ptr", "fd"], strict=False,
+        fetched_at=FETCHED_AT,
+    )
+    assert rc != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["years"] == []
+    assert out["skipped_years"] == [2024, 2025]
+
+
+def test_unparsed_entries_carry_filer_id(tmp_path):
+    # filer_id on every unparsed entry keeps no-DocID rows (doc_id == "") joinable.
+    _seed_classify_year(tmp_path)
+    parse_year(2020, data_dir=tmp_path, fetched_at=FETCHED_AT)
+    unparsed = json.loads(
+        (tmp_path / "parsed" / "2020" / "unparsed-manifest.json").read_text()
+    )["unparsed"]
+    assert unparsed  # scanned + missing entries exist
+    for entry in unparsed:
+        assert set(entry) == {"doc_id", "filer_id", "reason"}
+        assert entry["filer_id"]  # non-empty
+
+
+def test_types_partial_run_emits_stderr_note(tmp_path, capsys):
+    _seed_classify_year(tmp_path)
+    parse([2020], data_dir=tmp_path, types=["ptr"], strict=False, fetched_at=FETCHED_AT)
+    assert "--types excludes fd" in capsys.readouterr().err
