@@ -1,0 +1,27 @@
+# Disclosure data lives outside version control — it's bulky, regenerable
+# (`openhouse pull`/`parse`), and carries the §1 legal use restriction.
+data/
+
+.DS_Store
+.env
+.idea
+.venv
+.vscode
+__pycache__
+*.py[oc]
+*.swo
+*.swp
+*.egg-info
+build
+dist
+wheels/
+Thumbs.db
+
+# .claude/ holds both shared tooling (tracked below) and personal/transient
+# state (ignored). Ignore everything, then re-include the shared artifacts.
+.claude/*
+!.claude/agents/
+!.claude/hooks/
+!.claude/settings.json
+!.claude/skills/
+.claude/scratch
