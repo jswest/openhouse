@@ -183,13 +183,28 @@ openhouse pull 2024 --index-only
 
 - **Idempotent / resumable.** Skip files already present and size-consistent; a
   re-run only fetches what's missing or changed. Safe to Ctrl-C and resume.
-- **Polite crawling.** Bounded concurrency (default ~4), small inter-request delay,
-  descriptive `User-Agent`, exponential backoff on `429`/`5xx`, and a hard stop with
-  a clear message on repeated `403`. (✅ verified: a descriptive UA gets clean 200s;
-  keep the polite defaults anyway.)
+- **Polite crawling.** **Sequential (concurrency 1) with 2.5 s between requests,
+  by default.** Grounding: the House publishes no crawl policy (no robots.txt on
+  either Clerk domain — verified), there is **no bulk PDF download** (the yearly
+  ZIP is index-only), and the nearest published legislative-branch standard is
+  congress.gov's `Crawl-delay: 2`; we default just above it. Cost at default:
+  ~95 min for 2024 (2,251 filings), ~26 h for the full 2008→present corpus —
+  acceptable because `pull` is resumable, chunkable by year, and one-time.
+  Plus: exponential backoff on `429`/`5xx` (the server is asking us to retry
+  later); a `403` is an **immediate hard error — never retried, no backoff**
+  (the server is refusing us; hammering it again is the opposite of polite).
+  The error message explains likely causes (UA, pacing) and exits non-zero.
+  (✅ verified: a descriptive UA gets clean 200s; keep the polite defaults
+  anyway.)
+- **User-Agent flow.** Default `openhouse/<version>
+  (+https://github.com/jswest/openhouse)`; `OPENHOUSE_CONTACT` env (or
+  `--contact`) appends `; contact: <email>`; `--user-agent` overrides entirely.
+  `pull` logs the UA in use to stderr at startup.
 - **No parsing of PDF bodies here.** `pull` only acquires bytes + the index.
 - **Flags:** `--types ptr,fd` (default both), `--index-only`, `--data-dir PATH`
-  (default `./data`), `--concurrency N`, `--force` (re-download).
+  (default `./data`), `--delay SECONDS` (default 2.5), `--concurrency N`
+  (default 1 — exceeding the defaults is a deliberate, documented user choice),
+  `--contact EMAIL`, `--user-agent STRING`, `--force` (re-download).
 
 ---
 

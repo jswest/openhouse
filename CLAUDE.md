@@ -24,9 +24,11 @@ Clerk into normalized JSON: `pull` (network) → `parse` (offline) → `read`
 - **JSON to stdout; prose/progress to stderr; non-zero exit on error.** Machine
   output is the contract (`jq`-composable, agent-consumable); `--table` is
   garnish for humans.
-- **Polite crawling defaults are load-bearing** — descriptive User-Agent,
-  ~4 concurrency, inter-request delay, backoff. Don't strip them to go faster;
-  the Clerk's site has 403'd naive clients.
+- **Polite crawling defaults are load-bearing** — sequential, 2.5 s between
+  requests (grounded in congress.gov's published `Crawl-delay: 2`; the House
+  publishes no policy of its own), descriptive User-Agent with contact flow,
+  backoff. Don't strip them to go faster; the Clerk's site has 403'd naive
+  clients, and there is no bulk PDF download to fall back on.
 - **Schema changes mean re-parse, not migrate.** Pre-v1 there is no backwards
   compatibility: bump the schema version recorded in `parse-manifest.json`,
   delete old code, re-run `parse` from `raw/`. That re-parse is cheap and
