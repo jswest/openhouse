@@ -180,7 +180,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--contact",
         default=None,
         help=(
-            "contact email appended to the User-Agent (or set OPENHOUSE_CONTACT)"
+            'REQUIRED: your name and email for the User-Agent, e.g. '
+            '"Jane Doe <jane@example.com>" (or set OPENHOUSE_CONTACT). The Clerk '
+            "blocks anonymous shared clients, so an operator must be identifiable. "
+            "Bypass only with --user-agent."
         ),
     )
     pull_p.add_argument(

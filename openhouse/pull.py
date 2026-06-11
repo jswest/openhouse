@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import sys
 import time
 import zipfile
@@ -74,6 +75,11 @@ BACKOFF_BASE_SECONDS = 1.0
 
 REPO_URL = "https://github.com/jswest/openhouse"
 
+# A loose email matcher for the required contact — enough to insist a real
+# address is present (not RFC-perfect validation, which would reject valid
+# addresses and isn't the point: the Clerk just needs a reachable operator).
+_CONTACT_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
 
 class PullError(Exception):
     """A pull failed in a way the user must see (printed to stderr, non-zero exit)."""
@@ -88,17 +94,46 @@ def build_user_agent(
 ) -> str:
     """Construct the User-Agent header per the SPEC §3 flow.
 
-    - ``user_agent`` (``--user-agent``) overrides everything when given.
-    - otherwise the default is ``openhouse/<version> (+<repo>)``;
-    - ``contact`` (``--contact`` / ``OPENHOUSE_CONTACT``) appends
-      ``; contact: <email>``.
+    - ``user_agent`` (``--user-agent``) overrides everything when given — the
+      caller takes full responsibility for identifying themselves.
+    - otherwise a **contact (name + email)** is **required** and the header is
+      ``openhouse/<version> (+<repo>; contact: <Name> <email>)``.
+
+    The contact is mandatory because the repo URL alone is the *same* for every
+    operator: an anonymous shared User-Agent gives the Clerk no way to tell
+    concurrent crawlers apart, so it may rate-limit or block all of them at once.
+    A real name + email lets a server admin reach the actual operator instead.
+    Raises :class:`PullError` (never crawls) if the contact is missing or lacks
+    either a name or an email.
     """
     if user_agent:
         return user_agent
-    ua = f"openhouse/{__version__} (+{REPO_URL})"
-    if contact:
-        ua = f"{ua}; contact: {contact}"
-    return ua
+    if not contact or not contact.strip():
+        raise PullError(
+            "pull needs a contact so the Clerk can identify who is crawling. "
+            "Without one, every openhouse user shares one anonymous User-Agent — "
+            "the Clerk can't tell concurrent operators apart and may block all of "
+            "them at once. Provide your name and email via "
+            '--contact "Your Name <you@example.com>" or the OPENHOUSE_CONTACT '
+            "environment variable. (Or pass --user-agent to set the whole header "
+            "yourself.)"
+        )
+    contact = contact.strip()
+    match = _CONTACT_EMAIL_RE.search(contact)
+    if not match:
+        raise PullError(
+            f"--contact {contact!r} has no email address. The Clerk needs a real "
+            'contact — pass a name and email, e.g. '
+            '--contact "Jane Doe <jane@example.com>".'
+        )
+    name = contact.replace(match.group(0), "").strip(" \t<>")
+    if not name:
+        raise PullError(
+            f"--contact {contact!r} has no name. The Clerk needs a person to "
+            'reach, not just an inbox — e.g. --contact "Jane Doe '
+            '<jane@example.com>".'
+        )
+    return f"openhouse/{__version__} (+{REPO_URL}; contact: {contact})"
 
 
 # ---------------------------------------------------------------------------
@@ -295,96 +330,170 @@ def pull_pdfs_year(
     # 404s) so a Ctrl-C mid-year never loses what was already learned.
     manifest = _load_manifest(manifest_path)
 
-    fetched = skipped = not_found = filtered = backfilled = 0
+    # Group the selected targets by data type (family) so each gets its own
+    # progress bar; everything outside the requested --types is `filtered`.
+    by_family: dict[str, list[IndexTarget]] = {fam: [] for fam in PDF_FAMILIES}
+    filtered = 0
+    for target in enumerate_targets(xml_path, year):
+        if target.family in selected and target.family in by_family:
+            by_family[target.family].append(target)
+        else:
+            filtered += 1
+
+    counts = {"fetched": 0, "backfilled": 0, "skipped": 0, "not_found": 0}
     # The manifest is written in a ``finally`` so an interrupted year (Ctrl-C, a
     # 403, exhausted backoff) never loses what was already fetched — on resume
     # the on-disk files are reconciled against it (SPEC §3: safe to Ctrl-C).
     try:
-        for target in enumerate_targets(xml_path, year):
-            if target.family not in selected:
-                filtered += 1
+        for family in PDF_FAMILIES:
+            targets = by_family[family]
+            if family not in selected or not targets:
                 continue
-
-            entry = manifest.get(target.doc_id)
-            dest = year_dir / target.family / f"{target.doc_id}.pdf"
-
-            if not force:
-                # A previously recorded 404 has no file and no PDF to fetch;
-                # honor the recorded gap without re-requesting a known-dead URL
-                # (SPEC §11: a second run fetches nothing).
-                if entry is not None and entry.get("status") == 404:
-                    not_found += 1
-                    continue
-                if dest.exists() and dest.stat().st_size > 0:
-                    size = dest.stat().st_size
-                    if entry is not None and entry.get("bytes") == size:
-                        # Present and size-consistent with the manifest → skip.
-                        skipped += 1
-                        continue
-                    if entry is None:
-                        # On disk but unrecorded — a prior run's manifest write
-                        # was lost. Backfill from the file itself (its real size
-                        # + sha256) so it is never an unrecorded gap, rather than
-                        # re-download it.
-                        manifest[target.doc_id] = _entry_from_disk(
-                            target, pdf_url_for(target), dest, fetched_at
-                        )
-                        backfilled += 1
-                        continue
-                    # Present but size disagrees with the manifest → a partial /
-                    # corrupt transfer; fall through and re-download it.
-
-            url = pdf_url_for(target)
-            # Pace before every *network* request (polite floor, SPEC §3).
-            # Skipped / filtered / recorded-404 targets cost no request, so they
-            # consume no pacing delay; the across-year delay is held separately
-            # by pull()'s per-year sleep.
-            sleep(delay)
-            response = polite_get(client, url, sleep=sleep, allow_not_found=True)
-            if response.status_code == 404:
-                # A 404 is the one non-fatal HTTP outcome — some index rows have
-                # no PDF. Record it with its status (a gap, never silent).
-                _record_404(manifest, target, url, fetched_at)
-                not_found += 1
-                continue
-
-            content = response.content
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(content)
-            manifest[target.doc_id] = {
-                "doc_id": target.doc_id,
-                "filing_type": target.filing_type,
-                "family": target.family,
-                "url": url,
-                "status": response.status_code,
-                "bytes": len(content),
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "fetched_at": fetched_at,
-            }
-            fetched += 1
+            total = len(targets)
+            # Live per-family bar so the operator can see where the crawl is in
+            # each data type; skips/backfills make it race ahead on a resume —
+            # exactly the "where are we" signal wanted. (TTY only; see helper.)
+            _render_progress(year, family, 0, total)
+            for done, target in enumerate(targets, start=1):
+                outcome = _process_pdf_target(
+                    target, manifest, year_dir, client, fetched_at,
+                    force=force, delay=delay, sleep=sleep,
+                )
+                counts[outcome] += 1
+                _render_progress(year, family, done, total)
+            _finish_progress(year, family, total)
     finally:
         _write_manifest(manifest_path, manifest, year, fetched_at)
 
     print(
-        f"{year}: PDFs — {fetched} fetched, {backfilled} backfilled, "
-        f"{skipped} present/skipped, {not_found} not-found, {filtered} filtered "
+        f"{year}: PDFs — {counts['fetched']} fetched, "
+        f"{counts['backfilled']} backfilled, {counts['skipped']} present/skipped, "
+        f"{counts['not_found']} not-found, {filtered} filtered "
         f"(manifest: {manifest_path}).",
         file=sys.stderr,
     )
     return {
         "year": year,
-        "fetched": fetched,
-        "backfilled": backfilled,
-        "skipped": skipped,
-        "not_found": not_found,
+        "fetched": counts["fetched"],
+        "backfilled": counts["backfilled"],
+        "skipped": counts["skipped"],
+        "not_found": counts["not_found"],
         "filtered": filtered,
     }
+
+
+def _process_pdf_target(
+    target: IndexTarget,
+    manifest: dict,
+    year_dir: Path,
+    client: httpx.Client,
+    fetched_at: str,
+    *,
+    force: bool,
+    delay: float,
+    sleep: Callable[[float], None],
+) -> str:
+    """Acquire one PDF target, mutating ``manifest``; return its outcome.
+
+    Outcome is one of ``"fetched"`` / ``"backfilled"`` / ``"skipped"`` /
+    ``"not_found"`` (the progress bar and year summary tally these). The
+    resumability rules live here: a recorded 404 or a size-consistent present
+    file is honored with no request; a present-but-unrecorded file is backfilled
+    from disk; a size-mismatched file is re-downloaded. Raises :class:`PullError`
+    on a 403 / exhausted backoff via :func:`polite_get`.
+    """
+    entry = manifest.get(target.doc_id)
+    dest = year_dir / target.family / f"{target.doc_id}.pdf"
+
+    if not force:
+        # A previously recorded 404 has no file and no PDF to fetch; honor the
+        # recorded gap without re-requesting a known-dead URL (SPEC §11).
+        if entry is not None and entry.get("status") == 404:
+            return "not_found"
+        if dest.exists() and dest.stat().st_size > 0:
+            size = dest.stat().st_size
+            if entry is not None and entry.get("bytes") == size:
+                return "skipped"  # present and size-consistent with the manifest
+            if entry is None:
+                # On disk but unrecorded — a prior run's manifest write was lost.
+                # Backfill from the file itself (its real size + sha256) rather
+                # than re-download it or leave an unrecorded gap.
+                manifest[target.doc_id] = _entry_from_disk(
+                    target, pdf_url_for(target), dest, fetched_at
+                )
+                return "backfilled"
+            # Present but size disagrees with the manifest → a partial / corrupt
+            # transfer; fall through and re-download it.
+
+    url = pdf_url_for(target)
+    # Pace before every *network* request (polite floor, SPEC §3). Skipped /
+    # backfilled / recorded-404 targets cost no request, so they consume no
+    # pacing delay; the across-year delay is held separately by pull().
+    sleep(delay)
+    response = polite_get(client, url, sleep=sleep, allow_not_found=True)
+    if response.status_code == 404:
+        # A 404 is the one non-fatal HTTP outcome — some index rows have no PDF.
+        # Record it with its status (a gap, never silent).
+        _record_404(manifest, target, url, fetched_at)
+        return "not_found"
+
+    content = response.content
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+    manifest[target.doc_id] = {
+        "doc_id": target.doc_id,
+        "filing_type": target.filing_type,
+        "family": target.family,
+        "url": url,
+        "status": response.status_code,
+        "bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "fetched_at": fetched_at,
+    }
+    return "fetched"
+
+
+_PROGRESS_WIDTH = 28
+
+
+def _render_progress(year: int, family: str, done: int, total: int) -> None:
+    """Draw a live per-family progress bar on stderr, in place (TTY only).
+
+    No-op when stderr is not a TTY (piped / redirected) so logs aren't polluted
+    with carriage returns — the per-family and per-year summary lines carry the
+    information there instead.
+    """
+    if total == 0 or not sys.stderr.isatty():
+        return
+    filled = _PROGRESS_WIDTH * done // total
+    bar = "#" * filled + "." * (_PROGRESS_WIDTH - filled)
+    print(
+        f"\r{year} {family}: [{bar}] {done}/{total} ({100 * done // total:3d}%)",
+        end="",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _finish_progress(year: int, family: str, total: int) -> None:
+    """Close a family's progress line with a completed summary (TTY or not).
+
+    On a TTY the leading ``\\r`` overwrites the live bar with the final line; in
+    a log it's a plain line, so non-interactive runs still get per-family marks.
+    """
+    prefix = "\r" if sys.stderr.isatty() else ""
+    print(f"{prefix}{year} {family}: {total}/{total} done.", file=sys.stderr)
 
 
 def _record_404(
     manifest: dict, target: IndexTarget, url: str, fetched_at: str
 ) -> None:
-    """Record a non-fatal 404 in the manifest (a recorded gap, never silent)."""
+    """Record a non-fatal 404 in the manifest (a recorded gap, never silent).
+
+    Deliberately quiet: a per-404 stderr line would shred the live progress bar,
+    and the durable record is the manifest entry — the per-year summary reports
+    the not-found count.
+    """
     manifest[target.doc_id] = {
         "doc_id": target.doc_id,
         "filing_type": target.filing_type,
@@ -395,11 +504,6 @@ def _record_404(
         "sha256": None,
         "fetched_at": fetched_at,
     }
-    print(
-        f"{target.year}: 404 (no PDF) for {target.doc_id} [{target.filing_type}] "
-        f"at {url}; recorded in manifest, continuing.",
-        file=sys.stderr,
-    )
 
 
 def _entry_from_disk(

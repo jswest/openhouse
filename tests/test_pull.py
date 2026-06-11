@@ -36,6 +36,9 @@ from openhouse.pull import (
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# A valid operator contact (name + email) — required for every real pull.
+CONTACT = "Jane Doe <jane@example.com>"
+
 
 def make_index_zip(year: int = 2024) -> bytes:
     """Build an in-memory ``<year>FD.zip`` from the trimmed fixtures."""
@@ -61,21 +64,34 @@ def no_sleep(_seconds: float) -> None:
 # ---------------------------------------------------------------------------
 # User-Agent construction (SPEC §3)
 # ---------------------------------------------------------------------------
-def test_ua_default():
-    ua = build_user_agent()
+def test_ua_requires_a_contact():
+    # No contact → pull refuses to crawl (a shared anonymous UA gets blocked).
+    with pytest.raises(PullError) as exc:
+        build_user_agent()
+    assert "contact" in str(exc.value).lower()
+
+
+def test_ua_contact_requires_an_email():
+    with pytest.raises(PullError):
+        build_user_agent(contact="Jane Doe")  # a name but no email
+
+
+def test_ua_contact_requires_a_name():
+    with pytest.raises(PullError):
+        build_user_agent(contact="jane@example.com")  # an email but no name
+
+
+def test_ua_includes_name_and_email():
+    ua = build_user_agent(contact=CONTACT)
     assert ua.startswith("openhouse/")
     assert "+https://github.com/jswest/openhouse" in ua
-    assert "contact:" not in ua
-
-
-def test_ua_contact_appends():
-    ua = build_user_agent(contact="john@example.com")
-    assert ua.startswith("openhouse/")
-    assert ua.endswith("; contact: john@example.com")
+    assert f"contact: {CONTACT}" in ua
 
 
 def test_ua_user_agent_overrides_entirely():
-    ua = build_user_agent(contact="john@example.com", user_agent="custom/9.9")
+    # The full override bypasses the contact requirement — the caller owns the
+    # header and takes responsibility for identifying themselves.
+    ua = build_user_agent(user_agent="custom/9.9")
     assert ua == "custom/9.9"
 
 
@@ -231,6 +247,7 @@ def test_pull_index_only_multiyear_paces_between_years(tmp_path):
         [2023, 2024],
         data_dir=tmp_path,
         index_only=True,
+        contact=CONTACT,
         client=client,
         sleep=sleeps.append,
         delay=2.5,
@@ -257,6 +274,7 @@ def test_pull_without_index_only_fetches_index_then_pdfs(tmp_path, capsys):
         [2024],
         data_dir=tmp_path,
         index_only=False,
+        contact=CONTACT,
         fetched_at="2026-06-11T00:00:00",
         client=client,
         sleep=no_sleep,
@@ -279,13 +297,13 @@ def test_pull_logs_user_agent(tmp_path, capsys):
         [2024],
         data_dir=tmp_path,
         index_only=True,
-        contact="john@example.com",
+        contact="John West <john@example.com>",
         client=client,
         sleep=no_sleep,
     )
     err = capsys.readouterr().err
     assert "User-Agent:" in err
-    assert "contact: john@example.com" in err
+    assert "contact: John West <john@example.com>" in err
 
 
 def test_pull_403_propagates_as_error(tmp_path):
@@ -298,6 +316,7 @@ def test_pull_403_propagates_as_error(tmp_path):
             [2024],
             data_dir=tmp_path,
             index_only=True,
+            contact=CONTACT,
             client=client,
             sleep=no_sleep,
         )
@@ -593,9 +612,50 @@ def test_concurrency_override_warns_not_implemented(tmp_path, capsys):
         data_dir=tmp_path,
         index_only=True,
         concurrency=4,
+        contact=CONTACT,
         client=client,
         sleep=no_sleep,
     )
     err = capsys.readouterr().err
     assert "not yet implemented" in err
     assert "running sequentially" in err
+
+
+def test_pdf_progress_summarizes_each_family(tmp_path, capsys):
+    """Each data type (ptr, fd) gets its own completed-progress line on stderr."""
+    write_index(tmp_path)
+    client = make_client(pdf_handler())
+    result = pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    err = capsys.readouterr().err
+    # One "done" line per family (the live bar itself is TTY-only / suppressed
+    # under pytest capture, so we assert the durable per-family summary).
+    assert "2024 ptr: 1/1 done." in err
+    assert "2024 fd: 4/4 done." in err
+    # Family grouping didn't change the totals.
+    assert result["fetched"] == 5
+
+
+def test_pdf_progress_bar_renders_on_a_tty(tmp_path, monkeypatch):
+    """When stderr is a TTY, a live bar with the family + a percentage is drawn."""
+    write_index(tmp_path)
+    chunks: list[str] = []
+
+    class FakeTTY:
+        def isatty(self):
+            return True
+
+        def write(self, s):
+            chunks.append(s)
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(pull_mod.sys, "stderr", FakeTTY())
+    client = make_client(pdf_handler())
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    out = "".join(chunks)
+    assert "\r" in out  # the bar redraws in place
+    assert "2024 fd:" in out
+    assert "[" in out and "]" in out and "%" in out  # a real bar with a percent
