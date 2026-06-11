@@ -1,0 +1,6 @@
+Prefix	Last	First	Suffix	FilingType	StateDst	Year	FilingDate	DocID
+Hon.	Allen	Richard W.		O	GA12	2024	4/29/2025	10066961
+	Adams	Alma S.		P	NC12	2024	5/15/2024	20024277
+	Norton	Eleanor Holmes		C	DC00	2024	5/15/2024	10067000
+	Gonzalez-Colon	Jenniffer		X	PR00	2024	5/15/2024	30022163
+	Doe	Maryam.		W		2024		7940

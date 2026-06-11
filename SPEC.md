@@ -196,15 +196,28 @@ openhouse pull 2024 --index-only
   The error message explains likely causes (UA, pacing) and exits non-zero.
   (✅ verified: a descriptive UA gets clean 200s; keep the polite defaults
   anyway.)
-- **User-Agent flow.** Default `openhouse/<version>
-  (+https://github.com/jswest/openhouse)`; `OPENHOUSE_CONTACT` env (or
-  `--contact`) appends `; contact: <email>`; `--user-agent` overrides entirely.
-  `pull` logs the UA in use to stderr at startup.
+- **User-Agent flow.** A contact is **required**: the operator's **name and
+  email**, via `--contact "Jane Doe <jane@example.com>"` or the
+  `OPENHOUSE_CONTACT` env var, producing
+  `openhouse/<version> (+https://github.com/jswest/openhouse; contact: <Name>
+  <email>)`. The contact is mandatory because the repo URL alone is identical for
+  every operator — an anonymous shared User-Agent gives the Clerk no way to tell
+  concurrent crawlers apart, so it may rate-limit or block all of them at once; a
+  real name + email lets an admin reach the actual operator. `pull` refuses to
+  crawl (non-zero exit, explanatory message) when the contact is missing or lacks
+  a name or email. `--user-agent` overrides the whole header (the caller then owns
+  identifying themselves). `pull` logs the UA in use to stderr at startup.
 - **No parsing of PDF bodies here.** `pull` only acquires bytes + the index.
+- **Progress.** The PDF-download phase shows a per-data-type `tqdm` progress bar
+  on stderr (`2024 ptr: …`, then `fd`) with a **measured ETA and rate**, so a
+  multi-hour crawl shows how long it has left (and a slow link is reflected); per-
+  file chatter is folded into the bar plus an end-of-year summary. Auto-suppressed
+  when stderr is not a TTY (piped/logged).
 - **Flags:** `--types ptr,fd` (default both), `--index-only`, `--data-dir PATH`
   (default `./data`), `--delay SECONDS` (default 2.5), `--concurrency N`
   (default 1 — exceeding the defaults is a deliberate, documented user choice),
-  `--contact EMAIL`, `--user-agent STRING`, `--force` (re-download).
+  `--contact "NAME <EMAIL>"` (required unless `--user-agent`), `--user-agent
+  STRING`, `--force` (re-download).
 
 ---
 
