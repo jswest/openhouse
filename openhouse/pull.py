@@ -16,10 +16,11 @@ SPEC §3:
 ``--delay`` / ``--concurrency`` exist as deliberate, documented overrides; the
 defaults are the politeness floor and must not be weakened to go faster.
 
-Scope here is the **index** pull only (issue #3): for each year, download
-``<YEAR>FD.zip`` and extract ``<YEAR>FD.xml`` + ``<YEAR>FD.txt`` into
-``<data-dir>/raw/<year>/``. PDF-body downloading is issue #4; see
-:func:`pull` for the seam it slots into.
+Scope: for each year, download ``<YEAR>FD.zip`` and extract ``<YEAR>FD.xml`` +
+``<YEAR>FD.txt`` into ``<data-dir>/raw/<year>/`` (issue #3), then enumerate
+``(DocID, FilingType)`` and download each referenced PDF, routed by the §2.2
+rule into ``raw/<year>/{ptr,fd}/``, recording a ``pull-manifest.json`` per year
+(issue #4). No PDF *content* parsing — bytes only.
 
 Testability: the network is reached only through an injected ``httpx.Client``
 (tests pass one wired to ``httpx.MockTransport``, so nothing here touches the
@@ -30,21 +31,37 @@ logic beyond the single ``fetched_at`` timestamp threaded in from the caller.
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import sys
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 import httpx
 
 from . import __version__
+from .index import IndexTarget, enumerate_targets
 
 # SPEC §2.1: one ZIP per year, refreshed daily.
 INDEX_URL_TEMPLATE = (
     "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip"
 )
+
+# SPEC §2.2: report bodies are PDFs addressed by DocID, routed by FilingType.
+# ``P`` → ptr-pdfs; all other types → financial-pdfs.
+PTR_PDF_URL_TEMPLATE = (
+    "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/{year}/{doc_id}.pdf"
+)
+FD_PDF_URL_TEMPLATE = (
+    "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}/{doc_id}.pdf"
+)
+
+# The two PDF families a --types filter can select (SPEC §3). Default is both.
+PDF_FAMILIES = ("ptr", "fd")
 
 # Polite-crawling floor (SPEC §3). Overridable via --delay / --concurrency, but
 # these are the defaults and the floor.
@@ -94,6 +111,7 @@ def polite_get(
     sleep: Callable[[float], None] = time.sleep,
     max_retries: int = MAX_RETRIES,
     backoff_base: float = BACKOFF_BASE_SECONDS,
+    allow_not_found: bool = False,
 ) -> httpx.Response:
     """GET ``url`` with the SPEC §3 retry policy.
 
@@ -102,8 +120,10 @@ def polite_get(
     - **429 / 5xx** → exponential backoff (``backoff_base * 2**attempt``), up to
       ``max_retries`` times, then :class:`PullError`.
     - **2xx** → returned.
-    - other 4xx (e.g. 404) → :class:`PullError`, no retry (a retry would not
-      help).
+    - **404** → returned (not raised) when ``allow_not_found`` is set, so the PDF
+      loop can record it as a non-fatal manifest gap (#4); otherwise (e.g. the
+      index ZIP) it is a :class:`PullError`, no retry.
+    - other 4xx → :class:`PullError`, no retry (a retry would not help).
 
     ``sleep`` is injected so tests don't actually wait.
     """
@@ -120,6 +140,9 @@ def polite_get(
                 f"(OPENHOUSE_CONTACT / --contact), keep the polite defaults "
                 f"(sequential, {DEFAULT_DELAY_SECONDS}s), and try later."
             )
+
+        if status == 404 and allow_not_found:
+            return response
 
         if 200 <= status < 300:
             return response
@@ -212,6 +235,166 @@ def pull_index_year(
     return {"year": year, "status": "fetched", "files": written}
 
 
+# ---------------------------------------------------------------------------
+# PDF body download (issue #4)
+# ---------------------------------------------------------------------------
+def pdf_url_for(target: IndexTarget) -> str:
+    """The §2.2 download URL for ``target``, routed by its raw FilingType.
+
+    ``P`` → ``ptr-pdfs/<year>/<DocID>.pdf``; all other types →
+    ``financial-pdfs/<year>/<DocID>.pdf``. Routing keys on the raw FilingType
+    letter (via :attr:`IndexTarget.family`), never on the DocID.
+    """
+    template = PTR_PDF_URL_TEMPLATE if target.family == "ptr" else FD_PDF_URL_TEMPLATE
+    return template.format(year=target.year, doc_id=target.doc_id)
+
+
+def pull_pdfs_year(
+    client: httpx.Client,
+    year: int,
+    data_dir: Path,
+    fetched_at: str,
+    *,
+    types: Iterable[str] = PDF_FAMILIES,
+    force: bool = False,
+    delay: float = DEFAULT_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict:
+    """Download every referenced PDF for ``year`` into ``raw/<year>/{ptr,fd}/``.
+
+    Enumerates ``(DocID, FilingType)`` from the on-disk ``<year>FD.xml`` (#3 has
+    already written it), routes each by §2.2, and fetches the body unless it is
+    already present and size-consistent. Writes ``raw/<year>/pull-manifest.json``
+    (SPEC §6.5) with one entry per DocID: URL, HTTP status, byte size, sha256,
+    and the single entry-time ``fetched_at`` threaded in from the caller.
+
+    Resumability: a target whose destination file already exists and is non-empty
+    is treated as present-and-size-consistent and **skipped** with no network
+    request (we never re-download merely to compare bytes — a truncated transfer
+    leaves a zero-byte file, which fails the non-empty check and is refetched).
+    ``force`` re-downloads regardless. ``types`` filters which families to fetch.
+
+    A **404 is non-fatal**: it is recorded in the manifest with its status (a
+    recorded gap, never a silent one) and the run continues. A 403 / exhausted
+    backoff still raises :class:`PullError` via :func:`polite_get`.
+    """
+    year_dir = data_dir / "raw" / str(year)
+    xml_path = year_dir / f"{year}FD.xml"
+    if not xml_path.exists():
+        raise PullError(
+            f"{year}: index {xml_path} is missing; cannot enumerate PDFs "
+            f"(run pull without --index-only, or pull the index first)."
+        )
+
+    selected = set(types)
+    manifest_path = year_dir / "pull-manifest.json"
+    # Resume across interrupted runs: keep prior manifest entries (e.g. recorded
+    # 404s) so a Ctrl-C mid-year never loses what was already learned.
+    manifest = _load_manifest(manifest_path)
+
+    fetched = skipped = not_found = filtered = 0
+    for target in enumerate_targets(xml_path, year):
+        if target.family not in selected:
+            filtered += 1
+            continue
+
+        dest = year_dir / target.family / f"{target.doc_id}.pdf"
+        if dest.exists() and dest.stat().st_size > 0 and not force:
+            skipped += 1
+            # A present, size-consistent file needs no manifest churn; keep any
+            # existing entry as-is.
+            continue
+
+        url = pdf_url_for(target)
+        # Pace before every *network* request (polite floor, SPEC §3). Skipped /
+        # filtered targets cost no request, so they consume no pacing delay; the
+        # across-year delay is held separately by pull()'s per-year sleep.
+        sleep(delay)
+        response = polite_get(client, url, sleep=sleep, allow_not_found=True)
+        if response.status_code == 404:
+            # A 404 is the one non-fatal HTTP outcome — some index rows have no
+            # PDF. Record it with its status (a gap, never silent) and continue.
+            _record_404(manifest, target, url, fetched_at)
+            not_found += 1
+            continue
+
+        content = response.content
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+        manifest[target.doc_id] = {
+            "doc_id": target.doc_id,
+            "filing_type": target.filing_type,
+            "family": target.family,
+            "url": url,
+            "status": response.status_code,
+            "bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "fetched_at": fetched_at,
+        }
+        fetched += 1
+
+    _write_manifest(manifest_path, manifest, year, fetched_at)
+    print(
+        f"{year}: PDFs — {fetched} fetched, {skipped} present/skipped, "
+        f"{not_found} not-found, {filtered} filtered "
+        f"(manifest: {manifest_path}).",
+        file=sys.stderr,
+    )
+    return {
+        "year": year,
+        "fetched": fetched,
+        "skipped": skipped,
+        "not_found": not_found,
+        "filtered": filtered,
+    }
+
+
+def _record_404(
+    manifest: dict, target: IndexTarget, url: str, fetched_at: str
+) -> None:
+    """Record a non-fatal 404 in the manifest (a recorded gap, never silent)."""
+    manifest[target.doc_id] = {
+        "doc_id": target.doc_id,
+        "filing_type": target.filing_type,
+        "family": target.family,
+        "url": url,
+        "status": 404,
+        "bytes": 0,
+        "sha256": None,
+        "fetched_at": fetched_at,
+    }
+    print(
+        f"{target.year}: 404 (no PDF) for {target.doc_id} [{target.filing_type}] "
+        f"at {url}; recorded in manifest, continuing.",
+        file=sys.stderr,
+    )
+
+
+def _load_manifest(manifest_path: Path) -> dict:
+    """Load an existing pull-manifest's ``filings`` map, or an empty one."""
+    if not manifest_path.exists():
+        return {}
+    try:
+        data = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return dict(data.get("filings", {}))
+
+
+def _write_manifest(
+    manifest_path: Path, filings: dict, year: int, fetched_at: str
+) -> None:
+    """Write ``raw/<year>/pull-manifest.json`` (SPEC §6.5)."""
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    document = {
+        "year": year,
+        "fetched_at": fetched_at,
+        "count": len(filings),
+        "filings": filings,
+    }
+    manifest_path.write_text(json.dumps(document, indent=2, sort_keys=True))
+
+
 def pull(
     years: list[int],
     *,
@@ -222,20 +405,29 @@ def pull(
     contact: Optional[str] = None,
     user_agent: Optional[str] = None,
     force: bool = False,
+    types: Iterable[str] = PDF_FAMILIES,
+    fetched_at: Optional[str] = None,
     client: Optional[httpx.Client] = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """Run ``openhouse pull`` for ``years`` (SPEC §3). Returns a process exit code.
 
-    Only the **index** path is implemented in issue #3. PDF-body downloading is
-    issue #4: when ``index_only`` is False this fetches the index (so #4's PDF
-    enumeration always has the XML on disk) and then prints a clear notice that
-    PDF download is not yet implemented. #4 slots its per-DocID download loop in
-    right after the per-year index pull below, gated on ``not index_only``.
+    Per year: fetch + extract the index ZIP, then (unless ``index_only``)
+    enumerate ``(DocID, FilingType)`` from the on-disk XML and download each
+    referenced PDF, routed by the §2.2 rule into ``raw/<year>/{ptr,fd}/``, and
+    write ``raw/<year>/pull-manifest.json`` (SPEC §6.5). ``types`` filters which
+    PDF families to fetch (default both).
+
+    ``fetched_at`` is the single entry-time timestamp threaded into every
+    manifest entry (SPEC §9: no wall-clock in core logic). The caller (the CLI)
+    captures it once; it defaults here to one ``datetime.now()`` read only so an
+    ad-hoc call still works — production always passes it in.
 
     The ``client`` and ``sleep`` seams keep this fully offline-testable: tests
     pass an ``httpx.Client`` wired to ``httpx.MockTransport`` and a no-op sleep.
     """
+    if fetched_at is None:
+        fetched_at = datetime.now().isoformat()
     ua = build_user_agent(contact=contact, user_agent=user_agent)
     print(f"pull: User-Agent: {ua}", file=sys.stderr)
     if concurrency != DEFAULT_CONCURRENCY or delay != DEFAULT_DELAY_SECONDS:
@@ -252,18 +444,23 @@ def pull(
 
     try:
         for i, year in enumerate(years):
-            # Pace before every request except the first (polite floor, SPEC §3).
+            # Pace before every request except the very first (polite floor,
+            # SPEC §3).
             if i > 0:
                 sleep(delay)
             pull_index_year(client, year, data_dir, force=force, sleep=sleep)
-        # --- issue #4 PDF-download path slots in here, gated on not index_only ---
-        if not index_only:
-            print(
-                "pull: PDF body download is not yet implemented (issue #4); "
-                "the index has been pulled. Re-run with --index-only to "
-                "suppress this notice.",
-                file=sys.stderr,
-            )
+            # --- issue #4 PDF-download path, gated on not index_only ---
+            if not index_only:
+                pull_pdfs_year(
+                    client,
+                    year,
+                    data_dir,
+                    fetched_at,
+                    types=types,
+                    force=force,
+                    delay=delay,
+                    sleep=sleep,
+                )
     finally:
         if owns_client:
             client.close()

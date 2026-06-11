@@ -21,6 +21,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+import hashlib
+import json
+
 from openhouse import pull as pull_mod
 from openhouse.pull import (
     PullError,
@@ -28,6 +31,7 @@ from openhouse.pull import (
     polite_get,
     pull,
     pull_index_year,
+    pull_pdfs_year,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -238,22 +242,32 @@ def test_pull_index_only_multiyear_paces_between_years(tmp_path):
     assert sleeps == [2.5]
 
 
-def test_pull_without_index_only_fetches_index_then_notes_pdf_todo(tmp_path, capsys):
+def test_pull_without_index_only_fetches_index_then_pdfs(tmp_path, capsys):
+    """Without --index-only, the index is fetched and then the PDFs (issue #4)."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=make_index_zip(2024))
+        path = request.url.path
+        if path.endswith("2024FD.zip"):
+            return httpx.Response(200, content=make_index_zip(2024))
+        # Every enumerated PDF: tiny fabricated bytes.
+        return httpx.Response(200, content=b"%PDF-fake")
 
     client = make_client(handler)
     rc = pull(
         [2024],
         data_dir=tmp_path,
         index_only=False,
+        fetched_at="2026-06-11T00:00:00",
         client=client,
         sleep=no_sleep,
     )
     assert rc == 0
-    assert (tmp_path / "raw" / "2024" / "2024FD.xml").exists()
-    err = capsys.readouterr().err
-    assert "not yet implemented" in err and "#4" in err
+    year_dir = tmp_path / "raw" / "2024"
+    assert (year_dir / "2024FD.xml").exists()
+    # The P row (DocID 20024277) routes to ptr/, a non-P row to fd/.
+    assert (year_dir / "ptr" / "20024277.pdf").exists()
+    assert (year_dir / "fd" / "10066961.pdf").exists()
+    assert (year_dir / "pull-manifest.json").exists()
 
 
 def test_pull_logs_user_agent(tmp_path, capsys):
@@ -304,3 +318,168 @@ def test_cli_rejects_reversed_range():
 
     rc = main(["pull", "2024-2019", "--index-only"])
     assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# PDF body download (issue #4): routing, resumability, --types, 404, manifest
+# ---------------------------------------------------------------------------
+FETCHED_AT = "2026-06-11T12:00:00"
+
+# The trimmed fixture's rows, by DocID → FilingType (see 2024FD-trimmed.xml).
+PTR_DOC = "20024277"  # FilingType P → ptr-pdfs
+FD_DOC = "10066961"  # FilingType O → financial-pdfs
+
+
+def write_index(tmp_path: Path, year: int = 2024) -> Path:
+    """Lay down ``raw/<year>/<year>FD.xml`` from the trimmed fixture (no network)."""
+    year_dir = tmp_path / "raw" / str(year)
+    year_dir.mkdir(parents=True)
+    (year_dir / f"{year}FD.xml").write_bytes(
+        (FIXTURES / "2024FD-trimmed.xml").read_bytes()
+    )
+    return year_dir
+
+
+def pdf_handler(fake_bytes: bytes = b"%PDF-fake", not_found: set | None = None):
+    """A routing-aware mock: 200 with ``fake_bytes`` except DocIDs in ``not_found``.
+
+    Records every requested URL on ``handler.urls`` so tests can assert routing
+    and count fetches.
+    """
+    not_found = not_found or set()
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        doc_id = request.url.path.split("/")[-1].removesuffix(".pdf")
+        if doc_id in not_found:
+            return httpx.Response(404)
+        return httpx.Response(200, content=fake_bytes)
+
+    handler.urls = urls
+    return handler
+
+
+def test_pdf_routing_p_to_ptr_else_fd(tmp_path):
+    write_index(tmp_path)
+    handler = pdf_handler()
+    client = make_client(handler)
+
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    ptr_pdf = tmp_path / "raw" / "2024" / "ptr" / f"{PTR_DOC}.pdf"
+    fd_pdf = tmp_path / "raw" / "2024" / "fd" / f"{FD_DOC}.pdf"
+    assert ptr_pdf.exists()
+    assert fd_pdf.exists()
+    # The P DocID hit the ptr-pdfs URL; the O DocID hit financial-pdfs.
+    assert any(f"ptr-pdfs/2024/{PTR_DOC}.pdf" in u for u in handler.urls)
+    assert any(f"financial-pdfs/2024/{FD_DOC}.pdf" in u for u in handler.urls)
+
+
+def test_pdf_resumable_skips_present_file(tmp_path):
+    write_index(tmp_path)
+    handler = pdf_handler()
+    client = make_client(handler)
+
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+    first_count = len(handler.urls)
+    assert first_count > 0
+
+    # Second run: every file is present and non-empty → no second fetch.
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+    assert len(handler.urls) == first_count
+
+
+def test_pdf_force_refetches(tmp_path):
+    write_index(tmp_path)
+    handler = pdf_handler()
+    client = make_client(handler)
+
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+    first_count = len(handler.urls)
+
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, force=True, sleep=no_sleep)
+    assert len(handler.urls) == 2 * first_count
+
+
+def test_pdf_types_filter_fetches_only_ptr(tmp_path):
+    write_index(tmp_path)
+    handler = pdf_handler()
+    client = make_client(handler)
+
+    pull_pdfs_year(
+        client, 2024, tmp_path, FETCHED_AT, types=["ptr"], sleep=no_sleep
+    )
+    year_dir = tmp_path / "raw" / "2024"
+    # Only the PTR family landed on disk; no fd/ directory was created.
+    assert (year_dir / "ptr" / f"{PTR_DOC}.pdf").exists()
+    assert not (year_dir / "fd").exists()
+    # Every requested URL is a ptr-pdfs URL.
+    assert handler.urls
+    assert all("ptr-pdfs/" in u for u in handler.urls)
+
+
+def test_pdf_404_recorded_non_fatally(tmp_path):
+    write_index(tmp_path)
+    # The PTR DocID 404s; the run must continue and still fetch the FD.
+    handler = pdf_handler(not_found={PTR_DOC})
+    client = make_client(handler)
+
+    result = pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    year_dir = tmp_path / "raw" / "2024"
+    # The 404'd PDF is absent on disk but the FD was still fetched (non-fatal).
+    assert not (year_dir / "ptr" / f"{PTR_DOC}.pdf").exists()
+    assert (year_dir / "fd" / f"{FD_DOC}.pdf").exists()
+    assert result["not_found"] == 1
+
+    manifest = json.loads((year_dir / "pull-manifest.json").read_text())
+    entry = manifest["filings"][PTR_DOC]
+    assert entry["status"] == 404
+    assert entry["sha256"] is None
+    assert entry["bytes"] == 0
+    assert entry["fetched_at"] == FETCHED_AT
+
+
+def test_pull_manifest_content_and_injected_fetched_at(tmp_path):
+    write_index(tmp_path)
+    fake = b"%PDF-tiny-body"
+    handler = pdf_handler(fake_bytes=fake)
+    client = make_client(handler)
+
+    pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+    manifest = json.loads(
+        (tmp_path / "raw" / "2024" / "pull-manifest.json").read_text()
+    )
+    assert manifest["fetched_at"] == FETCHED_AT
+    fd_entry = manifest["filings"][FD_DOC]
+    assert fd_entry["url"].endswith(f"financial-pdfs/2024/{FD_DOC}.pdf")
+    assert fd_entry["status"] == 200
+    assert fd_entry["bytes"] == len(fake)
+    assert fd_entry["sha256"] == hashlib.sha256(fake).hexdigest()
+    # The fetched-at is the single injected timestamp — no wall-clock per file.
+    assert all(
+        f["fetched_at"] == FETCHED_AT for f in manifest["filings"].values()
+    )
+
+
+def test_pull_pdfs_missing_index_is_error(tmp_path):
+    # No index on disk → cannot enumerate → PullError (never a silent gap).
+    (tmp_path / "raw" / "2024").mkdir(parents=True)
+    client = make_client(pdf_handler())
+    with pytest.raises(PullError):
+        pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
+
+
+def test_pdf_paces_between_requests(tmp_path):
+    write_index(tmp_path)
+    sleeps: list[float] = []
+    client = make_client(pdf_handler())
+
+    # 5 enumerated PDFs (1 PTR + 4 FD rows), each preceded by a pacing sleep at
+    # the polite-floor delay (the across-year delay is held by pull() separately).
+    pull_pdfs_year(
+        client, 2024, tmp_path, FETCHED_AT, delay=2.5, sleep=sleeps.append
+    )
+    assert sleeps == [2.5, 2.5, 2.5, 2.5, 2.5]
