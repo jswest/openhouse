@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FinancialDisclosure>
+  <Member>
+    <Prefix>Hon.</Prefix>
+    <Last>Allen</Last>
+    <First>Richard W.</First>
+    <Suffix></Suffix>
+    <FilingType>O</FilingType>
+    <StateDst>GA12</StateDst>
+    <Year>2024</Year>
+    <FilingDate>4/29/2025</FilingDate>
+    <DocID>10066961</DocID>
+  </Member>
+  <Member>
+    <Prefix></Prefix>
+    <Last>Adams</Last>
+    <First>Alma S.</First>
+    <Suffix></Suffix>
+    <FilingType>P</FilingType>
+    <StateDst>NC12</StateDst>
+    <Year>2024</Year>
+    <FilingDate>5/15/2024</FilingDate>
+    <DocID>20024277</DocID>
+  </Member>
+  <Member>
+    <Prefix></Prefix>
+    <Last>Norton</Last>
+    <First>Eleanor Holmes</First>
+    <Suffix></Suffix>
+    <FilingType>C</FilingType>
+    <StateDst>DC00</StateDst>
+    <Year>2024</Year>
+    <FilingDate>5/15/2024</FilingDate>
+    <DocID>10067000</DocID>
+  </Member>
+  <Member>
+    <Prefix></Prefix>
+    <Last>Gonzalez-Colon</Last>
+    <First>Jenniffer</First>
+    <Suffix></Suffix>
+    <FilingType>X</FilingType>
+    <StateDst>PR00</StateDst>
+    <Year>2024</Year>
+    <FilingDate>5/15/2024</FilingDate>
+    <DocID>30022163</DocID>
+  </Member>
+  <Member>
+    <Prefix></Prefix>
+    <Last>Doe</Last>
+    <First>Maryam.</First>
+    <Suffix></Suffix>
+    <FilingType>W</FilingType>
+    <StateDst></StateDst>
+    <Year>2024</Year>
+    <FilingDate></FilingDate>
+    <DocID>7940</DocID>
+  </Member>
+</FinancialDisclosure>

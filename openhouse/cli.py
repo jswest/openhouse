@@ -1,8 +1,8 @@
 """Command-line interface: arg parsing, the shared year-range parser, dispatch.
 
-``pull`` / ``parse`` / ``read`` are stubs in this milestone (M1 scaffold) — each
-prints "not implemented" to stderr and exits non-zero. The real implementations
-land in later sub-issues.
+``pull`` now implements the index-only acquisition path (issue #3); ``parse`` /
+``read`` remain stubs that print "not implemented" to stderr and exit non-zero,
+landing in later sub-issues. PDF-body downloading for ``pull`` is issue #4.
 
 The year-range parser is shared infrastructure (SPEC §9). It is kept pure and
 wall-clock-free by taking ``current_year`` as a parameter, so it is testable
@@ -13,8 +13,12 @@ clock, injecting ``datetime.now().year`` once.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime
+from pathlib import Path
+
+from . import pull as pull_mod
 
 # SPEC §2.1: the bulk index covers 2008 → present; PTRs (STOCK Act) appear only
 # from 2012 onward.
@@ -112,6 +116,51 @@ def build_parser() -> argparse.ArgumentParser:
         "pull", help="acquire raw artifacts from the Clerk (network)"
     )
     pull_p.add_argument("years", help="YYYY or YYYY-YYYY")
+    pull_p.add_argument(
+        "--index-only",
+        action="store_true",
+        help="fetch and extract only the annual index ZIP, not the PDF bodies",
+    )
+    pull_p.add_argument(
+        "--data-dir",
+        default="./data",
+        help="root data directory (default: ./data)",
+    )
+    pull_p.add_argument(
+        "--delay",
+        type=float,
+        default=pull_mod.DEFAULT_DELAY_SECONDS,
+        help=(
+            f"seconds between requests (default: {pull_mod.DEFAULT_DELAY_SECONDS}; "
+            "the polite floor — lowering it is a deliberate choice)"
+        ),
+    )
+    pull_p.add_argument(
+        "--concurrency",
+        type=int,
+        default=pull_mod.DEFAULT_CONCURRENCY,
+        help=(
+            f"concurrent requests (default: {pull_mod.DEFAULT_CONCURRENCY}; "
+            "the polite floor — raising it is a deliberate choice)"
+        ),
+    )
+    pull_p.add_argument(
+        "--contact",
+        default=None,
+        help=(
+            "contact email appended to the User-Agent (or set OPENHOUSE_CONTACT)"
+        ),
+    )
+    pull_p.add_argument(
+        "--user-agent",
+        default=None,
+        help="override the User-Agent string entirely",
+    )
+    pull_p.add_argument(
+        "--force",
+        action="store_true",
+        help="re-download even if the index is already present (refreshed daily)",
+    )
 
     parse_p = subparsers.add_parser(
         "parse", help="transform raw artifacts into normalized JSON (offline)"
@@ -136,14 +185,30 @@ def main(argv: list[str] | None = None) -> int:
     current_year = datetime.now().year
 
     if args.command in ("pull", "parse"):
-        # Validate the range now so a bad argument fails fast and uniformly,
-        # even though the command bodies are stubs.
+        # Validate the range now so a bad argument fails fast and uniformly.
         try:
-            parse_year_range(args.years, current_year)
+            years = parse_year_range(args.years, current_year)
         except YearRangeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        return _stub(args.command)
+        if args.command == "parse":
+            return _stub("parse")
+        # pull: the index-only path is implemented (issue #3); PDF bodies #4.
+        contact = args.contact or os.environ.get("OPENHOUSE_CONTACT")
+        try:
+            return pull_mod.pull(
+                years,
+                data_dir=Path(args.data_dir),
+                index_only=args.index_only,
+                delay=args.delay,
+                concurrency=args.concurrency,
+                contact=contact,
+                user_agent=args.user_agent,
+                force=args.force,
+            )
+        except pull_mod.PullError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     if args.command == "read":
         return _stub("read")
