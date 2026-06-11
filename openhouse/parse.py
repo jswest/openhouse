@@ -24,7 +24,13 @@ from pathlib import Path
 from typing import Optional
 
 from .index import build_filing_records
-from .schemas import SCHEMA_VERSION, FilingMetadata
+from .pdf import PdfExtractError, classify
+from .schemas import SCHEMA_VERSION, UNKNOWN_FILING_LABEL, FilingMetadata
+
+# Exit code returned when ``--strict`` is set and any filing errored (SPEC §4:
+# "exit non-zero if any filing errors"). Distinct from the argument-validation
+# exit (2, in cli.py) so the two failure modes are tellable apart.
+STRICT_ERROR_EXIT = 1
 
 
 class ParseError(Exception):
@@ -93,17 +99,91 @@ def _detect_identity_warnings(records: list[FilingMetadata]) -> list[dict]:
     return warnings
 
 
+def _classify_records(
+    records: list[FilingMetadata], *, data_dir: Path, types: list[str]
+) -> list[dict]:
+    """Classify each record's on-disk PDF, mutating ``pdf_class``/``parse_status``.
+
+    Authoritative test is text extraction (``pdf.classify``, SPEC §2.2). Per
+    record, the outcome is one of:
+
+    - ``efiled`` / ``scanned`` / ``missing`` → ``parse_status="ok"``. Scanned and
+      missing keep their metadata record with ``body: null`` and land in the
+      unparsed manifest (SPEC §6.5).
+    - ``extract_failed`` (a present-but-corrupt PDF) → ``parse_status="error"``,
+      ``pdf_class`` stays ``None``, unparsed reason ``extract_failed``.
+
+    ``--types`` partial runs: a filing whose family is **not** in ``types`` is not
+    classified this run — ``pdf_class`` stays ``None`` and ``parse_status="ok"``,
+    and it is *not* added to the unparsed manifest (it was simply out of scope, not
+    unparsed). Such rows are tallied separately so counts still reconcile to the
+    total (SPEC §4: never silently drop a filing).
+
+    Independently of the PDF outcome, an **unknown** FilingType label (a letter not
+    in the §2.3 table) is recorded in the unparsed manifest with reason
+    ``unknown_type`` — the raw code is preserved on the record, never dropped.
+
+    Returns the unparsed-manifest entries (``doc_id`` + ``reason``) in record
+    order (deterministic).
+    """
+    unparsed: list[dict] = []
+    for rec in records:
+        family = "ptr" if rec.filing_type.code == "P" else "fd"
+        in_scope = family in types
+
+        if not in_scope:
+            # Out of scope for this --types run: leave unclassified, status ok.
+            rec.pdf_class = None
+            rec.parse_status = "ok"
+        elif rec.source_pdf is None:
+            # No DocID → no body was ever fetchable; treat as missing (SPEC §6.5).
+            rec.pdf_class = "missing"
+            rec.parse_status = "ok"
+            unparsed.append({"doc_id": rec.doc_id, "reason": "missing"})
+        else:
+            pdf_path = data_dir / rec.source_pdf
+            try:
+                pdf_class = classify(pdf_path)
+            except PdfExtractError:
+                rec.pdf_class = None
+                rec.parse_status = "error"
+                unparsed.append({"doc_id": rec.doc_id, "reason": "extract_failed"})
+            else:
+                rec.pdf_class = pdf_class
+                rec.parse_status = "ok"
+                if pdf_class in ("scanned", "missing"):
+                    unparsed.append({"doc_id": rec.doc_id, "reason": pdf_class})
+
+        # Unknown FilingType is its own unparsed reason, independent of the PDF
+        # outcome (the raw code is preserved on the record, never dropped).
+        if in_scope and rec.filing_type.label == UNKNOWN_FILING_LABEL:
+            unparsed.append({"doc_id": rec.doc_id, "reason": "unknown_type"})
+
+    return unparsed
+
+
 def parse_year(
-    year: int, *, data_dir: Path, fetched_at: str
+    year: int, *, data_dir: Path, types: Optional[list[str]] = None, fetched_at: str
 ) -> Optional[dict]:
     """Parse one year's index into ``parsed/<year>/`` (SPEC §4). Offline.
 
     Reads ``<data_dir>/raw/<year>/<year>FD.xml`` (written by ``pull``). If the
     XML is absent this is a clean skip (clear stderr message, returns ``None``) —
     not a crash, so a multi-year range survives a missing year. Otherwise builds
-    every ``<Member>`` into a record, detects identity collisions, and writes
-    ``filings.json`` + ``parse-manifest.json``. Returns a compact summary dict.
+    every ``<Member>`` into a record, detects identity collisions, **classifies
+    each on-disk PDF** (efiled / scanned / missing, via authoritative text
+    extraction — SPEC §2.2), and writes ``filings.json`` + ``parse-manifest.json``
+    + ``unparsed-manifest.json``. Returns a compact summary dict.
+
+    ``types`` restricts which families (``ptr`` / ``fd``) are classified this run;
+    a filing outside it keeps ``pdf_class=None`` and is not deemed unparsed (it was
+    out of scope), while counts still reconcile to the total. Defaults to both.
+
+    The summary's ``has_error`` flag lets ``--strict`` exit non-zero when any
+    filing errored (``parse_status="error"``).
     """
+    if types is None:
+        types = ["ptr", "fd"]
     raw_dir = data_dir / "raw" / str(year)
     xml_path = raw_dir / f"{year}FD.xml"
     if not xml_path.exists():
@@ -120,6 +200,28 @@ def parse_year(
     for rec in records:
         by_filing_type[rec.filing_type.code] += 1
     filing_type_counts = dict(sorted(by_filing_type.items()))
+
+    # Authoritative per-PDF classification (SPEC §2.2), mutating each record's
+    # pdf_class / parse_status and collecting the unparsed-manifest entries.
+    unparsed = _classify_records(records, data_dir=data_dir, types=types)
+
+    by_pdf_class: dict[str, int] = defaultdict(int)
+    not_classified = 0
+    for rec in records:
+        if rec.pdf_class is None:
+            not_classified += 1
+        else:
+            by_pdf_class[rec.pdf_class] += 1
+    # Stable key order (efiled/scanned/missing) so the manifest is byte-stable.
+    pdf_class_counts = {
+        k: by_pdf_class.get(k, 0) for k in ("efiled", "scanned", "missing")
+    }
+
+    by_parse_status: dict[str, int] = defaultdict(int)
+    for rec in records:
+        by_parse_status[rec.parse_status or "ok"] += 1
+    parse_status_counts = {k: by_parse_status.get(k, 0) for k in ("ok", "error")}
+    has_error = parse_status_counts["error"] > 0
 
     identity_warnings = _detect_identity_warnings(records)
     for warning in identity_warnings:
@@ -143,8 +245,7 @@ def parse_year(
         json.dumps(filings, indent=2, sort_keys=True) + "\n"
     )
 
-    # Shaped so #7 ADDS to ``counts`` (a ``by_pdf_class`` /
-    # ``by_parse_status`` breakdown) without reshaping these keys.
+    # Counts reconcile: efiled + scanned + missing + not_classified == total.
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": fetched_at,
@@ -152,6 +253,9 @@ def parse_year(
         "counts": {
             "total": len(records),
             "by_filing_type": filing_type_counts,
+            "by_pdf_class": pdf_class_counts,
+            "not_classified": not_classified,
+            "by_parse_status": parse_status_counts,
         },
         "identity_warnings": identity_warnings,
     }
@@ -160,17 +264,36 @@ def parse_year(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
 
+    # Every filing not fully usable as an e-filed body, each with a reason (SPEC
+    # §6.5). E-filed filings are NOT here. Order is deterministic (record order).
+    unparsed_manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": fetched_at,
+        "year": year,
+        "unparsed": unparsed,
+    }
+    unparsed_path = parsed_dir / "unparsed-manifest.json"
+    unparsed_path.write_text(
+        json.dumps(unparsed_manifest, indent=2, sort_keys=True) + "\n"
+    )
+
     print(
         f"{year}: parsed {len(records)} filings → {filings_path} "
-        f"({len(identity_warnings)} identity warning(s); manifest: "
-        f"{manifest_path}).",
+        f"(efiled {pdf_class_counts['efiled']}, scanned "
+        f"{pdf_class_counts['scanned']}, missing {pdf_class_counts['missing']}, "
+        f"error {parse_status_counts['error']}; {len(identity_warnings)} identity "
+        f"warning(s); manifests: {manifest_path}, {unparsed_path}).",
         file=sys.stderr,
     )
     return {
         "year": year,
         "total": len(records),
         "by_filing_type": filing_type_counts,
+        "by_pdf_class": pdf_class_counts,
+        "not_classified": not_classified,
+        "by_parse_status": parse_status_counts,
         "identity_warnings": len(identity_warnings),
+        "has_error": has_error,
     }
 
 
@@ -189,23 +312,28 @@ def parse(
     byte-identical output. A year whose index XML is absent is a clean skip, not
     a crash, so a range survives a not-yet-pulled year.
 
-    ``types`` and ``strict`` are accepted for the #7 per-PDF pass and do not yet
-    change behavior in #6 (metadata only — no PDFs touched). ``fetched_at`` is the
-    single entry-time timestamp threaded into the manifest (SPEC §9: no wall-clock
-    in core logic).
+    ``types`` restricts which PDF families are classified (out-of-scope filings
+    stay ``pdf_class=None`` but still count toward the total). ``fetched_at`` is
+    the single entry-time timestamp threaded into the manifest (SPEC §9: no
+    wall-clock in core logic).
 
     Emits one compact JSON summary object (the per-year results) to **stdout**
     (machine-composable, CLAUDE.md "JSON to stdout"); progress / warnings go to
-    stderr. Non-zero exit only on a real error.
+    stderr. With ``strict``, returns :data:`STRICT_ERROR_EXIT` if any filing in
+    any year errored (``parse_status="error"``); otherwise returns ``0``.
     """
     summaries: list[dict] = []
     skipped: list[int] = []
     for year in years:
-        summary = parse_year(year, data_dir=data_dir, fetched_at=fetched_at)
+        summary = parse_year(
+            year, data_dir=data_dir, types=types, fetched_at=fetched_at
+        )
         if summary is None:
             skipped.append(year)
         else:
             summaries.append(summary)
+
+    any_error = any(s["has_error"] for s in summaries)
 
     combined = {
         "command": "parse",
@@ -214,4 +342,12 @@ def parse(
         "skipped_years": skipped,
     }
     print(json.dumps(combined, indent=2, sort_keys=True))
+
+    if strict and any_error:
+        print(
+            "error: --strict and one or more filings errored "
+            "(parse_status='error'); see unparsed-manifest.json.",
+            file=sys.stderr,
+        )
+        return STRICT_ERROR_EXIT
     return 0
