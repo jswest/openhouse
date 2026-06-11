@@ -23,6 +23,11 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+# Schema version recorded in ``parse-manifest.json`` (SPEC §6.5). A schema change
+# means re-parse, not migrate (CLAUDE.md): bump this, delete old code, re-run
+# ``parse`` from ``raw/``. Read by ``parse`` (#6) and the per-PDF pass (#7).
+SCHEMA_VERSION = "0.2.0"
+
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
 #
@@ -101,6 +106,9 @@ class FilingMetadata(BaseModel):
     doc_id: str = Field(..., description="Opaque string; 4-, 7-, 8-digit all occur")
     year: int = Field(..., description="Coverage year — never derived from filing_date")
     filer: Filer
+    filer_id: str = Field(
+        ..., description="Normalized identity key (SPEC §6.2); not a true member ID"
+    )
     state_district: Optional[StateDistrict] = None
     filing_type: FilingTypeInfo
     filing_date: Optional[date] = None
