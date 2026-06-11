@@ -1,8 +1,9 @@
 """Command-line interface: arg parsing, the shared year-range parser, dispatch.
 
-``pull`` now implements the index-only acquisition path (issue #3); ``parse`` /
-``read`` remain stubs that print "not implemented" to stderr and exit non-zero,
-landing in later sub-issues. PDF-body downloading for ``pull`` is issue #4.
+``pull`` now implements the full acquisition path — the index ZIP (issue #3) and
+the PDF bodies routed by FilingType (issue #4); ``parse`` / ``read`` remain stubs
+that print "not implemented" to stderr and exit non-zero, landing in later
+sub-issues.
 
 The year-range parser is shared infrastructure (SPEC §9). It is kept pure and
 wall-clock-free by taking ``current_year`` as a parameter, so it is testable
@@ -96,6 +97,28 @@ def _parse_one(token: str, arg: str) -> int:
     return int(token)
 
 
+VALID_PDF_TYPES = ("ptr", "fd")
+
+
+def parse_types(arg: str) -> list[str]:
+    """Parse the ``--types`` comma-list into the PDF families to fetch.
+
+    Accepts ``ptr``, ``fd``, or both (in any order, case-insensitive). Raises
+    :class:`YearRangeError` (the CLI's uniform arg-error type) on an unknown
+    token, so a typo fails fast rather than silently fetching nothing.
+    """
+    families = [t.strip().lower() for t in arg.split(",") if t.strip()]
+    if not families:
+        raise YearRangeError("--types is empty: expected ptr, fd, or both.")
+    unknown = [t for t in families if t not in VALID_PDF_TYPES]
+    if unknown:
+        raise YearRangeError(
+            f"--types has unknown value(s) {unknown}: expected ptr and/or fd."
+        )
+    # De-dupe while preserving the canonical order.
+    return [t for t in VALID_PDF_TYPES if t in families]
+
+
 def _stub(command: str) -> int:
     """A not-yet-implemented subcommand: explain on stderr, exit non-zero."""
     print(f"openhouse {command}: not implemented", file=sys.stderr)
@@ -120,6 +143,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--index-only",
         action="store_true",
         help="fetch and extract only the annual index ZIP, not the PDF bodies",
+    )
+    pull_p.add_argument(
+        "--types",
+        default="ptr,fd",
+        help=(
+            "comma-separated PDF families to fetch: ptr, fd, or both "
+            "(default: ptr,fd)"
+        ),
     )
     pull_p.add_argument(
         "--data-dir",
@@ -181,8 +212,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # The single wall-clock read for the whole program (SPEC §9).
-    current_year = datetime.now().year
+    # The single wall-clock read for the whole program (SPEC §9): both the
+    # range-validation year and the manifest ``fetched-at`` derive from it.
+    now = datetime.now()
+    current_year = now.year
+    fetched_at = now.isoformat()
 
     if args.command in ("pull", "parse"):
         # Validate the range now so a bad argument fails fast and uniformly.
@@ -193,7 +227,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if args.command == "parse":
             return _stub("parse")
-        # pull: the index-only path is implemented (issue #3); PDF bodies #4.
+        # pull: index (issue #3) + PDF bodies routed by §2.2 (issue #4).
+        try:
+            types = parse_types(args.types)
+        except YearRangeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         contact = args.contact or os.environ.get("OPENHOUSE_CONTACT")
         try:
             return pull_mod.pull(
@@ -205,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
                 contact=contact,
                 user_agent=args.user_agent,
                 force=args.force,
+                types=types,
+                fetched_at=fetched_at,
             )
         except pull_mod.PullError as exc:
             print(f"error: {exc}", file=sys.stderr)
