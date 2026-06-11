@@ -19,6 +19,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from . import parse as parse_mod
 from . import pull as pull_mod
 
 # SPEC §2.1: the bulk index covers 2008 → present; PTRs (STOCK Act) appear only
@@ -201,6 +202,24 @@ def build_parser() -> argparse.ArgumentParser:
         "parse", help="transform raw artifacts into normalized JSON (offline)"
     )
     parse_p.add_argument("years", help="YYYY or YYYY-YYYY")
+    parse_p.add_argument(
+        "--data-dir",
+        default="./data",
+        help="root data directory (default: ./data)",
+    )
+    parse_p.add_argument(
+        "--types",
+        default="ptr,fd",
+        help=(
+            "comma-separated families to parse: ptr, fd, or both "
+            "(default: ptr,fd); reserved for the per-PDF body pass"
+        ),
+    )
+    parse_p.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero if any filing errors (reserved for the per-PDF pass)",
+    )
 
     read_p = subparsers.add_parser(
         "read", help="query the normalized JSON (offline, read-only)"
@@ -230,7 +249,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if args.command == "parse":
-            return _stub("parse")
+            # parse: offline metadata mapping + filer_id + identity warnings (#6).
+            try:
+                types = parse_types(args.types)
+            except YearRangeError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            try:
+                return parse_mod.parse(
+                    years,
+                    data_dir=Path(args.data_dir),
+                    types=types,
+                    strict=args.strict,
+                    fetched_at=fetched_at,
+                )
+            except parse_mod.ParseError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
         # pull: index (issue #3) + PDF bodies routed by §2.2 (issue #4).
         try:
             types = parse_types(args.types)
