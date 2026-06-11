@@ -1,5 +1,7 @@
 # openhouse
 
+<img src="docs/assets/logo.png" alt="openhouse logo: an open-house yard sign reading 'openhouse'" width="200">
+
 Pull, parse, and query **U.S. House of Representatives financial disclosure
 filings** — annual Financial Disclosure statements and STOCK Act Periodic
 Transaction Reports — from the Office of the Clerk, into normalized JSON you
