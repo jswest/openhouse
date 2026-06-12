@@ -30,8 +30,10 @@ from pydantic import BaseModel, Field
 # Read by ``parse`` (#6), the per-PDF pass (#7), and the release tool. Generation
 # 3 adds PTR body extraction (§6.3 transactions[]); generation 4 adds e-filed FD
 # schedule bodies (§6.3 schedules A–D structured, E–J raw_text-only); generation 5
-# adds the CC0 ``congress-legislators`` identity join (#16): a ``bioguide_id`` and
-# a two-tier ``filer_id`` ladder (``bioguide:<id>`` / ``name:<slug>``).
+# adds the CC0 ``congress-legislators`` identity join (#16) — a ``bioguide_id`` and
+# a two-tier ``filer_id`` ladder (``bioguide:<id>`` / ``name:<slug>``) — and
+# structured columns for FD schedules E–J (#17), each item still carrying
+# verbatim ``raw_text``.
 SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
@@ -188,9 +190,9 @@ class PtrTransaction(BaseModel):
 # ---------------------------------------------------------------------------
 # E-filed annual-FD schedule bodies (SPEC §6.3).
 #
-# An annual FD is a schedule-by-schedule document (A–J). SPEC §6.3 depth-orders
-# the work: schedules A–D are **fully structured**; E–J ship as raw_text-only
-# line items. *Every* line item — structured or not — carries a verbatim
+# An annual FD is a schedule-by-schedule document (A–J), every schedule now
+# column-parsed into structured fields (A–D since #12, E–J since #17). *Every*
+# line item — structured or not — carries a verbatim
 # ``raw_text`` so nothing extracted is lost to a schema gap, and an empty
 # schedule (the literal ``None disclosed.``) is recorded as **absent** (its key
 # is simply omitted from the body's ``schedules`` map). Headings are matched by
@@ -252,15 +254,88 @@ class ScheduleDItem(BaseModel):
     raw_text: str
 
 
-class RawLineItem(BaseModel):
-    """A raw_text-only line item for schedules E–J (SPEC §6.3 depth-ordering).
+class ScheduleEItem(BaseModel):
+    """Schedule E line item — positions (SPEC §6.3).
 
-    Schedules E (positions), F (agreements), G (gifts), H (travel), I (charity
-    in lieu of honoraria), and J (excess compensation) are *not* column-parsed in
-    this generation — each item ships as the verbatim joined text of its row so
-    nothing is lost (deeper structure is a tracked post-v1 issue).
+    Form columns: ``Position | Name of Organization``. ``position`` is the
+    leading role title; ``organization`` the named body. Both ``Optional`` — a
+    row the splitter can't cleanly bisect leaves them ``None`` and the verbatim
+    ``raw_text`` still carries the whole line.
     """
 
+    position: Optional[str] = None
+    organization: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleFItem(BaseModel):
+    """Schedule F line item — agreements (SPEC §6.3).
+
+    Form columns: ``Date | Parties | Terms of Agreement``. ``date`` is the
+    agreement date as printed (``Month YYYY``); ``parties`` the named parties;
+    ``terms`` the (often multi-line) description folded into one string. All
+    ``Optional``; ``raw_text`` carries the verbatim, wrap-joined row.
+    """
+
+    date: Optional[str] = None
+    parties: Optional[str] = None
+    terms: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleGItem(BaseModel):
+    """Schedule G line item — gifts (SPEC §6.3).
+
+    Form columns: ``Source | Description | Value``. ``value`` is the dollar
+    figure as printed (gifts carry an exact value, not an A-style range). The
+    fixtures' G is ``None disclosed.`` (absent), so the split is header-driven and
+    conservative — anything not cleanly columnar stays in ``raw_text``.
+    """
+
+    source: Optional[str] = None
+    description: Optional[str] = None
+    value: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleHItem(BaseModel):
+    """Schedule H line item — travel payments & reimbursements (SPEC §6.3).
+
+    Form columns: ``Source | Dates | Location | Items Provided``. ``dates`` is
+    the printed travel date(s); ``location`` the destination; ``items`` what was
+    provided. All ``Optional``; ``raw_text`` carries the verbatim row.
+    """
+
+    source: Optional[str] = None
+    dates: Optional[str] = None
+    location: Optional[str] = None
+    items: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleIItem(BaseModel):
+    """Schedule I line item — payments to charity in lieu of honoraria (§6.3).
+
+    Form columns: ``Source | Activity | Date | Amount``. ``amount`` is the dollar
+    figure as printed. All ``Optional``; ``raw_text`` carries the verbatim row.
+    """
+
+    source: Optional[str] = None
+    activity: Optional[str] = None
+    date: Optional[str] = None
+    amount: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleJItem(BaseModel):
+    """Schedule J line item — compensation in excess of $5,000 (new filers, §6.3).
+
+    Form columns: ``Source | Brief Description of Duties``. Both ``Optional``;
+    ``raw_text`` carries the verbatim row.
+    """
+
+    source: Optional[str] = None
+    description: Optional[str] = None
     raw_text: str
 
 
@@ -269,9 +344,9 @@ class FdBody(BaseModel):
 
     ``schedules`` holds only the letters that have data: a schedule rendered
     ``None disclosed.`` is **absent** (omitted), never an empty array, so a
-    consumer can tell "disclosed nothing" from "we failed to read it". A–D carry
-    structured items; E–J carry ``raw_text``-only items. Written one-per-body to
-    ``parsed/<year>/fd/<DocID>.json``.
+    consumer can tell "disclosed nothing" from "we failed to read it". Every
+    schedule (A–J) carries structured items, each retaining a verbatim
+    ``raw_text``. Written one-per-body to ``parsed/<year>/fd/<DocID>.json``.
     """
 
     schedules: dict[str, list] = Field(default_factory=dict)
