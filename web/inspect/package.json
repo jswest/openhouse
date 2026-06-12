@@ -1,0 +1,16 @@
+{
+  "name": "openhouse-inspect-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Contributor-only source for the `openhouse inspect` review UI. Build with `npm install && npm run build`; the output is committed to ../../openhouse/inspect/static so `openhouse inspect` runs with zero Node at runtime.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "svelte": "^5.19.0",
+    "vite": "^6.0.7"
+  }
+}

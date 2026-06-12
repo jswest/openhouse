@@ -17,6 +17,11 @@ dist
 wheels/
 Thumbs.db
 
+# Frontend (web/inspect) contributor build deps. The *built* bundle is committed
+# under openhouse/inspect/static (not dist/, which is ignored above) so
+# `openhouse inspect` runs with zero Node at runtime.
+node_modules/
+
 # .claude/ holds both shared tooling (tracked below) and personal/transient
 # state (ignored). Ignore everything, then re-include the shared artifacts.
 .claude/*
