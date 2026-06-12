@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field
 # Schema version recorded in ``parse-manifest.json`` (SPEC §6.5). A schema change
 # means re-parse, not migrate (CLAUDE.md): bump this, delete old code, re-run
 # ``parse`` from ``raw/``. Read by ``parse`` (#6) and the per-PDF pass (#7).
-SCHEMA_VERSION = "0.2.0"
+# 0.3.0 adds PTR body extraction (§6.3 transactions[]).
+SCHEMA_VERSION = "0.3.0"
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
@@ -115,3 +116,53 @@ class FilingMetadata(BaseModel):
     source_pdf: Optional[str] = None
     pdf_class: Optional[str] = None
     parse_status: Optional[str] = None
+
+
+class AmountRange(BaseModel):
+    """A transaction's disclosed dollar range (SPEC §6.3).
+
+    ``low``/``high`` are the parsed integer bounds; ``label`` is the verbatim
+    range string from the form (e.g. ``"$1,001 - $15,000"``) so the original
+    bucketed wording is never lost.
+    """
+
+    low: int
+    high: int
+    label: str
+
+
+class PtrTransaction(BaseModel):
+    """One e-filed PTR transaction row (SPEC §6.3 ``transactions[]``).
+
+    Field semantics (all verbatim-preserving where the form is authoritative):
+
+    - ``owner`` — the leading owner letter (``SP``/``DC``/``JT``); a blank owner
+      column means the filer themself, normalized to ``"self"``.
+    - ``asset`` — the asset name verbatim, multi-line wraps joined into one
+      string. Not "fixed" for the small-caps glyph artifact.
+    - ``ticker`` — strict symbol-only: the parenthesized ``(SYMBOL)`` embedded in
+      the asset name, **uppercased** to defeat pdfplumber's small-caps glyph
+      artifact (raw ``AAPl``/``bRK.b`` → ``AAPL``/``BRK.B``). ``None`` when the
+      asset carries no parenthesized symbol (corp bonds ``[CS]``, govt ``[GS]``,
+      etc. legitimately have none — ``None`` is correct, never a sentinel). A
+      ticker is never inferred from the company name.
+    - ``asset_type`` — the bracketed tag (``ST`` from ``[ST]``), preserved raw.
+    - ``transaction_type`` — ``P`` | ``S`` | ``S(partial)`` | ``E`` (the form
+      prints ``S (partial)``; normalized to ``S(partial)``).
+    - ``transaction_date`` / ``notification_date`` — ISO ``YYYY-MM-DD``.
+    - ``amount_range`` — the parsed ``{low, high, label}`` bucket.
+    - ``cap_gains_over_200`` — the cap-gains checkbox (the form renders
+      ``gfedc`` unchecked vs ``gfedcb`` checked at the row's end).
+    - ``description`` — the ``DESCRIPTION:`` line text if present, else ``None``.
+    """
+
+    owner: str
+    asset: str
+    ticker: Optional[str] = None
+    asset_type: Optional[str] = None
+    transaction_type: str
+    transaction_date: date
+    notification_date: date
+    amount_range: AmountRange
+    cap_gains_over_200: bool
+    description: Optional[str] = None
