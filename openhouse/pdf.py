@@ -24,11 +24,16 @@ from .schemas import (
     AmountRange,
     FdBody,
     PtrTransaction,
-    RawLineItem,
     ScheduleAItem,
     ScheduleBItem,
     ScheduleCItem,
     ScheduleDItem,
+    ScheduleEItem,
+    ScheduleFItem,
+    ScheduleGItem,
+    ScheduleHItem,
+    ScheduleIItem,
+    ScheduleJItem,
 )
 
 # Non-whitespace characters at or above which a PDF is classified ``efiled``.
@@ -427,7 +432,10 @@ _FD_AMOUNT_RE = re.compile(r"\$[\d,]+\s*-\s*\$[\d,]+")
 _FD_FURNITURE_RE = re.compile(
     r"^(asset owner|asset \[|owner creditor|Source type|Position name|"
     r"Date Parties|type\(s\)|gains >|\$1,000\?|\$200\?|filing|current Year|"
-    r"to Preceding|liability|\* For the complete|\* Asset class|name of organization)",
+    r"to Preceding|liability|\* For the complete|\* Asset class|name of organization|"
+    # E–J column-header furniture (#17): each schedule's header row, on its own
+    # line, leads with these tokens; the values below are filer content.
+    r"Source Description|Source Date|Source Activity|Source Brief)",
     re.IGNORECASE,
 )
 
@@ -869,21 +877,227 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
     return items
 
 
-# Schedules E–J: each item is one row, raw_text-only (depth-ordering, SPEC §6.3).
-def _parse_raw_schedule(lines: list[str]) -> list[RawLineItem]:
-    """Schedules E–J → raw_text-only line items (one per physical row)."""
-    return [
-        RawLineItem(raw_text=_scrub_raw_text(ln)) for ln in lines if ln.strip()
-    ]
+# --- Schedules E–J: per-schedule structured columns (#17) --------------------
+#
+# E–J were raw_text-only in #12; #17 column-parses each, ordered by real-data
+# fill rate (positions/agreements/gifts/travel are denser than honoraria and the
+# new-filer-only Schedule J). The live form's column headers (verified on the
+# committed fixtures) drive each split: E ``Position | Name of Organization``,
+# F ``Date | Parties | Terms``, G ``Source | Description | Value``, H ``Source |
+# Dates | Location | Items``, I ``Source | Activity | Date | Amount``, J ``Source
+# | Description of Duties``. The columns are space-separated on extraction with
+# no stable delimiter, so each parser splits only on signals it can read with
+# confidence (a leading ``Month YYYY`` date, a trailing dollar figure, a known
+# position-title prefix); anything it cannot bisect leaves the field ``None`` and
+# the verbatim ``raw_text`` still carries the row in full — completeness over the
+# known, explicit residual in the text (CLAUDE.md).
+
+# A trailing dollar figure (gift/honoraria value) at the (de-wrapped) row end.
+_FD_TRAILING_DOLLAR_RE = re.compile(r"(\$[\d,]+(?:\.\d{2})?)\s*$")
+
+# A leading ``Month YYYY`` (or ``MM/YYYY`` / ``MM/DD/YYYY``) agreement/travel date.
+_FD_LEADING_DATE_RE = re.compile(
+    r"^\s*("
+    r"(?:January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)\s+\d{4}"
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b",
+    re.IGNORECASE,
+)
+
+# Common Schedule E position titles. A row's leading run of words matching one of
+# these (case-insensitively) is the ``Position`` column; the remainder is the
+# organization. Conservative: an unrecognized title leaves both fields ``None``
+# (raw_text intact) rather than guessing a split point.
+_FD_POSITION_TITLES = (
+    "board member",
+    "board of directors",
+    "board of trustees",
+    "advisory board",
+    "trustee emeritus",
+    "trustee",
+    "president",
+    "vice president",
+    "chairman",
+    "chairperson",
+    "chair",
+    "secretary",
+    "treasurer",
+    "director",
+    "officer",
+    "partner",
+    "member",
+    "manager",
+    "managing member",
+    "owner",
+    "co-owner",
+    "general partner",
+    "limited partner",
+    "ceo",
+    "cfo",
+    "coo",
+    "consultant",
+    "advisor",
+    "adviser",
+    "delegate",
+    "commissioner",
+    "governor",
+)
+
+
+def _split_position(raw: str) -> tuple[str | None, str | None]:
+    """Split a Schedule E row into ``(position, organization)``.
+
+    The form's two columns merge on extraction with no delimiter, so we only
+    split when the row opens with a recognized position title — the title is the
+    ``Position`` column, the remainder the organization. An unrecognized opening
+    leaves both ``None`` (raw_text still carries the row).
+    """
+    low = raw.lower()
+    for title in _FD_POSITION_TITLES:
+        if low.startswith(title) and len(raw) > len(title):
+            nxt = raw[len(title) : len(title) + 1]
+            if nxt == " ":  # a real word boundary, not a longer word
+                org = raw[len(title) :].strip()
+                return raw[: len(title)].strip(), org or None
+    return None, None
+
+
+def _parse_schedule_e(lines: list[str]) -> list[ScheduleEItem]:
+    """Schedule E (positions) → ``position``/``organization`` + raw_text."""
+    items: list[ScheduleEItem] = []
+    for raw in _group_items(lines, starts_item=lambda s: True):
+        scrubbed = _scrub_raw_text(raw)
+        position, organization = _split_position(scrubbed)
+        items.append(
+            ScheduleEItem(
+                position=position,
+                organization=organization,
+                raw_text=scrubbed,
+            )
+        )
+    return items
+
+
+def _parse_schedule_f(lines: list[str]) -> list[ScheduleFItem]:
+    """Schedule F (agreements) → ``date``/``parties``/``terms`` + raw_text.
+
+    A row anchors on a leading ``Month YYYY`` date and folds the (heavily
+    wrapping) terms continuation lines in. ``parties`` and ``terms`` share the
+    rest of the columns with no stable delimiter, so only ``date`` is split off
+    confidently; parties/terms stay ``None`` and ``raw_text`` carries the row.
+    """
+    items: list[ScheduleFItem] = []
+    for raw in _group_items(
+        lines, starts_item=lambda s: bool(_FD_LEADING_DATE_RE.match(s))
+    ):
+        scrubbed = _scrub_raw_text(raw)
+        date_m = _FD_LEADING_DATE_RE.match(scrubbed)
+        agreement_date = date_m.group(1) if date_m else None
+        items.append(
+            ScheduleFItem(
+                date=agreement_date,
+                parties=None,
+                terms=None,
+                raw_text=scrubbed,
+            )
+        )
+    return items
+
+
+def _split_trailing_dollar(raw: str) -> tuple[str, str | None, str | None]:
+    """Split a row into ``(scrubbed, source, money)`` on a trailing dollar figure.
+
+    Shared by Schedules G (gifts) and I (charity-in-lieu): both have a confident
+    trailing dollar value/amount, while the columns before it (description / and
+    activity+date) merge with no stable delimiter — so ``source`` holds the whole
+    pre-value head and those middle columns stay ``None``. Either part is ``None``
+    when absent; the caller keeps the verbatim ``scrubbed`` as ``raw_text``.
+    """
+    scrubbed = _scrub_raw_text(raw)
+    m = _FD_TRAILING_DOLLAR_RE.search(scrubbed)
+    if not m:
+        return scrubbed, None, None
+    return scrubbed, scrubbed[: m.start()].strip() or None, m.group(1)
+
+
+def _parse_schedule_g(lines: list[str]) -> list[ScheduleGItem]:
+    """Schedule G (gifts) → ``source``/``value`` + raw_text (``Source | Description
+    | Value``; see :func:`_split_trailing_dollar`)."""
+    items: list[ScheduleGItem] = []
+    for raw in _group_items(lines, starts_item=lambda s: True):
+        scrubbed, source, value = _split_trailing_dollar(raw)
+        items.append(ScheduleGItem(source=source, value=value, raw_text=scrubbed))
+    return items
+
+
+def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
+    """Schedule I (charity in lieu of honoraria) → ``source``/``amount`` + raw_text
+    (``Source | Activity | Date | Amount``; see :func:`_split_trailing_dollar`)."""
+    items: list[ScheduleIItem] = []
+    for raw in _group_items(lines, starts_item=lambda s: True):
+        scrubbed, source, amount = _split_trailing_dollar(raw)
+        items.append(ScheduleIItem(source=source, amount=amount, raw_text=scrubbed))
+    return items
 
 
 # Schedule A dispatches separately in :func:`extract_fd_schedules` because it
 # threads the document-level ``glyphless`` flag (the NUL-rendering row anchor).
+# H (travel) and J (new-filer comp) have no entry: their columns merge with no
+# stable delimiter and no committed fixture has a filled form to anchor a split,
+# so they fall through to ``_salvage_raw`` — one raw_text-only item per row, all
+# structured columns ``None``. Adding a column parser later is a one-line entry.
 _FD_STRUCTURED = {
     "B": _parse_schedule_b,
     "C": _parse_schedule_c,
     "D": _parse_schedule_d,
+    "E": _parse_schedule_e,
+    "F": _parse_schedule_f,
+    "G": _parse_schedule_g,
+    "I": _parse_schedule_i,
 }
+
+# The item model per schedule letter, used to salvage a segment whose column
+# parser anchored no rows into raw_text-only items of the right type rather than
+# letting it vanish (CLAUDE.md "never silently drop").
+_FD_ITEM_MODEL = {
+    "A": ScheduleAItem,
+    "B": ScheduleBItem,
+    "C": ScheduleCItem,
+    "D": ScheduleDItem,
+    "E": ScheduleEItem,
+    "F": ScheduleFItem,
+    "G": ScheduleGItem,
+    "H": ScheduleHItem,
+    "I": ScheduleIItem,
+    "J": ScheduleJItem,
+}
+
+# Schedule A/C require a non-Optional first column (``asset`` / ``source``), so a
+# salvage item fills it from the raw text; every other schedule's columns are all
+# Optional and salvage carries raw_text alone.
+_FD_SALVAGE_REQUIRED = {"A": "asset", "B": "asset", "C": "source", "D": "creditor"}
+
+
+def _salvage_raw(letter: str, lines: list[str]) -> list:
+    """Salvage a segment's rows as raw_text-only items of the schedule's model.
+
+    Used when a column parser anchored no rows (or for a letter with no parser):
+    each non-blank line becomes one item carrying verbatim ``raw_text`` (plus the
+    schedule's required first column, if any, filled from that text) so nothing is
+    silently dropped (CLAUDE.md). Every structured column is left ``None``.
+    """
+    model = _FD_ITEM_MODEL[letter]
+    required = _FD_SALVAGE_REQUIRED.get(letter)
+    items = []
+    for ln in lines:
+        scrubbed = _scrub_raw_text(ln)
+        if not scrubbed:
+            continue
+        fields = {"raw_text": scrubbed}
+        if required:
+            fields[required] = scrubbed
+        items.append(model(**fields))
+    return items
 
 
 def extract_fd_schedules(pdf_path: Path) -> FdBody:
@@ -929,11 +1143,11 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
         elif parser := _FD_STRUCTURED.get(letter):
             items = parser(content)
         else:
-            items = _parse_raw_schedule(content)
+            items = _salvage_raw(letter, content)
         # An item-less segment (parser found no rows it could anchor) still carries
         # its lines as raw_text rather than vanishing — never silently drop.
         if not items:
-            items = _parse_raw_schedule(content)
+            items = _salvage_raw(letter, content)
         schedules[letter] = [it.model_dump(mode="json") for it in items]
 
     return FdBody(schedules=schedules)
