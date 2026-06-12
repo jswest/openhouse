@@ -80,14 +80,14 @@ def test_install_wipes_stale_files(tmp_path):
 def test_status_absent_when_not_installed(tmp_path):
     dest = tmp_path / "openhouse"
     files = {"SKILL.md": b"a", "reference.md": b"b"}
-    assert ready.check_status(dest, files, "0.5.0") == "absent"
+    assert ready.check_status(dest, files) == "absent"
 
 
 def test_status_up_to_date_after_install(tmp_path):
     dest = tmp_path / "openhouse"
     files = {"SKILL.md": b"a", "reference.md": b"b"}
     ready.install(dest, files, "0.5.0")
-    assert ready.check_status(dest, files, "0.5.0") == "up-to-date"
+    assert ready.check_status(dest, files) == "up-to-date"
 
 
 def test_status_hand_edited_when_file_changed(tmp_path):
@@ -95,7 +95,7 @@ def test_status_hand_edited_when_file_changed(tmp_path):
     files = {"SKILL.md": b"a", "reference.md": b"b"}
     ready.install(dest, files, "0.5.0")
     (dest / "SKILL.md").write_bytes(b"tampered")
-    assert ready.check_status(dest, files, "0.5.0") == "hand-edited"
+    assert ready.check_status(dest, files) == "hand-edited"
 
 
 def test_status_stale_when_packaged_content_advances(tmp_path):
@@ -104,7 +104,7 @@ def test_status_stale_when_packaged_content_advances(tmp_path):
     ready.install(dest, old, "0.5.0")
     # A newer release ships different prose; the install is untouched on disk.
     new = {"SKILL.md": b"a v2", "reference.md": b"b"}
-    assert ready.check_status(dest, new, "0.6.0") == "stale"
+    assert ready.check_status(dest, new) == "stale"
 
 
 def test_status_absent_when_marker_missing(tmp_path):
@@ -112,7 +112,7 @@ def test_status_absent_when_marker_missing(tmp_path):
     files = {"SKILL.md": b"a", "reference.md": b"b"}
     ready.install(dest, files, "0.5.0")
     (dest / ready.MARKER_NAME).unlink()
-    assert ready.check_status(dest, files, "0.5.0") == "absent"
+    assert ready.check_status(dest, files) == "absent"
 
 
 def test_status_absent_when_a_skill_file_missing(tmp_path):
@@ -120,7 +120,7 @@ def test_status_absent_when_a_skill_file_missing(tmp_path):
     files = {"SKILL.md": b"a", "reference.md": b"b"}
     ready.install(dest, files, "0.5.0")
     (dest / "reference.md").unlink()
-    assert ready.check_status(dest, files, "0.5.0") == "absent"
+    assert ready.check_status(dest, files) == "absent"
 
 
 # ---- packaged data + run() dispatch (confined to tmp via Path.home patch) ----

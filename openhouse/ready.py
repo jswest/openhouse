@@ -13,8 +13,9 @@ a **content hash** over the installed skill files. ``--check`` compares the
 marker against what is packaged now and reports one of:
 
 - ``up-to-date`` — installed hash matches the packaged hash.
-- ``stale`` — a newer packaged version is available (hashes differ, marker
-  version differs from the current package version): re-run ``openhouse ready``.
+- ``stale`` — the packaged files differ from the installed ones (the marker
+  still matches what's on disk, but the packaged content hash has moved):
+  re-run ``openhouse ready``.
 - ``hand-edited`` — the installed files were modified after install (the marker's
   recorded hash no longer matches the files on disk): your edits would be lost.
 
@@ -114,7 +115,7 @@ def install(dest: Path, files: dict[str, bytes], version: str) -> dict:
     return marker
 
 
-def check_status(dest: Path, packaged: dict[str, bytes], version: str) -> str:
+def check_status(dest: Path, packaged: dict[str, bytes]) -> str:
     """Classify the installed skill against what is packaged now.
 
     Returns one of ``"absent"``, ``"hand-edited"``, ``"stale"``, ``"up-to-date"``.
@@ -158,7 +159,7 @@ def run(argv: list[str]) -> int:
     version = __version__
 
     if check:
-        status = check_status(dest, packaged, version)
+        status = check_status(dest, packaged)
         result = {
             "command": "ready",
             "status": status,
