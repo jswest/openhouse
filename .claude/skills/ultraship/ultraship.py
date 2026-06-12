@@ -41,9 +41,9 @@ to contradict the computed answer.
 
 Usage (the skill pipes the omnibus body in on stdin)::
 
-    gh issue view <omnibus> --json body --jq .body | uv run python scripts/ultraship.py validate
-    gh issue view <omnibus> --json body --jq .body | uv run python scripts/ultraship.py plan
-    gh issue view <omnibus> --json body --jq .body | uv run python scripts/ultraship.py plan --json
+    gh issue view <omnibus> --json body --jq .body | uv run python .claude/skills/ultraship/ultraship.py validate
+    gh issue view <omnibus> --json body --jq .body | uv run python .claude/skills/ultraship/ultraship.py plan
+    gh issue view <omnibus> --json body --jq .body | uv run python .claude/skills/ultraship/ultraship.py plan --json
 """
 
 from __future__ import annotations
