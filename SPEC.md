@@ -299,6 +299,9 @@ openhouse read summary 2024                                 # counts: types, efi
   true identity (§6.2).
 - **Missing years degrade gracefully:** a range where some years aren't parsed yet
   reports which years were skipped (stderr) and answers from the rest.
+- **`trades <range>` range = filing year:** the range selects **filing** years,
+  not transaction years; transactions routinely predate the filing (a Dec-2020
+  trade in a 2021 filing). Widen the range when bounding by transaction date.
 - **Flags:** `--data-dir`, `--table`.
 
 ---

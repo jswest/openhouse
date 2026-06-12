@@ -385,3 +385,77 @@ def test_dataflags_accepted_before_subcommand(capsys):
         ["--table", "--data-dir", dd, "filings", "2021"], current_year=CURRENT_YEAR
     )
     assert rc == 0
+
+
+# --- GH-0040 LOW: residual base / not_classified / asymmetry / schema drift -----
+
+
+def test_trades_residual_base_is_ptr_efiled_not_all_efiled(capsys):
+    # The 2021 manifest's by_pdf_class.efiled is 3, but only TWO of those are
+    # type-P (PTR) efiled filings (20100001, 20100002); 10100003 is an efiled FD
+    # with no PTR body. The trades residual must be complete over the body-bearing
+    # type-P base (2), not the manifest's all-efiled total (3).
+    run(["trades", "2021"])
+    err = capsys.readouterr().err
+    assert "complete over the 2 e-filed filings" in err
+
+
+def test_trades_residual_includes_not_classified(capsys):
+    # The 2021 manifest declares not_classified 1; it belongs in neither the parsed
+    # nor the scanned/missing/error side, so the residual must surface it so the
+    # unknown is not under-reported.
+    run(["trades", "2021"])
+    err = capsys.readouterr().err
+    assert "not_classified 1" in err
+    # unparsed total folds it in: scanned 1 + missing 1 + error 1 + not_classified 1.
+    assert "4 did not parse" in err
+
+
+def test_filings_residual_includes_not_classified(capsys):
+    # The not_classified bucket surfaces on every range residual, not just trades.
+    run(["filings", "2021"])
+    err = capsys.readouterr().err
+    assert "not_classified 1" in err
+
+
+def test_ticker_blind_spot_states_filter_asymmetry(capsys):
+    # The null-ticker blind-spot count applies --member/dates but NOT
+    # --owner/--type/--min-amount; the output must say so (conservative over-report).
+    run(["trades", "2021", "--ticker", "AAPL", "--owner", "SP"])
+    err = capsys.readouterr().err
+    assert "blind spot" in err
+    assert "ignoring --owner/--type/--min-amount" in err
+
+
+def test_schema_version_drift_warns_once(capsys):
+    # The fixtures carry schema_version "0.2.0", which differs from the current
+    # SCHEMA_VERSION; read must emit exactly ONE drift warning per run.
+    run(["trades", "2021-2022"])
+    err = capsys.readouterr().err
+    assert err.count("warning: parsed tree was written by schema_version") == 1
+    assert "re-parse, not migrate" in err
+
+
+def test_schema_version_drift_warns_on_filing(capsys):
+    # The single-filing path warns too (it has no range, resolves to the found year).
+    run(["filing", "20100001"])
+    err = capsys.readouterr().err
+    assert "schema_version" in err and "re-parse, not migrate" in err
+
+
+def test_no_schema_warning_when_versions_match(tmp_path, capsys):
+    # Rewrite a year's manifest to the current SCHEMA_VERSION → no drift warning.
+    import shutil
+
+    from openhouse.schemas import SCHEMA_VERSION
+
+    dd = tmp_path / "data"
+    shutil.copytree(FIXTURES, dd / "parsed")
+    mpath = dd / "parsed" / "2021" / "parse-manifest.json"
+    manifest = json.loads(mpath.read_text())
+    manifest["schema_version"] = SCHEMA_VERSION
+    mpath.write_text(json.dumps(manifest))
+
+    run(["trades", "2021"], data_dir=dd)
+    err = capsys.readouterr().err
+    assert "schema_version" not in err
