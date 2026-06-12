@@ -192,8 +192,11 @@ exist, already happened during `onto` flag-resolution above — that's a separat
 `git branch`/`push`, not a checkout).
 
 ## 3. Read the issue
-`gh issue view <N>`. Derive a kebab slug from the title → branch
-`issue/<N>-<slug>`, worktree `../openhouse-issue-<N>-<slug>`.
+`gh issue view <N> --comments` — read the **comment thread**, not just the body.
+A correction or an "actually do it this way" reply often lands in the comments
+after the issue was filed; that's where the *"when unsure, stop and ask"* answer
+already lives, so it must shape the implementation. Derive a kebab slug from the
+title → branch `issue/<N>-<slug>`, worktree `../openhouse-issue-<N>-<slug>`.
 
 ## 4. Collision scan (do this before creating the worktree)
 Surface overlapping in-flight work so a conflict is known up front:

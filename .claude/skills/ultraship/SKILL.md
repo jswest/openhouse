@@ -152,11 +152,16 @@ attended step.
    version (`vX.Y.Z — …` → `omnibus/vX.Y.Z`). If the title has no parseable
    leading `vX.Y.Z`, **refuse** — don't invent a name.
 2. **Director interview (the keystone).** Before any DAG, the director reads the
-   omnibus and its sub-issues and **talks to you**:
+   omnibus and its sub-issues — **bodies *and* comment threads**
+   (`gh issue view <N> --comments`), since a correction or "do it this way" reply
+   often lands in the comments after filing — and **talks to you**:
    - asks only what **materially changes the plan or the grade** (not an
      interrogation; you can say "enough, go" anytime);
    - writes the sharpened per-sub-issue **`objective`** and the omnibus **`goal`**
-     into the narrative `### Sub-issues` section and omnibus header;
+     into the narrative `### Sub-issues` section and omnibus header — folding in
+     anything material a sub-issue's comments surfaced, since players receive only
+     `objective + director's-notes` (run step 2) and never read the raw threads
+     themselves;
    - records run-wide context that isn't any single issue's objective ("X is out
      of scope," "prefer approach Y for #232") into the **director's-notes block**
      in the omnibus body, so the stage-manager and critic see exactly what the
