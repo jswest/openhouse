@@ -1,0 +1,252 @@
+:root {
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --ink: #1c1c1a;
+  --muted: #6b6b66;
+  --line: #e3e3df;
+  --accent: #2f6f4f;
+  --accent-soft: #e6f0ea;
+  --warn: #9a5b00;
+  --warn-soft: #fdf0db;
+  --bad: #9a2f2f;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Layout: header over a three-column workspace (queue | PDF | record+form). */
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+}
+
+header.bar {
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+header.bar h1 {
+  font-size: 1rem;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+header.bar .meta {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+header.bar .progress {
+  margin-left: auto;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: 17rem 1fr 24rem;
+  min-height: 0;
+}
+
+.col {
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+}
+
+.col:last-child {
+  border-right: none;
+}
+
+/* Queue */
+.queue-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 0.75rem;
+}
+
+.queue-item:hover {
+  background: var(--accent-soft);
+}
+
+.queue-item.active {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.queue-item .who {
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.queue-item .sub {
+  font-size: 0.74rem;
+  color: var(--muted);
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+}
+
+.tag {
+  font-size: 0.68rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.6rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tag.done {
+  background: var(--accent);
+  color: #fff;
+}
+
+.tag.stale {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* PDF pane */
+.pdf-pane {
+  height: 100%;
+}
+
+.pdf-pane iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #555;
+}
+
+.empty {
+  padding: 2rem;
+  color: var(--muted);
+}
+
+/* Record + form column */
+.record {
+  padding: 0.75rem 1rem;
+}
+
+.record h2 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 1rem 0 0.4rem;
+}
+
+.record pre {
+  background: #1c1c1a;
+  color: #e8e8e3;
+  padding: 0.6rem;
+  border-radius: 0.4rem;
+  font-size: 0.74rem;
+  overflow: auto;
+  max-height: 18rem;
+  margin: 0;
+}
+
+.record .rawtext {
+  white-space: pre-wrap;
+  background: var(--bg);
+  color: var(--ink);
+  max-height: 12rem;
+}
+
+.banner {
+  background: var(--warn-soft);
+  color: var(--warn);
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Verdict form */
+.verdict {
+  position: sticky;
+  bottom: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  padding: 0.75rem 1rem 1rem;
+}
+
+.dim {
+  margin-bottom: 0.55rem;
+}
+
+.dim label.check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.86rem;
+}
+
+.dim .count {
+  margin: 0.3rem 0 0 1.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.dim .count input {
+  width: 4rem;
+  font: inherit;
+  padding: 0.1rem 0.3rem;
+}
+
+.verdict textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  resize: vertical;
+  min-height: 3rem;
+}
+
+.verdict .actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.verdict button.save {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.9rem;
+  border-radius: 0.3rem;
+  font-weight: 600;
+}
+
+.legend {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 0 0 0.5rem;
+}

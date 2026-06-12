@@ -76,6 +76,25 @@ def test_post_2012_no_ptr_warning(capsys):
     assert capsys.readouterr().err == ""
 
 
+# --- `inspect` dispatch (#56) ------------------------------------------------
+from openhouse.cli import main  # noqa: E402
+
+
+def test_inspect_rejects_year_range():
+    assert main(["inspect", "2021-2022", "--sample", "0.5"]) == 2
+
+
+def test_inspect_rejects_out_of_range_sample():
+    assert main(["inspect", "2022", "--sample", "1.5"]) == 2
+    assert main(["inspect", "2022", "--sample", "0"]) == 2
+
+
+def test_inspect_unparsed_year_exits_1(tmp_path, capsys):
+    rc = main(["inspect", "2022", "--sample", "0.5", "--data-dir", str(tmp_path)])
+    assert rc == 1
+    assert "not parsed" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # Data-dir resolution (#50): flag → OPENHOUSE_DATA_DIR env → ./data, applied
 # uniformly across pull / parse / read via one shared resolver.

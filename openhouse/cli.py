@@ -253,6 +253,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit non-zero if any filing errors (e.g. a corrupt PDF)",
     )
 
+    inspect_p = subparsers.add_parser(
+        "inspect",
+        help="human accuracy review of parsed filings in a local web app (offline)",
+    )
+    inspect_p.add_argument("year", help="a single coverage year, YYYY")
+    inspect_p.add_argument(
+        "--sample",
+        type=float,
+        required=True,
+        help="fraction (0–1] of the year's reviewable filings to sample",
+    )
+    inspect_p.add_argument(
+        "--mode",
+        choices=("filing",),
+        default="filing",
+        help="review granularity (only 'filing' now; trade mode is a follow-up)",
+    )
+    inspect_p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="sampling seed; same year/sample/seed reproduces the set (default: 0)",
+    )
+    inspect_p.add_argument(
+        "--data-dir",
+        default=None,
+        help=_DATA_DIR_HELP,
+    )
+
     # `read` is intercepted in main() before argparse runs (its REMAINDER-style
     # args, including a leading global flag, defeat argparse subparsing), so this
     # entry exists only so `openhouse --help` lists the command; its args are
@@ -348,6 +377,31 @@ def main(argv: list[str] | None = None) -> int:
         except pull_mod.PullError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+
+    if args.command == "inspect":
+        # A single year — reviewing already-parsed data, one browser session per
+        # year (parse_year_range gives the bounds check + sub-2012 PTR warning).
+        try:
+            years = parse_year_range(args.year, current_year)
+        except YearRangeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if len(years) != 1:
+            print("error: inspect takes a single year, not a range.", file=sys.stderr)
+            return 2
+        if not 0 < args.sample <= 1:
+            print("error: --sample must be in (0, 1].", file=sys.stderr)
+            return 2
+        # Lazy import: keep pdfplumber + http.server off the path for pull/parse.
+        from .inspect.server import run as inspect_run
+
+        return inspect_run(
+            years[0],
+            data_dir=resolve_data_dir(args.data_dir),
+            sample=args.sample,
+            seed=args.seed,
+            started_at=fetched_at,
+        )
 
     # `read` is dispatched at the top of main() (before argparse); reaching here
     # means an unknown command.
