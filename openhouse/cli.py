@@ -2,9 +2,9 @@
 
 ``pull`` implements the full acquisition path — the index ZIP (issue #3) and the
 PDF bodies routed by FilingType (issue #4). ``parse`` implements the offline
-normalization + PDF-classification pass (issues #6/#7); ``read`` remains a stub
-that prints "not implemented" to stderr and exits non-zero, landing in a later
-milestone.
+normalization + PDF-classification pass (issues #6/#7); ``read`` (issue #10) is
+the offline, read-only query surface — its REMAINDER args are dispatched into
+``openhouse/read.py``, which owns its own sub-parser.
 
 The year-range parser is shared infrastructure (SPEC §9). It is kept pure and
 wall-clock-free by taking ``current_year`` as a parameter, so it is testable
@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import parse as parse_mod
 from . import pull as pull_mod
+from . import read as read_mod
 
 # SPEC §2.1: the bulk index covers 2008 → present; PTRs (STOCK Act) appear only
 # from 2012 onward.
@@ -121,12 +122,6 @@ def parse_types(arg: str) -> list[str]:
     return [t for t in VALID_PDF_TYPES if t in families]
 
 
-def _stub(command: str) -> int:
-    """A not-yet-implemented subcommand: explain on stderr, exit non-zero."""
-    print(f"openhouse {command}: not implemented", file=sys.stderr)
-    return 1
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openhouse",
@@ -222,25 +217,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit non-zero if any filing errors (e.g. a corrupt PDF)",
     )
 
-    read_p = subparsers.add_parser(
-        "read", help="query the normalized JSON (offline, read-only)"
-    )
-    read_p.add_argument(
-        "args", nargs=argparse.REMAINDER, help="read subcommand and arguments"
+    # `read` is intercepted in main() before argparse runs (its REMAINDER-style
+    # args, including a leading global flag, defeat argparse subparsing), so this
+    # entry exists only so `openhouse --help` lists the command; its args are
+    # never parsed here. See read.py for the real sub-parser.
+    subparsers.add_parser(
+        "read",
+        help="query the normalized JSON (offline, read-only)",
+        add_help=False,
     )
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = sys.argv[1:] if argv is None else argv
 
     # The single wall-clock read for the whole program (SPEC §9): both the
     # range-validation year and the manifest ``fetched-at`` derive from it.
     now = datetime.now()
     current_year = now.year
     fetched_at = now.isoformat()
+
+    # `read` owns its own sub-parser (read.py), so hand it everything after the
+    # `read` token verbatim — argparse's REMAINDER mis-handles a leading global
+    # flag (e.g. `read --table filings 2021`), and slicing here is order-robust.
+    if raw_argv and raw_argv[0] == "read":
+        return read_mod.run(raw_argv[1:], current_year=current_year)
+
+    parser = build_parser()
+    args = parser.parse_args(raw_argv)
 
     if args.command in ("pull", "parse"):
         # Validate the range now so a bad argument fails fast and uniformly.
@@ -291,9 +297,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
-    if args.command == "read":
-        return _stub("read")
-
+    # `read` is dispatched at the top of main() (before argparse); reaching here
+    # means an unknown command.
     parser.error(f"unknown command {args.command!r}")
     return 2  # unreachable; parser.error exits
 

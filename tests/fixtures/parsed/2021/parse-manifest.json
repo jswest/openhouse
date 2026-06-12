@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.2.0",
+  "generated_at": "2026-06-11T12:00:00",
+  "year": 2021,
+  "counts": {
+    "total": 6,
+    "by_filing_type": { "O": 1, "P": 4, "X": 1 },
+    "by_pdf_class": { "efiled": 3, "scanned": 1, "missing": 1 },
+    "not_classified": 1,
+    "by_parse_status": { "ok": 5, "error": 1 }
+  },
+  "identity_warnings": [
+    {
+      "filer_id": "ny.smith.sam",
+      "raw_names": ["Sam Smith", "Samuel Smith"],
+      "doc_ids": ["20100099", "20100098"],
+      "districts": [3, 8]
+    }
+  ]
+}

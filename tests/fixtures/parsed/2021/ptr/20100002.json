@@ -1,0 +1,28 @@
+{
+  "transactions": [
+    {
+      "owner": "self",
+      "asset": "Apple Inc. (AAPL) [ST]",
+      "ticker": "AAPL",
+      "asset_type": "ST",
+      "transaction_type": "S",
+      "transaction_date": "2021-06-15",
+      "notification_date": "2021-07-01",
+      "amount_range": { "low": 100001, "high": 250000, "label": "$100,001 - $250,000" },
+      "cap_gains_over_200": true,
+      "description": null
+    },
+    {
+      "owner": "DC",
+      "asset": "Tesla, Inc. (TSLA) [ST]",
+      "ticker": "TSLA",
+      "asset_type": "ST",
+      "transaction_type": "P",
+      "transaction_date": "2021-06-20",
+      "notification_date": "2021-07-01",
+      "amount_range": { "low": 1001, "high": 15000, "label": "$1,001 - $15,000" },
+      "cap_gains_over_200": false,
+      "description": null
+    }
+  ]
+}
