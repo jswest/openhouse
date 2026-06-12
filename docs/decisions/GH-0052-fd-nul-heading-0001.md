@@ -91,22 +91,72 @@ and by the doc-by-doc check below.
 ## Before / after recovery (real data, offline)
 
 Measured by running `extract_fd_schedules` over every e-filed FD under
-`data/raw/{2020,2021,2022}/fd/` (read-only; no writes under `data/`), per Fable's
-acceptance pass:
+`data/raw/{2020,2021,2022}/fd/` (read-only; no writes under `data/`) — a full
+6,346-doc sweep, re-measured fresh for the critic fixes (the earlier table
+understated 2021/2022):
 
 | Year | FD bodies extracted (before → after) |
 |---|---|
-| 2020 | **1190 → 1242** |
-| 2021 | **739 → 1242** |
-| 2022 | **67 → 555** |
+| 2020 | **1190 → 1257** |
+| 2021 | **739 → 1296** |
+| 2022 | **67 → 1376** |
 
-**Zero regression.** All 1,996 previously-extracted bodies remain byte-identical;
-all extension (`X`) cover sheets and every W/D/G doc still raise `NotAnFdBody`.
-This resolves **#51** (NUL-rendered FDs mis-filed as benign no-body cover sheets).
+(3,929 FD bodies recovered total; the remaining 2,417 docs are extensions / cover
+sheets / W·D·G filings that still correctly raise `NotAnFdBody`.)
 
-The raw_text scrub does not change this: re-extracting all **1190** baseline 2020
-FD bodies with the scrub applied and diffing against the v0.4.0 baseline parse at
-`parsed/2020/fd/` yields **0 mismatches, 0 errors** — byte-for-byte identical.
+**Zero regression.** All 1,996 previously-extracted bodies remain byte-identical
+(0 mismatch over the full baseline parse at the v0.4.0 accept-data snapshot,
+including all **1190** baseline 2020 bodies — byte-for-byte); all extension (`X`)
+cover sheets and every W/D/G doc still raise `NotAnFdBody`. This resolves **#51**
+(NUL-rendered FDs mis-filed as benign no-body cover sheets).
+
+### Critic-found defect fixes (PR #53 review, all `openhouse/pdf.py`)
+
+A post-implementation 6,346-doc critic sweep surfaced three real defects in the
+NUL path. All three are fixed here, each with a regression test and re-verified by
+a before/after sweep.
+
+**🔴 Comments-label trailer false-fire (`_FD_TRAILER_RE`).** The per-row
+`COMMENTS:` detail label renders `C\x00{7}: <filer text>` in NUL docs and matched
+the `^[EC]\x00` trailer branch, so `_segment_schedules` treated it as end-of-body
+and **dropped every following content line** until the next heading — **16,901
+content lines silently lost across 376 docs / 533 occurrences**, status still
+`ok`. The two legitimate NUL trailers (`E\x00{9} …`, `C\x00{12} …`) are never
+followed by a colon; the comments label always is. Fix: a **possessive** negative
+lookahead `[EC]\x00++(?!:)` — possessive so greedy backtracking can't shrink the
+NUL run to expose a non-colon char and defeat the guard. The comments line now
+folds into the row's `raw_text` exactly as the intact-glyph `COMMENTS:` label
+does; the real trailers still end the body. Net effect: **+7,375 structured items
+retained across 349 docs**.
+
+**🟡 Glyphless Schedule-A anchor missed `Over $X` and exact-dollar values
+(`_FD_A_ROW_AFTER_TYPE_RE`).** The value-column signature accepted only
+`$lo -`/`None`/`Undetermined`, so rows whose value column is `Over $50,000,000` (a
+real form bucket) or an exact-dollar value (`$96,550.00`) didn't anchor and merged
+into the prior item. Extended the alternation with `Over\b` and `\$[\d,]+\.\d{2}`
+(collision-free against continuation lines: wrapped highs are bare `$X` at EOL with
+no decimals/`Over`). **28 such rows across 17 docs now anchor** as structured
+items (was 0).
+
+**🟡 NULs leaked into STRUCTURED string fields.** `_scrub_raw_text` was applied
+only to `raw_text`, but `asset`, `location`, `description`, `income_type`,
+`source`, `creditor`, and `liability_type` are sliced from the *un-scrubbed* `raw`
+blob, so folded furniture put literal `\x00` into those JSON fields — **626 fields
+across 352 docs**. A new **NUL-gated** helper scrubs them:
+
+```python
+def _scrub_field(s):
+    return _scrub_raw_text(s) if s and "\x00" in s else s
+```
+
+The gate is load-bearing: a blanket `\s+`-collapse is unsafe because legitimate
+filer values (notably 431 baseline `income_type` values) carry meaningful double
+spaces that must stay byte-identical, so the transform fires *only* when a NUL is
+actually present. `_scrub_field` is applied to every structured string assignment
+**including the `or raw`/`or _scrub_field(raw)` fallbacks** (a Schedule-D row whose
+creditor slice is empty falls back to the whole blob, which can carry a folded
+comments label). After the fix: **0 NUL bytes in any emitted structured field or
+`raw_text` across all 3,929 recovered bodies** (was 626).
 
 ## Tests (`tests/test_fd_extraction.py`, all offline)
 
@@ -122,7 +172,22 @@ issue adds three:
 - `test_scrub_raw_text_collapses_nul_runs_and_whitespace` — interior / leading /
   trailing NUL runs collapse and strip as specified.
 
-Full suite: **234 passed** (231 prior + 3 new).
+The three critic fixes add five more (offline, synthetic NUL bodies):
+
+- `test_nul_comments_label_does_not_end_schedule` (🔴) — a `C\x00{7}: …` comments
+  line mid-Schedule-D followed by a real liability row: the row is still emitted
+  (not dropped), the comment text folds into `raw_text`, and a real
+  certification NUL trailer still ends the body.
+- `test_nulglyph_schedule_a_anchors_over_and_exact_dollar` (🟡) — `Over $X` and
+  exact-dollar A rows now anchor as distinct structured items.
+- `test_scrub_field_is_nul_gated` (🟡) — `_scrub_field` scrubs only when a NUL is
+  present; a NUL-free double-spaced value is returned byte-identical.
+- `test_nulglyph_structured_fields_have_no_nul_bytes` (🟡) — `asset` / `location`
+  / `description` / `income_type` carry no `\x00`, content preserved.
+- `test_nul_schedule_d_creditor_fallback_is_scrubbed` (🟡) — the `or raw`
+  fallback path is also scrubbed.
+
+Full suite: **239 passed** (234 prior + 5 new).
 
 ## Consequences / residual left deliberately
 

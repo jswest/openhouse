@@ -391,10 +391,20 @@ _NONE_DISCLOSED_RE = re.compile(r"^None disclosed\.?\s*$", re.IGNORECASE)
 # checkboxes + the certification/signature block). They end the last schedule's
 # content. The ``[EC]\x00`` branch is the glyphs-lost rendering of the same two
 # section titles (``E\x00…`` = "Exclusions of Spouse, Dependent, or Trust
-# Information", ``C\x00…`` = "Certification and Signature" / the "Comments"
-# header between them) — safe because content lines never carry NULs.
+# Information", ``C\x00…`` = "Certification and Signature"). The ``(?!:)``
+# negative lookahead after the NUL run is load-bearing: the per-row ``COMMENTS:``
+# detail label *inside* a schedule renders as ``C\x00{7}: <filer text>`` in NUL
+# docs and would otherwise match this trailer branch, ending the body early and
+# silently dropping every following content row. The two legitimate NUL trailers
+# (Exclusions ``E\x00{9} …``, Certification ``C\x00{12} …``) are never followed by
+# a colon; the comments label always is — so excluding a trailing colon keeps the
+# real trailers matching while letting the comments line fold into the row's
+# raw_text, exactly as the intact-glyph ``COMMENTS:`` label does. The quantifier
+# is possessive (``\x00++``) so greedy backtracking can't shrink the NUL run to
+# expose a non-colon char and defeat the lookahead.
 _FD_TRAILER_RE = re.compile(
-    r"^(exclusions of|certification and|digitally signed|[EC]\x00)", re.IGNORECASE
+    r"^(exclusions of|certification and|digitally signed|[EC]\x00++(?!:))",
+    re.IGNORECASE,
 )
 
 # An A/B row's trailing "tx. over $1,000?" checkbox glyph (gfedc unchecked /
@@ -509,6 +519,20 @@ def _scrub_raw_text(s: str) -> str:
     deliberately, mildly lossy: the exact furniture rendering is dropped.
     """
     return re.sub(r"\s+", " ", s.replace("\x00", " ")).strip()
+
+
+def _scrub_field(s: str | None) -> str | None:
+    """NUL-gated scrub for a *structured* string field sliced from the raw blob.
+
+    The structured columns (``asset``/``location``/``description``/``income_type``/
+    Schedule-C ``source``) are sliced out of the un-scrubbed ``raw`` blob, so in the
+    glyphs-lost rendering they can carry literal ``\\x00`` furniture folded into the
+    text. Run ``_scrub_raw_text`` only when the value actually contains a NUL — a
+    blanket ``\\s+``-collapse is unsafe because legitimate filer values (notably
+    ``income_type``) carry meaningful double spaces that must stay byte-identical.
+    The gate makes this a strict no-op on every NUL-free value.
+    """
+    return _scrub_raw_text(s) if s and "\x00" in s else s
 
 
 def _group_items(lines: list[str], *, starts_item) -> list[str]:
@@ -631,12 +655,15 @@ def _schedule_a_amounts(
 
 # A glyphs-lost A-row's value-column signature: right after the ``[TYPE]`` tag
 # (and the optional owner token) the value column begins — a ``$lo -`` range
-# start (the dash is load-bearing) or the literal ``None``/``Undetermined``.
+# start (the dash is load-bearing), the open-ended ``Over $X`` bucket, an exact
+# dollar value (``$96,550.00`` — note the required ``.dd`` cents), or the literal
+# ``None``/``Undetermined``.
 # A wrapped subholding tail (``Cash [BA] $5,000,000`` — the row's wrapped value
-# *high* bound) carries a bare amount with **no dash**, so it does not match and
-# stays a continuation, exactly as the glyph anchor would have treated it.
+# *high* bound) carries a bare amount with **no dash, no cents, no ``Over``**, so
+# it does not match and stays a continuation, exactly as the glyph anchor would
+# have treated it (verified collision-free against continuation lines).
 _FD_A_ROW_AFTER_TYPE_RE = re.compile(
-    r"\]\s*(?:SP|DC|JT)?\s*(?:\$[\d,]+\s*-|None\b|Undetermined\b)"
+    r"\]\s*(?:SP|DC|JT)?\s*(?:\$[\d,]+\s*-|Over\b|\$[\d,]+\.\d{2}|None\b|Undetermined\b)"
 )
 
 
@@ -675,14 +702,14 @@ def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAIte
             rf"{_FD_LOCATION_LABEL}\s*(.*?)(?:\s+{_FD_DESCRIPTION_LABEL}|$)", raw
         )
         if loc_m:
-            location = loc_m.group(1).strip() or None
+            location = _scrub_field(loc_m.group(1).strip()) or None
         desc_m = re.search(rf"{_FD_DESCRIPTION_LABEL}\s*(.*)$", raw)
         if desc_m:
-            description = desc_m.group(1).strip() or None
+            description = _scrub_field(desc_m.group(1).strip()) or None
         # The asset name is everything up to the [TYPE] tag.
         type_m = _FD_TYPE_TAG_RE.search(raw)
         asset_type = type_m.group(1) if type_m else None
-        asset = raw[: type_m.start()].strip() if type_m else raw.strip()
+        asset = _scrub_field(raw[: type_m.start()].strip() if type_m else raw.strip())
         owner_m = _FD_OWNER_AFTER_TYPE_RE.search(raw)
         owner = owner_m.group(1) if owner_m else None
         # The first amount bucket is the asset value; a second (if any) is income.
@@ -692,6 +719,7 @@ def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAIte
         # that common interleave; otherwise the two complete buckets are taken in
         # order. raw_text always carries the verbatim row regardless.
         value_of_asset, income_type, income_amount = _schedule_a_amounts(raw)
+        income_type = _scrub_field(income_type)
         items.append(
             ScheduleAItem(
                 asset=asset,
@@ -742,7 +770,7 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
         asset_type = type_m.group(1) if type_m else None
         # Asset name = everything before the ⇒ arrow, plus any wrapped tail with
         # the [TYPE] tag; keep it simple — the text up to ⇒ is the primary name.
-        asset = raw.split("⇒", 1)[0].strip()
+        asset = _scrub_field(raw.split("⇒", 1)[0].strip())
         glyph_m = re.search(r"\bgfedcb?\b", raw)
         cap_gains = (glyph_m.group(0) == "gfedcb") if glyph_m else None
         items.append(
@@ -785,8 +813,8 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
             source, income_type = head, None
         items.append(
             ScheduleCItem(
-                source=source or raw,
-                income_type=income_type,
+                source=_scrub_field(source) or _scrub_field(raw),
+                income_type=_scrub_field(income_type),
                 amount=amount,
                 raw_text=_scrub_raw_text(raw),
             )
@@ -821,16 +849,16 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
         # Creditor = text between any owner token and the date.
         start = owner_m.end() if owner_m else 0
         end = date_m.start() if date_m else len(raw)
-        creditor = raw[start:end].strip()
+        creditor = _scrub_field(raw[start:end].strip())
         # Liability type = text between the date and the amount.
         amt_m = _FD_AMOUNT_RE.search(raw)
         ltype = None
         if date_m:
             type_end = amt_m.start() if amt_m else len(raw)
-            ltype = raw[date_m.end() : type_end].strip() or None
+            ltype = _scrub_field(raw[date_m.end() : type_end].strip() or None)
         items.append(
             ScheduleDItem(
-                creditor=creditor or raw,
+                creditor=creditor or _scrub_field(raw),
                 owner=owner,
                 date_incurred=date_incurred,
                 liability_type=ltype,
