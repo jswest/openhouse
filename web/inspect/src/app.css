@@ -27,7 +27,8 @@ button {
   cursor: pointer;
 }
 
-/* Layout: header over a three-column workspace (queue | PDF | record+form). */
+/* Layout: header over a two-column workspace (PDF | record+form), each 50%,
+   with the documents tray overlaying the PDF's left edge. */
 .app {
   display: grid;
   grid-template-rows: auto 1fr;
@@ -61,8 +62,9 @@ header.bar .progress {
 }
 
 .workspace {
+  position: relative;
   display: grid;
-  grid-template-columns: 17rem 1fr 24rem;
+  grid-template-columns: 1fr 1fr;
   min-height: 0;
 }
 
@@ -74,6 +76,73 @@ header.bar .progress {
 
 .col:last-child {
   border-right: none;
+}
+
+/* Documents tray: overlays the PDF's left edge (absolute), so toggling it never
+   resizes the 50/50 split. Collapsed, it's a thin rail showing just the toggle;
+   .pdf-pane reserves that rail's width as a gutter so the rail never covers the
+   PDF. */
+.tray {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 17rem;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.08);
+  transition: width 0.15s ease;
+}
+
+.tray.collapsed {
+  width: 1.9rem;
+  box-shadow: none;
+}
+
+.tray-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.tray.collapsed .tray-head {
+  justify-content: center;
+  padding: 0.4rem 0;
+}
+
+.tray-title {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.tray-toggle {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.1rem 0.3rem;
+}
+
+.tray-toggle:hover {
+  color: var(--ink);
+}
+
+.tray-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tray.collapsed .tray-list {
+  display: none;
 }
 
 /* Queue */
@@ -127,9 +196,11 @@ header.bar .progress {
   color: var(--warn);
 }
 
-/* PDF pane */
+/* PDF pane. The left padding reserves a gutter the width of the collapsed tray
+   rail, so the rail sits beside the PDF rather than over it. */
 .pdf-pane {
   height: 100%;
+  padding-left: 1.9rem;
 }
 
 .pdf-pane iframe {
@@ -157,22 +228,79 @@ header.bar .progress {
   margin: 1rem 0 0.4rem;
 }
 
-.record pre {
-  background: #1c1c1a;
-  color: #e8e8e3;
-  padding: 0.6rem;
-  border-radius: 0.4rem;
-  font-size: 0.74rem;
-  overflow: auto;
-  max-height: 18rem;
+/* Metadata: a labeled field list. */
+.fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.75rem;
   margin: 0;
+  font-size: 0.8rem;
 }
 
-.record .rawtext {
-  white-space: pre-wrap;
+.fields dt {
+  color: var(--muted);
+}
+
+.fields dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* Parsed-record tables (PTR transactions / FD schedule rows). */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+}
+
+.record-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.74rem;
+}
+
+.record-table th,
+.record-table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.record-table th {
+  text-transform: capitalize;
+  color: var(--muted);
+  font-weight: 600;
   background: var(--bg);
-  color: var(--ink);
-  max-height: 12rem;
+  position: sticky;
+  top: 0;
+}
+
+.record-table tr:last-child td {
+  border-bottom: none;
+}
+
+.record-table .raw-col {
+  white-space: normal;
+}
+
+.record-table details summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.7rem;
+}
+
+.record-table pre.raw {
+  white-space: pre-wrap;
+  margin: 0.3rem 0 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+  max-width: 22rem;
 }
 
 .banner {

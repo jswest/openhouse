@@ -9,6 +9,7 @@
   let selectedId = $state(null)
   let filing = $state(null)
   let loadingFiling = $state(false)
+  let trayOpen = $state(true)
 
   const labelledCount = $derived(items.filter((i) => i.labelled).length)
 
@@ -59,22 +60,35 @@
   </header>
 
   <div class="workspace">
-    <div class="col queue">
-      {#each items as it (it.doc_id)}
+    <!-- The documents tray overlays the PDF's left edge so opening it never
+         disturbs the 50/50 split below; collapsed, it's a thin rail. -->
+    <aside class="tray" class:collapsed={!trayOpen}>
+      <div class="tray-head">
+        {#if trayOpen}<span class="tray-title">Documents</span>{/if}
         <button
-          class="queue-item"
-          class:active={it.doc_id === selectedId}
-          onclick={() => select(it.doc_id)}
-        >
-          <div class="who">{it.filer?.first ?? ''} {it.filer?.last ?? ''}</div>
-          <div class="sub">
-            <span>{it.stratum}</span>
-            {#if it.labelled}<span class="tag done">done</span>{/if}
-            {#if it.stale}<span class="tag stale">stale</span>{/if}
-          </div>
-        </button>
-      {/each}
-    </div>
+          class="tray-toggle"
+          onclick={() => (trayOpen = !trayOpen)}
+          title={trayOpen ? 'Collapse documents' : 'Expand documents'}
+          aria-label={trayOpen ? 'Collapse documents' : 'Expand documents'}
+        >{trayOpen ? '«' : '»'}</button>
+      </div>
+      <div class="tray-list">
+        {#each items as it (it.doc_id)}
+          <button
+            class="queue-item"
+            class:active={it.doc_id === selectedId}
+            onclick={() => select(it.doc_id)}
+          >
+            <div class="who">{it.filer?.first ?? ''} {it.filer?.last ?? ''}</div>
+            <div class="sub">
+              <span>{it.stratum}</span>
+              {#if it.labelled}<span class="tag done">done</span>{/if}
+              {#if it.stale}<span class="tag stale">stale</span>{/if}
+            </div>
+          </button>
+        {/each}
+      </div>
+    </aside>
 
     <div class="col pdf-pane">
       {#if filing}
@@ -84,7 +98,7 @@
       {/if}
     </div>
 
-    <div class="col">
+    <div class="col record-col">
       {#if loadingFiling}
         <div class="empty">Loading…</div>
       {:else if filing}
