@@ -1143,9 +1143,10 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
         elif parser := _FD_STRUCTURED.get(letter):
             items = parser(content)
         else:
-            items = _salvage_raw(letter, content)
-        # An item-less segment (parser found no rows it could anchor) still carries
-        # its lines as raw_text rather than vanishing — never silently drop.
+            items = []
+        # No parser, or a parser that anchored no rows: the segment still carries
+        # its lines as raw_text rather than vanishing — _salvage_raw is the single
+        # fallback. Never silently drop.
         if not items:
             items = _salvage_raw(letter, content)
         schedules[letter] = [it.model_dump(mode="json") for it in items]
