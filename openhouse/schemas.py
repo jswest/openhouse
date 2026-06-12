@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
 # Integer schema generation, stamped into ``parse-manifest.json`` (SPEC §6.5) and
 # *is* the minor of the release version ``v0.<SCHEMA_VERSION>.<patch>`` (GH-0037).
@@ -33,7 +33,9 @@ from pydantic import BaseModel, Field
 # adds the CC0 ``congress-legislators`` identity join (#16) — a ``bioguide_id`` and
 # a two-tier ``filer_id`` ladder (``bioguide:<id>`` / ``name:<slug>``) — and
 # structured columns for FD schedules E–J (#17), each item still carrying
-# verbatim ``raw_text``.
+# verbatim ``raw_text``; and an ``exact`` point-value on ``AmountRange`` (#49)
+# so a single exact-dollar PTR amount (e.g. ``$894.97``) is represented soundly
+# rather than coerced into a fake low–high bucket. All of these ride generation 5.
 SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
@@ -138,16 +140,57 @@ class FilingMetadata(BaseModel):
 
 
 class AmountRange(BaseModel):
-    """A transaction's disclosed dollar range (SPEC §6.3).
+    """A transaction's disclosed dollar amount (SPEC §6.3).
 
-    ``low``/``high`` are the parsed integer bounds; ``label`` is the verbatim
-    range string from the form (e.g. ``"$1,001 - $15,000"``) so the original
-    bucketed wording is never lost.
+    Two mutually-exclusive shapes, distinguished on the wire so a consumer can
+    tell a *bucket* from a *point* without guessing:
+
+    - **Range** (the usual form): ``low``/``high`` are the parsed integer bounds
+      of a ``$LOW - $HIGH`` bucket; ``exact`` is ``None``.
+    - **Exact value** (GH-0049): some PTR rows disclose a single exact dollar
+      figure (e.g. ``$894.97``) in place of a bucket. That value lands in
+      ``exact`` (a float — exact figures carry cents); ``low``/``high`` are
+      ``None``. It is **not** coerced into a ``{low: 894.97, high: 894.97}``
+      fake range — a point is not a bucket. For comparisons (``read``'s
+      ``--min-amount`` filter) an exact value ``X`` is treated as the closed
+      point ``[X, X]`` — see ``read._amount_low``.
+
+    ``label`` is the verbatim amount string from the form (``"$1,001 - $15,000"``
+    or ``"$894.97"``) so the original wording is never lost. Exactly one of
+    {``low``+``high``} / {``exact``} is set — enforced by the validator below;
+    a row that is genuinely neither still fails extraction loudly upstream
+    (never a fabricated range — CLAUDE.md).
     """
 
-    low: int
-    high: int
+    low: Optional[int] = None
+    high: Optional[int] = None
+    exact: Optional[float] = None
     label: str
+
+    @model_validator(mode="after")
+    def _exactly_one_shape(self) -> "AmountRange":
+        is_range = self.low is not None and self.high is not None
+        is_exact = self.exact is not None
+        if is_exact and (self.low is not None or self.high is not None):
+            raise ValueError(
+                "AmountRange.exact is mutually exclusive with low/high"
+            )
+        if not is_exact and not is_range:
+            raise ValueError(
+                "AmountRange needs either both low and high, or exact"
+            )
+        return self
+
+    @model_serializer
+    def _serialize(self) -> dict:
+        """Emit only the shape that applies: a range omits ``exact``, an exact
+        value omits ``low``/``high``. This keeps a range's on-wire JSON
+        byte-identical to before #49 (no ``"exact": null`` noise on the common
+        case) while an exact-dollar row carries a single ``exact`` field — the
+        two shapes stay visibly distinct (GH-0049)."""
+        if self.exact is not None:
+            return {"exact": self.exact, "label": self.label}
+        return {"low": self.low, "high": self.high, "label": self.label}
 
 
 class PtrTransaction(BaseModel):
@@ -169,7 +212,9 @@ class PtrTransaction(BaseModel):
     - ``transaction_type`` — ``P`` | ``S`` | ``S(partial)`` | ``E`` (the form
       prints ``S (partial)``; normalized to ``S(partial)``).
     - ``transaction_date`` / ``notification_date`` — ISO ``YYYY-MM-DD``.
-    - ``amount_range`` — the parsed ``{low, high, label}`` bucket.
+    - ``amount_range`` — the parsed amount: a ``{low, high, label}`` bucket, or
+      an ``{exact, label}`` point when the row discloses a single exact dollar
+      value instead of a range (GH-0049).
     - ``cap_gains_over_200`` — the cap-gains checkbox (the form renders
       ``gfedc`` unchecked vs ``gfedcb`` checked at the row's end).
     - ``description`` — the ``DESCRIPTION:`` line text if present, else ``None``.

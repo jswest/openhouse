@@ -142,6 +142,25 @@ _PTR_ROW_RE = re.compile(
     r"(\$[\d,]+)\s+-\s+(\$[\d,]+)?\s*"  # amount range: low, then optional high
     r"(gfedcb?)\s*$"  # cap-gains glyph
 )
+# Exact-dollar amount variant (GH-0049). A minority of real PTR rows disclose a
+# single **exact** dollar value (e.g. ``$894.97``) in the amount column instead of
+# a ``$LOW - $HIGH`` bucket. Same row signature as ``_PTR_ROW_RE`` up to the
+# amount, but the amount column is one bare ``$N[,NNN][.NN]`` money token with no
+# dash and no leading word. Keeping the leading ``$`` and trailing-glyph anchors
+# (and forbidding a dash) is what keeps this SOUND — it will not match a one-sided
+# ``Over $1,000,000`` (no ``$`` immediately before the glyph after a word) or a
+# half-range, both of which must stay ``extract_failed`` (CLAUDE.md: never
+# fabricate a range). Whole-dollar exact values (``$500``) are accepted too;
+# cents are not required.
+_PTR_EXACT_ROW_RE = re.compile(
+    r"^(?:(SP|DC|JT)\s+)?"  # owner column (blank → self)
+    r"(.+?)\s+"  # asset blob (non-greedy up to the type)
+    r"([Ss] \(partial\)|[PpSsEe])\s+"  # transaction type (only S can be partial)
+    r"(\d{2}/\d{2}/\d{4})\s+"  # transaction date
+    r"(\d{2}/\d{2}/\d{4})\s+"  # notification date
+    r"(\$[\d,]+(?:\.\d{2})?)\s+"  # amount: a single exact dollar value, no dash
+    r"(gfedcb?)\s*$"  # cap-gains glyph
+)
 # A wrapped high bound spilled to the next line. It is the lone ``$N`` money token
 # on that continuation line, and may sit either at the **start** (``$50,000`` —
 # the asset name did not also wrap) or **end** (``Shares (COLD) [ST] $50,000`` —
@@ -193,6 +212,18 @@ def _parse_amount_range(label: str) -> AmountRange:
     return AmountRange(low=low, high=high, label=label)
 
 
+def _parse_exact_amount(token: str) -> AmountRange:
+    """Parse a single exact dollar value (``"$894.97"``) into an exact AmountRange.
+
+    The value lands in ``exact`` (a float — exact figures carry cents); ``low``
+    and ``high`` stay ``None``. The verbatim ``$``-prefixed token is preserved as
+    ``label``. This is a *point*, deliberately NOT coerced into a ``{low, high}``
+    bucket (GH-0049): the on-wire shape stays honest about being an exact value.
+    """
+    value = float(token.lstrip("$").replace(",", ""))
+    return AmountRange(exact=value, label=token)
+
+
 def _ticker_from_asset(asset: str) -> str | None:
     """Strict symbol-only ticker: the parenthesized ``(SYMBOL)``, uppercased.
 
@@ -221,6 +252,15 @@ def _asset_type_from_asset(asset: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def _is_ptr_header(line: str) -> bool:
+    """True if ``line`` opens a PTR transaction row — range OR exact-dollar form.
+
+    Used as the row boundary throughout extraction so an exact-dollar row (#49)
+    both starts a new row and ends the previous one, exactly like a range row.
+    """
+    return bool(_PTR_ROW_RE.match(line) or _PTR_EXACT_ROW_RE.match(line))
+
+
 def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
     """Extract an e-filed PTR's §6.3 ``transactions[]`` from its PDF. Offline.
 
@@ -245,13 +285,26 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
     n = len(lines)
     while i < n:
         match = _PTR_ROW_RE.match(lines[i].strip())
-        if not match:
+        exact_match = None if match else _PTR_EXACT_ROW_RE.match(lines[i].strip())
+        if not match and not exact_match:
             i += 1
             continue
 
-        owner, asset_head, txn_type, txn_date, notif_date, amount_low, amount_high, glyph = (
-            match.groups()
-        )
+        if match:
+            owner, asset_head, txn_type, txn_date, notif_date, amount_low, amount_high, glyph = (
+                match.groups()
+            )
+            amount: AmountRange | None = None  # filled once the high bound is known
+        else:
+            # Exact-dollar form (#49): the amount column is a single ``$N`` value,
+            # not a ``$LOW - $HIGH`` bucket. No amount-column wrap to recover — the
+            # value is complete on the header line — so ``amount`` is set now and
+            # ``amount_high`` is sentinel-non-None to skip the wrap-recovery block.
+            owner, asset_head, txn_type, txn_date, notif_date, exact_token, glyph = (
+                exact_match.groups()
+            )
+            amount = _parse_exact_amount(exact_token)
+            amount_low = amount_high = exact_token  # not None → skip wrap recovery
         # Small-caps can lower-case the type letter (``s``/``p``/``e``); normalize
         # to the schema's canonical form — ``S``/``P``/``E`` or ``S(partial)``.
         txn_type = (
@@ -279,7 +332,7 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             k = j
             while k < n:
                 nxt = lines[k].strip()
-                if _PTR_ROW_RE.match(nxt) or _PTR_DETAIL_RE.match(nxt):
+                if _is_ptr_header(nxt) or _PTR_DETAIL_RE.match(nxt):
                     break  # reached the next row / this row's detail — high bound
                     # never materialized; leave amount_high None (row drops below).
                 if not nxt or _PTR_FURNITURE_RE.match(nxt) or _PTR_GLYPH_ONLY_RE.match(nxt):
@@ -298,7 +351,7 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
 
         while j < n:
             nxt = lines[j].strip()
-            if _PTR_ROW_RE.match(nxt):
+            if _is_ptr_header(nxt):
                 break  # next transaction row — end of this row
             desc_m = _PTR_DESCRIPTION_RE.match(nxt)
             if desc_m:
@@ -321,6 +374,10 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             i += 1
             continue
 
+        # A range row builds its AmountRange now (once the high bound is known); an
+        # exact-dollar row already set ``amount`` at the top of the iteration.
+        if amount is None:
+            amount = _parse_amount_range(f"{amount_low} - {amount_high}")
         asset = " ".join(part for part in asset_parts if part)
         transactions.append(
             PtrTransaction(
@@ -331,7 +388,7 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
                 transaction_type=txn_type,
                 transaction_date=datetime.strptime(txn_date, "%m/%d/%Y").date(),
                 notification_date=datetime.strptime(notif_date, "%m/%d/%Y").date(),
-                amount_range=_parse_amount_range(f"{amount_low} - {amount_high}"),
+                amount_range=amount,
                 cap_gains_over_200=(glyph == "gfedcb"),
                 description=description,
             )

@@ -524,9 +524,18 @@ def cmd_filing(args, data_dir: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _amount_low(txn: dict) -> Optional[int]:
-    """The low end of a transaction's amount range, or ``None`` if absent."""
+def _amount_low(txn: dict) -> Optional[float]:
+    """The low comparison bound of a transaction's amount, or ``None`` if absent.
+
+    For a ``$LOW - $HIGH`` bucket this is ``low``; for an exact-dollar value
+    (GH-0049) the amount is the closed point ``[X, X]``, so the low bound is the
+    exact value ``X`` itself. Treating the point this way keeps ``--min-amount``
+    sound over exact values — an exact ``$894.97`` correctly clears
+    ``--min-amount 500`` and is correctly excluded by ``--min-amount 1000``.
+    """
     amt = txn.get("amount_range") or {}
+    if amt.get("exact") is not None:
+        return amt["exact"]
     return amt.get("low")
 
 
@@ -855,7 +864,10 @@ def build_read_parser() -> argparse.ArgumentParser:
         "--min-amount",
         type=int,
         dest="min_amount",
-        help="minimum amount_range low end (dollars); excludes trades with no range",
+        help=(
+            "minimum amount (dollars): a bucket's low end, or an exact-dollar "
+            "value treated as its own point; excludes trades with no amount"
+        ),
     )
 
     # summary <range>
