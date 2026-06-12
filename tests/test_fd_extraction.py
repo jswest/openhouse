@@ -20,11 +20,17 @@ from openhouse.parse import _classify_records
 from openhouse.pdf import (
     NotAnFdBody,
     PdfExtractError,
+    _scrub_field,
+    _scrub_raw_text,
     extract_fd_schedules,
 )
 
 PDF_FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
 THOMPSON = PDF_FIXTURES / "efiled_fd_10042852.pdf"
+# Hon. Alma Adams, 2021: the glyphs-lost rendering (SPEC §2.2) — every small-caps
+# glyph extracts as a U+0000 NUL, so "Schedule A:" is "S\x00{7} A:" and the
+# tx-over-$1,000 checkbox glyph (gfedc) is absent from the text layer entirely.
+ADAMS_NUL = PDF_FIXTURES / "efiled_fd_nulglyph_10049721.pdf"
 EXTENSION = None  # no extension fixture is committed; synthetic text covers it
 
 
@@ -305,6 +311,281 @@ def test_schedule_d_pre_anchor_row_is_not_dropped(monkeypatch):
     # The dated row still parses structured as before.
     dated = next(i for i in d if i["date_incurred"] == "December 2015")
     assert dated["creditor"] == "PennyMac Loan Services"
+
+
+# --- glyphs-lost (NUL) rendering: real fixture + synthetic edges ---------------
+
+
+def test_nulglyph_segmentation_and_absent_schedules():
+    # Before the NUL-tolerant heading matcher this fully-populated 2021 annual FD
+    # raised NotAnFdBody (→ extract_failed) because "Schedule" rendered as
+    # S + seven NULs. Ground truth per the fixtures README: A, C, E, F populated;
+    # B/D/G/H/I are "None disclosed." → absent; the form has no Schedule J.
+    body = extract_fd_schedules(ADAMS_NUL)
+    assert sorted(body.schedules) == ["A", "C", "E", "F"]
+
+
+def test_nulglyph_schedule_a_structured_rows():
+    # The checkbox glyph is not in the text layer, so the glyphless row anchor
+    # (the [TYPE]-tag + value-column signature) must split the two asset rows —
+    # not merge them into one salvaged blob with mis-attributed amounts.
+    body = extract_fd_schedules(ADAMS_NUL)
+    a = body.schedules["A"]
+    assert len(a) == 2
+    assert a[0]["asset"] == "North Carolina Legislative Retirement System Plan"
+    assert a[0]["value_of_asset"]["label"] == "$15,001 - $50,000"
+    # Second row's value range wraps (dangling low + trailing high) and refolds.
+    assert a[1]["asset"] == "TIAA-CREF Annuity Account"
+    assert a[1]["value_of_asset"]["label"] == "$250,001 - $500,000"
+    for item in a:
+        assert item["raw_text"].strip()
+
+
+def test_nulglyph_trailer_does_not_leak_into_last_schedule():
+    # The exclusions/certification block also renders NUL-stripped ("E\x00…" /
+    # "C\x00…"); it must still END the last schedule, not be folded into it as
+    # fabricated content (Schedule I here is "None disclosed." → absent).
+    body = extract_fd_schedules(ADAMS_NUL)
+    all_text = " ".join(
+        item["raw_text"]
+        for items in body.schedules.values()
+        for item in items
+    )
+    assert "IPO" not in all_text
+    assert "CERTIFY" not in all_text
+    assert "Digitally Signed" not in all_text
+
+
+def test_nul_location_description_labels(monkeypatch):
+    # In the glyphs-lost rendering the LOCATION:/DESCRIPTION: labels themselves
+    # are small-caps → "L\x00{7}:" / "D\x00{10}:". The values after the colon are
+    # regular-font content and must still be captured structured.
+    nul = "\x00"
+    page = "\n".join(
+        [
+            f"S{nul * 7} A: A{nul * 5} {nul * 3} \"U{nul * 7}\" I{nul * 5}",
+            "Asset Owner Value of Asset Income Type(s) Income Tx. >",
+            "$1,000?",
+            "0.5 acre unimproved property [RP] $1,001 - $15,000 Rent $201 - $1,000",
+            f"L{nul * 7}: Bolton/Hinds, MS, US",
+            f"D{nul * 10}: rental parcel",
+            f"E{nul * 9} {nul * 2} S{nul * 5}, D{nul * 8}, {nul * 2} T{nul * 4} I{nul * 10}",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    item = body.schedules["A"][0]
+    assert item["location"] == "Bolton/Hinds, MS, US"
+    assert item["description"] == "rental parcel"
+    assert item["value_of_asset"]["label"] == "$1,001 - $15,000"
+
+
+def test_nul_appendix_title_is_not_a_heading(monkeypatch):
+    # "Schedules A and B Asset Class Details" renders "S\x00{7} A \x00{3} B …" —
+    # it starts S+NUL and names a schedule letter, but carries no "<LETTER>:" so
+    # it must NOT open a fake schedule; it folds into the last schedule's content
+    # exactly as its letters-survive form does on intact documents.
+    nul = "\x00"
+    page = "\n".join(
+        [
+            f"S{nul * 7} E: P{nul * 8}",
+            "Position Name of Organization",
+            "Board member Some Nonprofit, Inc.",
+            f"S{nul * 7} A {nul * 3} B A{nul * 4} C{nul * 4} D{nul * 6}",
+            "Charles Schwab JT TEN (Owner: JT)",
+            f"C{nul * 12} {nul * 3} S{nul * 8}",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    assert sorted(body.schedules) == ["E"]
+    raw = " ".join(i["raw_text"] for i in body.schedules["E"])
+    assert "Charles Schwab JT TEN" in raw  # appendix folded, not dropped
+
+
+def test_nul_extension_cover_sheet_still_not_an_fd_body(monkeypatch):
+    # A glyphs-lost extension/cover sheet (small-caps titles render as NUL runs
+    # but there are no "S… <LETTER>:" headings) must STILL raise NotAnFdBody —
+    # the NUL branch must not fabricate a body out of title furniture.
+    nul = "\x00"
+    page = "\n".join(
+        [
+            "Filing ID #30011729",
+            f"F{nul * 8} D{nul * 9} E{nul * 8} R{nul * 6}",
+            "House Members ... are permitted to request an extension ...",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    with pytest.raises(NotAnFdBody):
+        extract_fd_schedules(Path("synthetic.pdf"))
+
+
+def test_nulglyph_raw_text_is_scrubbed_of_nul_bytes():
+    # The glyphs-lost rendering folds NUL furniture into recovered rows; #52
+    # scrubs it so no emitted raw_text carries a literal U+0000 — content stays.
+    body = extract_fd_schedules(ADAMS_NUL)
+    assert body.schedules  # recovered a body at all
+    for letter, items in body.schedules.items():
+        for item in items:
+            assert "\x00" not in item["raw_text"], f"NUL leaked into schedule {letter}"
+            assert item["raw_text"].strip(), "row content must still survive"
+
+
+def test_scrub_raw_text_is_noop_on_nul_free_text():
+    # The scrub MUST leave any NUL-free string byte-identical (this is what keeps
+    # every intact-rendering 2020 body unchanged). _group_items joins parts with a
+    # single space and the inputs are pre-stripped, so such strings are unchanged.
+    for s in [
+        "0.5 acre unimproved property [RP] $1,001 - $15,000 Rent $201 - $1,000",
+        "State of Mississippi Member Retirement [PE] None",
+        "None disclosed.",
+        "BLB Properties, LLC ⇒ JT",
+        "",
+    ]:
+        assert _scrub_raw_text(s) == s
+
+
+def test_scrub_raw_text_collapses_nul_runs_and_whitespace():
+    nul = "\x00"
+    assert _scrub_raw_text(f"S{nul * 7} A: Assets") == "S A: Assets"
+    assert _scrub_raw_text(f"L{nul * 7}: Bolton/Hinds, MS") == "L : Bolton/Hinds, MS"
+    # Trailing/leading NUL runs strip; interior collapses to one space.
+    assert _scrub_raw_text(f"{nul * 3} Cash [BA] {nul * 2} ") == "Cash [BA]"
+
+
+# --- #52 critic fixes: comments-label trailer, A anchor, NUL-gated fields ------
+
+
+def test_nul_comments_label_does_not_end_schedule(monkeypatch):
+    # 🔴 The per-row COMMENTS: detail label renders "C\x00{7}: <text>" in NUL docs.
+    # It must NOT match the trailer branch (which would end the schedule and drop
+    # every following content row); it folds into the row's raw_text instead, like
+    # the intact-glyph "Comments:" label. A *real* certification trailer "C\x00{12}"
+    # (no colon) must still end the body.
+    nul = "\x00"
+    page = "\n".join(
+        [
+            f"S{nul * 7} D: L{nul * 7}",
+            "owner creditor Date incurred type amount of",
+            "JT PennyMac Loan Services December 2015 Home Mortgage $100,001 -",
+            "$250,000",
+            # The comments label for that row — must fold in, not end the schedule.
+            f"C{nul * 7}: paid off early in 2016",
+            # A SECOND liability row AFTER the comments label. Before the fix this
+            # whole row (16,901 such content lines across 293 docs) was dropped.
+            "SP CapitalOne December 2018 Credit Card $15,001 - $50,000",
+            # The real certification trailer (no colon) still ends the body.
+            f"C{nul * 12} {nul * 3} S{nul * 8}",
+            "I CERTIFY that the statements made are true.",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    d = body.schedules["D"]
+    # Both liability rows survive — the post-comments row was NOT dropped.
+    creditors = {item["creditor"] for item in d}
+    assert "PennyMac Loan Services" in creditors
+    assert "CapitalOne" in creditors
+    # The comments text folded into the first row's raw_text (scrubbed of NULs).
+    all_raw = " ".join(item["raw_text"] for item in d)
+    assert "paid off early in 2016" in all_raw
+    assert "\x00" not in all_raw
+    # The real certification trailer ended the body — its content never leaked in.
+    assert "CERTIFY" not in all_raw
+
+
+def test_nulglyph_schedule_a_anchors_over_and_exact_dollar(monkeypatch):
+    # 🟡 The glyphless A row anchor accepted only "$lo -"/None/Undetermined, so a
+    # row whose value column is "Over $50,000,000" (a real form bucket) or an exact
+    # dollar value ("$96,550.00") did not anchor and merged into the prior item.
+    # Both now anchor as their own structured items.
+    nul = "\x00"
+    page = "\n".join(
+        [
+            f"S{nul * 7} A: A{nul * 5}",
+            "Asset Owner Value of Asset Income Type(s) Income Tx. >",
+            "$1,000?",
+            "First Asset Holding [IH] JT Over $50,000,000 None",
+            "Second Asset Fund [BA] JT $96,550.00 Interest $1,141.00",
+            f"E{nul * 9} {nul * 2} S{nul * 5}",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    a = body.schedules["A"]
+    assets = [item["asset"] for item in a]
+    assert "First Asset Holding" in assets
+    assert "Second Asset Fund" in assets
+    # Two distinct rows, not one merged blob.
+    assert len([x for x in assets if x in ("First Asset Holding", "Second Asset Fund")]) == 2
+
+
+def test_scrub_field_is_nul_gated():
+    # 🟡 Structured fields (asset/location/description/income_type/source) are
+    # sliced from the un-scrubbed raw blob, so they can carry literal NULs. Scrub
+    # them — but only when a NUL is present. A NUL-free value (notably an
+    # income_type with a legitimate double space) is returned byte-identical.
+    nul = "\x00"
+    assert _scrub_field(f"Cash{nul * 3}Holdings") == "Cash Holdings"
+    assert _scrub_field(f"{nul * 5} rental parcel {nul * 2}") == "rental parcel"
+    # NUL-free values pass through unchanged — including meaningful double spaces.
+    assert _scrub_field("Dividends  and  Interest") == "Dividends  and  Interest"
+    assert _scrub_field("Salary") == "Salary"
+    assert _scrub_field(None) is None
+    assert _scrub_field("") == ""
+
+
+def test_nulglyph_structured_fields_have_no_nul_bytes(monkeypatch):
+    # 🟡 A glyphless row with NUL furniture folded into the asset name and the
+    # LOCATION:/DESCRIPTION: details must emit those structured fields free of any
+    # literal U+0000 (previously 626+ fields across 352 docs leaked NULs).
+    nul = "\x00"
+    page = "\n".join(
+        [
+            f"S{nul * 7} A: A{nul * 5}",
+            "Asset Owner Value of Asset Income Type(s) Income Tx. >",
+            "$1,000?",
+            f"Rental{nul * 2}Property [RP] $1,001 - $15,000 Rent $201 - $1,000",
+            f"L{nul * 7}: Bolton/Hinds, MS, US",
+            f"D{nul * 10}: rental{nul * 2}parcel",
+            f"E{nul * 9} {nul * 2} S{nul * 5}",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    item = body.schedules["A"][0]
+    for field in ("asset", "location", "description", "income_type"):
+        value = item.get(field)
+        if value is not None:
+            assert "\x00" not in value, f"NUL leaked into {field}: {value!r}"
+    # The NULs folded into the asset name were scrubbed, content preserved.
+    assert item["asset"] == "Rental Property"
+    assert item["description"] == "rental parcel"
+
+
+def test_nul_schedule_d_creditor_fallback_is_scrubbed(monkeypatch):
+    # 🟡 When a Schedule D row's creditor slice is empty (date leads the row) the
+    # field falls back to the whole raw blob. That fallback must also be scrubbed:
+    # otherwise a folded comments label ("C\x00{7}: …", retained by fix #1) leaks a
+    # literal NUL into the emitted ``creditor``.
+    nul = "\x00"
+    page = "\n".join(
+        [
+            f"S{nul * 7} D: L{nul * 7}",
+            "owner creditor Date incurred type amount of",
+            # Date leads → creditor slice is empty → fallback to raw, with a folded
+            # comments label carrying NULs.
+            f"January 2022 C{nul * 7}: Student loan debt cosigned for my daughter.",
+            f"C{nul * 12} {nul * 3} S{nul * 8}",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    d = body.schedules["D"]
+    assert len(d) == 1
+    assert "\x00" not in d[0]["creditor"]
+    assert "\x00" not in d[0]["raw_text"]
+    assert "Student loan debt cosigned" in d[0]["creditor"]
 
 
 # --- failure paths -------------------------------------------------------------
