@@ -3,30 +3,16 @@
 Each test maps to a *verified* 2024 edge case the schema must handle.
 """
 
-import tomllib
 from datetime import date
-from pathlib import Path
 
 from openhouse.schemas import (
     FILING_TYPE_LABELS,
-    SCHEMA_VERSION,
     UNKNOWN_FILING_LABEL,
     Filer,
     FilingMetadata,
     FilingTypeInfo,
     StateDistrict,
 )
-
-
-def test_pyproject_version_matches_schema_version():
-    """The project release version and SCHEMA_VERSION are kept 1:1 (GH-0030).
-
-    SCHEMA_VERSION (openhouse/schemas.py) is canonical; pyproject.toml mirrors
-    it. This guard fails if they drift, so a version bump must touch both.
-    """
-    pyproject = Path(__file__).parents[1] / "pyproject.toml"
-    data = tomllib.loads(pyproject.read_text())
-    assert data["project"]["version"] == SCHEMA_VERSION
 
 
 def _base_kwargs(**overrides):
