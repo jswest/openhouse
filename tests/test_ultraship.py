@@ -1,7 +1,7 @@
-"""Tests for the /ultraship manifest core (scripts/ultraship.py).
+"""Tests for the /ultraship manifest core (.claude/skills/ultraship/ultraship.py).
 
-The script lives under scripts/ (not an installed package), so it is loaded by
-path via importlib. Only the pure
+The script lives beside its SKILL.md under .claude/skills/ultraship/ (not an
+installed package), so it is loaded by path via importlib. Only the pure
 functions — parsing, validation, and wave derivation — are exercised; the
 agentic orchestration lives in the skill prose, not here.
 """
@@ -15,7 +15,10 @@ from pathlib import Path
 
 import pytest
 
-_ULTRASHIP_PATH = Path(__file__).resolve().parent.parent / "scripts" / "ultraship.py"
+_ULTRASHIP_PATH = (
+    Path(__file__).resolve().parent.parent
+    / ".claude" / "skills" / "ultraship" / "ultraship.py"
+)
 _spec = importlib.util.spec_from_file_location("ultraship", _ULTRASHIP_PATH)
 ultraship = importlib.util.module_from_spec(_spec)
 # Register before exec: the module's dataclasses resolve their __module__ via

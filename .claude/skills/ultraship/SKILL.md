@@ -125,13 +125,13 @@ writer races on the omnibus body.
 ### The deterministic tool
 
 Parsing, validation, and wave derivation are **not** left to a model — they live
-in `scripts/ultraship.py` (pure, agent-free, unit-tested). The omnibus body is
+in `.claude/skills/ultraship/ultraship.py` (pure, agent-free, unit-tested). The omnibus body is
 the input; pipe it in:
 
 ```
-gh issue view <omnibus> --json body --jq .body | uv run python scripts/ultraship.py validate
-gh issue view <omnibus> --json body --jq .body | uv run python scripts/ultraship.py plan
-gh issue view <omnibus> --json body --jq .body | uv run python scripts/ultraship.py plan --json
+gh issue view <omnibus> --json body --jq .body | uv run python .claude/skills/ultraship/ultraship.py validate
+gh issue view <omnibus> --json body --jq .body | uv run python .claude/skills/ultraship/ultraship.py plan
+gh issue view <omnibus> --json body --jq .body | uv run python .claude/skills/ultraship/ultraship.py plan --json
 ```
 
 `validate` exits non-zero with one readable list of problems if any sub-issue is
@@ -165,16 +165,16 @@ attended step.
    block or no native sub-issue links, propose seeding both (as `/ship onto`'s
    first-ship does) — never silently. Show the proposed body diff and the link
    set before applying.
-4. **Structural validation.** Run `scripts/ultraship.py validate`. If it fails,
+4. **Structural validation.** Run `.claude/skills/ultraship/ultraship.py validate`. If it fails,
    show the problems and stop — the manifest is not runnable.
-5. **Print the wave DAG** (`scripts/ultraship.py plan`) and **stop.** Do not start
+5. **Print the wave DAG** (`.claude/skills/ultraship/ultraship.py plan`) and **stop.** Do not start
    `run`. `plan` and `run` are separate invocations on purpose.
 
 ---
 
 ## `/ultraship run #<omnibus>`
 
-Fully unattended. Re-resolve the branch and **re-validate** (`scripts/ultraship.py
+Fully unattended. Re-resolve the branch and **re-validate** (`.claude/skills/ultraship/ultraship.py
 validate`) first — a malformed manifest discovered at 2 a.m. after three issues
 landed is the worst outcome; abort loud, never guess a plan.
 
@@ -183,7 +183,7 @@ landed is the worst outcome; abort loud, never guess a plan.
                   work (open PRs against the omnibus, other live worktrees) the
                   DAG can't see. Surface overlaps in the report; the DAG covers
                   intra-bundle ordering only.
-1. stage-manager  PLAN — waves from `scripts/ultraship.py plan --json` (topo by
+1. stage-manager  PLAN — waves from `.claude/skills/ultraship/ultraship.py plan --json` (topo by
                   depends-on + touches-overlap). Post the wave plan as an omnibus
                   comment.
 2. stage-manager  Dispatch a wave -> each sub-issue to a player in its own SIBLING
