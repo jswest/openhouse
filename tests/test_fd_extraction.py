@@ -888,3 +888,45 @@ def test_member_form_double_wrap_row_repairs_both_bounds():
     twiex = next(i for i in a if "TWIEX" in i["raw_text"])
     assert twiex["value_of_asset"]["label"] == "$100,001 - $250,000"
     assert twiex["income_amount"]["label"] == "$5,001 - $15,000"
+
+
+# --- GH-0070: Schedule B anchors for directly-held (arrow-less) rows -----------
+
+DIRECTB = PDF_FIXTURES / "efiled_fd_directb_10043047.pdf"
+
+
+def test_directly_held_b_rows_anchor_on_column_signature():
+    b = extract_fd_schedules(DIRECTB).schedules["B"]
+    # 6 transactions, none with a subholding arrow — the old ⇒-only anchor
+    # merged all of them into one item. Ground truth counted by hand.
+    assert len(b) == 6
+    condo = b[0]
+    assert condo["asset"] == "DC Condo [RP]"
+    assert condo["asset_type"] == "RP"
+    assert condo["transaction_date"] == "2020-12-21"
+    assert condo["transaction_type"] == "P"
+    assert condo["amount_range"]["label"] == "$250,001 - $500,000"
+
+
+def test_b_row_unpadded_date_and_glyph_interposed_wrap():
+    b = extract_fd_schedules(DIRECTB).schedules["B"]
+    # "Victoria Rental Property [RP] 04/8/2021 S $1,000,001 - gfedcb" with the
+    # $5,000,000 high bound wrapped past the checkbox glyph: the unpadded date
+    # must parse and the dangling low must re-pair with the wrapped high.
+    victoria = next(i for i in b if i["asset"].startswith("Victoria"))
+    assert victoria["transaction_date"] == "2021-04-08"
+    assert victoria["transaction_type"] == "S"
+    assert victoria["amount_range"] == {
+        "low": 1000001,
+        "high": 5000000,
+        "label": "$1,000,001 - $5,000,000",
+    }
+    assert victoria["cap_gains_over_200"] is True
+
+
+def test_subholding_b_rows_still_anchor_on_arrow():
+    b = extract_fd_schedules(WELCH_SUBWRAP).schedules["B"]
+    # 165 = the segment's ⇒-line count; every row's (possibly unpadded) date
+    # must parse.
+    assert len(b) == 165
+    assert all(i["transaction_date"] for i in b)

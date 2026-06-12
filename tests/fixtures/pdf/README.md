@@ -12,6 +12,7 @@ classification is the ground truth a test asserts against.
 | `efiled_fd_nulglyph_10049721.pdf` | 10049721 | fd (annual, **2021**) | `efiled` | 2 pages; small-caps glyphs extract as **NUL runs** |
 | `efiled_fd_candidate_10035478.pdf` | 10035478 | fd (**candidate**, 2020) | `efiled` | 4 pages; C-form Schedule A: **no checkbox column**, 3 income columns |
 | `efiled_fd_subwrap_10039965.pdf` | 10039965 | fd (annual, 2020) | `efiled` | 8 pages; every A row a subholding with the [TYPE] wrapped off the glyph line |
+| `efiled_fd_directb_10043047.pdf` | 10043047 | fd (annual, 2020) | `efiled` | 2 pages; Schedule B rows directly held (no ⇒), unpadded dates, glyph-interposed amount wrap |
 | `efiled_ptr_20016766.pdf` | 20016766 | ptr | `efiled` | 1 page, ~1,127 chars |
 | `efiled_ptr_20017980.pdf` | 20017980 | ptr | `efiled` | 7 pages, 57 transaction rows |
 | `efiled_ptr_nulglyph_20022132.pdf` | 20022132 | ptr (**2022**) | `efiled` | 1 page; small-caps glyphs extract as **NUL runs**, checkbox glyphs absent |

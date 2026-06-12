@@ -643,7 +643,7 @@ _FD_AMOUNT_RE = re.compile(r"\$[\d,]+\s*-\s*\$[\d,]+")
 # folded into an item). Matched loosely on its leading words.
 _FD_FURNITURE_RE = re.compile(
     r"^(asset owner|asset \[|owner creditor|Source type|Position name|"
-    r"Date Parties|type\(s\)|gains >|\$1,000\?|\$200\?|filing|current Year|"
+    r"Date Parties|type\(s\)|type gains >|gains >|\$1,000\?|\$200\?|filing|current Year|"
     r"to Preceding|liability|\* For the complete|\* Asset class|name of organization|"
     # E–J column-header furniture (#17): each schedule's header row, on its own
     # line, leads with these tokens; the values below are filer content.
@@ -839,6 +839,17 @@ _FD_A_OVER_RE = re.compile(r"Over\s+\$[\d,]+")
 _FD_BARE_AMOUNT_RE = re.compile(r"\$[\d,]+")
 
 
+def _fd_columns(raw: str) -> str:
+    """The row's *column* data: everything before the first folded detail label.
+
+    A row's ``LOCATION:``/``DESCRIPTION:`` detail lines fold into its assembled
+    raw blob after the columns, so amounts must never be read past the first
+    label — yet a wrapped high bound can sit immediately before one.
+    """
+    m = _FD_DETAIL_ANYWHERE_RE.search(raw)
+    return raw[: m.start()] if m else raw
+
+
 def _fd_amount_entries(
     cols: str, start: int = 0
 ) -> list[tuple[int, int, AmountRange | None]]:
@@ -922,8 +933,7 @@ def _schedule_a_amounts(
     field that cannot be untangled is ``None`` — the verbatim ``raw_text``
     still carries the row in full.
     """
-    columns_end = _FD_DETAIL_ANYWHERE_RE.search(raw)
-    cols = raw[: columns_end.start()] if columns_end else raw
+    cols = _fd_columns(raw)
 
     none_value = _FD_A_NONE_VALUE_RE.search(cols)
     entries: list[tuple[int, int, AmountRange | None]]
@@ -1048,43 +1058,88 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
     return items
 
 
+# A B transaction row's column signature: the Date column (the Clerk prints
+# single-digit days/months unpadded — ``05/5/2020``, ``04/8/2021``), the tx-type
+# letter (small-caps can lower-case it, as on PTR rows), then the amount
+# column's start (``$lo`` or ``Over``). Requiring the amount start is what keeps
+# this from false-anchoring a wrapped asset *name* that happens to contain a
+# date (a bond's maturity, say) — a name never continues ``<date> P $…``. The
+# date and type are captured so field extraction can use the SAME match that
+# anchored the row (never a stray date earlier in the asset name).
+_FD_B_ROW_RE = re.compile(
+    r"\b(\d{1,2}/\d{1,2}/\d{4})\s+([Ss] \(partial\)|[PpSsEe])\s+(?:\$[\d,]|Over\b)"
+)
+# A B row's Date column value (same unpadded forms; strptime's %m/%d accepts
+# unpadded components) — used on ⇒-anchored rows, whose asset side never
+# carries the column signature.
+_FD_B_DATE_RE = re.compile(r"(\d{1,2}/\d{1,2}/\d{4})")
+
+
 def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
     """Schedule B (transactions) → structured items + raw_text.
 
-    A B row carries the asset's ``[TYPE]`` tag, an owner arrow ``⇒``, a date, a
-    ``P``/``S`` type and an amount. The asset name often wraps onto the *following*
-    line, so item-start anchors on the ``⇒``-bearing line and folds the wrap in.
+    A B row carries the asset's ``[TYPE]`` tag, a date, a ``P``/``S`` type and
+    an amount; a subholding row leads with the owner arrow ``⇒``. The asset name
+    often wraps onto the *following* line(s), so item-start anchors on the
+    ``⇒``-bearing line **or** the date+type+amount column signature
+    (``_FD_B_ROW_RE``) — a directly-held asset's row has no arrow at all
+    (GH-0070), and anchoring on the arrow alone merged every such transaction
+    into the preceding item.
     """
 
     def starts(s: str) -> bool:
-        return "⇒" in s
+        if _FD_DETAIL_RE.match(s):
+            return False
+        return "⇒" in s or bool(_FD_B_ROW_RE.search(s))
 
     items: list[ScheduleBItem] = []
     for raw in _group_items(lines, starts_item=starts):
-        owner_m = re.search(r"⇒\s*(SP|DC|JT)?\b", raw)
-        owner = owner_m.group(1) if owner_m and owner_m.group(1) else None
-        date_m = re.search(r"(\d{2}/\d{2}/\d{4})", raw)
+        # Transaction type tokens normalize as on PTR rows: small-caps can
+        # lower-case the letter; ``S (partial)`` keeps its marker. The ``\b``
+        # must sit on the *letter* branch only — a trailing ``\b`` after
+        # ``S (partial)`` never matches (``)`` then space is not a word
+        # boundary), which silently collapsed every partial sale to a bare S.
+        token = None
+        if "⇒" in raw:
+            owner_m = re.search(r"⇒\s*(SP|DC|JT)?\b", raw)
+            owner = owner_m.group(1) if owner_m and owner_m.group(1) else None
+            # The Date column is the first date after the asset name; the type
+            # letter follows it. (A subholding row's asset side never carries
+            # the column signature, so the first date IS the Date column.)
+            date_m = _FD_B_DATE_RE.search(raw)
+            asset = _scrub_field(raw.split("⇒", 1)[0].strip())
+            if date_m:
+                tt_m = re.match(
+                    r"[Ss] \(partial\)|[PpSsEe]\b", raw[date_m.end() :].lstrip()
+                )
+                token = tt_m.group(0) if tt_m else None
+        else:
+            # Directly-held row (GH-0070): the owner column (if any) sits right
+            # after the [TYPE] tag, as on Schedule A — and the date/type come
+            # from the SAME column-signature match that anchored the row, so a
+            # date embedded in the asset name (a bond's maturity) can never be
+            # mistaken for the Date column. A salvaged pre-anchor item has no
+            # signature match and correctly degrades to None.
+            after_type = _FD_OWNER_AFTER_TYPE_RE.search(raw)
+            owner = after_type.group(1) if after_type else None
+            date_m = _FD_B_ROW_RE.search(raw)
+            asset = _scrub_field(raw[: date_m.start()].strip() if date_m else raw)
+            token = date_m.group(2) if date_m else None
         transaction_date = (
             datetime.strptime(date_m.group(1), "%m/%d/%Y").date() if date_m else None
         )
-        # Transaction type: the P/S/E letter sitting after the date, with the
-        # ``S (partial)`` marker preserved. The ``\b`` must sit on the *letter*
-        # branch only — a trailing ``\b`` after ``S (partial)`` never matches (``)``
-        # then space is not a word boundary), which silently collapsed every
-        # partial sale to a bare ``S``. Mirror the PTR normalization instead.
         ttype = None
-        if date_m:
-            tt_m = re.match(r"(S \(partial\)|[PSE]\b)", raw[date_m.end() :].lstrip())
-            if tt_m:
-                token = tt_m.group(1)
-                ttype = "S(partial)" if "(partial)" in token else token
+        if token:
+            ttype = "S(partial)" if "(partial)" in token else token[0].upper()
         type_m = _FD_TYPE_TAG_RE.search(raw)
         asset_type = type_m.group(1) if type_m else None
-        # Asset name = everything before the ⇒ arrow, plus any wrapped tail with
-        # the [TYPE] tag; keep it simple — the text up to ⇒ is the primary name.
-        asset = _scrub_field(raw.split("⇒", 1)[0].strip())
         glyph_m = re.search(r"\bgfedcb?\b", raw)
         cap_gains = (glyph_m.group(0) == "gfedcb") if glyph_m else None
+        # The amount column, wrap-aware: the first column-amount entry over the
+        # pre-detail text (a wrapped high bound can sit past the checkbox glyph
+        # — ``… S $1,000,001 - gfedcb $5,000,000``; B has one amount column, so
+        # the first entry is it).
+        entries = _fd_amount_entries(_fd_columns(raw))
         items.append(
             ScheduleBItem(
                 asset=asset,
@@ -1092,7 +1147,7 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
                 asset_type=asset_type,
                 transaction_date=transaction_date,
                 transaction_type=ttype,
-                amount_range=_fd_amount_range(raw),
+                amount_range=entries[0][2] if entries else None,
                 cap_gains_over_200=cap_gains,
                 raw_text=_scrub_raw_text(raw),
             )
