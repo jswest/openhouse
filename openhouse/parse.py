@@ -23,6 +23,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+from tqdm import tqdm
+
 from .index import build_filing_records
 from .pdf import PdfExtractError, classify
 from .schemas import SCHEMA_VERSION, UNKNOWN_FILING_LABEL, FilingMetadata
@@ -116,7 +118,7 @@ def _unparsed_entry(rec: FilingMetadata, reason: str) -> dict:
 
 
 def _classify_records(
-    records: list[FilingMetadata], *, data_dir: Path, types: list[str]
+    records: list[FilingMetadata], *, data_dir: Path, types: list[str], year: int
 ) -> list[dict]:
     """Classify each record's on-disk PDF, mutating ``pdf_class``/``parse_status``.
 
@@ -143,7 +145,11 @@ def _classify_records(
     order (deterministic).
     """
     unparsed: list[dict] = []
-    for rec in records:
+    # Progress bar on stderr (tqdm's default); cosmetic only — never enters a
+    # manifest or stdout. ``disable=None`` auto-suppresses when stderr is not a
+    # TTY, so redirects/logs don't fill with carriage-return spam (SPEC: JSON to
+    # stdout, progress to stderr).
+    for rec in tqdm(records, desc=f"{year} FD/PTR", unit="pdf", disable=None):
         family = "ptr" if rec.filing_type.code == "P" else "fd"
         in_scope = family in types
 
@@ -219,7 +225,7 @@ def parse_year(
 
     # Authoritative per-PDF classification (SPEC §2.2), mutating each record's
     # pdf_class / parse_status and collecting the unparsed-manifest entries.
-    unparsed = _classify_records(records, data_dir=data_dir, types=types)
+    unparsed = _classify_records(records, data_dir=data_dir, types=types, year=year)
 
     by_pdf_class: dict[str, int] = defaultdict(int)
     not_classified = 0
