@@ -72,8 +72,12 @@ def test_none_disclosed_is_absent_not_empty():
 def test_schedule_a_item_count_and_structure():
     body = extract_fd_schedules(THOMPSON)
     a = body.schedules["A"]
-    # 25 asset rows on this form (each [TYPE]-tagged, glyph-terminated).
-    assert len(a) == 25
+    # 27 asset rows on this form. The pre-GH-0070 anchor counted 25: the two
+    # "Public Employees' Retirement System of Mississippi … [DB]" rows wrap
+    # the [TYPE] tag off the glyph-terminated row line and silently merged
+    # into the Prudential row. The glyph-terminated-line anchor recovers them
+    # and the [TYPE]-count completeness guard pins the total.
+    assert len(a) == 27
     # First row: a real-property asset, no owner column, a value range, a LOCATION.
     first = a[0]
     assert first["asset"] == "0.5 acre unimproved property"
@@ -1000,3 +1004,36 @@ def test_schedule_f_bare_year_leading_date(monkeypatch):
     assert len(f) == 1
     assert f[0]["date"] == "2014"
     assert "retirement plan." in f[0]["raw_text"]
+
+
+# --- GH-0070: Schedule A/B completeness guard ----------------------------------
+
+
+def test_fd_completeness_guard_fails_loudly_on_unanchorable_rows(monkeypatch):
+    # An A segment whose rows defeat every anchor signal (no glyph, no value
+    # signature after the [TYPE] tag, no arrow, no dangling low) collapses
+    # into one salvaged item — the guard must surface that as extract_failed
+    # (3 [TYPE] tags, 1 item), never a plausible-but-wrong body with status ok.
+    # The guard fires only on collapse / severe merge: small tag-count drift
+    # (tag-less rows, brackets in filer text) passes — see extract_fd_schedules.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "Some Asset [ST]",
+            "Another Asset [BA]",
+            "Third Asset [MF]",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    with pytest.raises(PdfExtractError, match="Schedule A.*3 \\[TYPE\\] tag"):
+        extract_fd_schedules(Path("synthetic.pdf"))
+
+
+def test_fd_completeness_guard_passes_on_clean_fixtures():
+    # The guard is exercised by every fixture-driven test above; assert once
+    # that it stays quiet on every real fixture — no collapse, no severe merge
+    # (deliberately weaker than exact tag equality, which drifts ~30% in the
+    # wild; see the guard's comment in extract_fd_schedules).
+    for fixture in (THOMPSON, HACKETT_CANDIDATE, WELCH_SUBWRAP, DIRECTB):
+        extract_fd_schedules(fixture)  # raises PdfExtractError on collapse

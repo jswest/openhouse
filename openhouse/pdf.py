@@ -632,7 +632,10 @@ _FD_GLYPH_RE = re.compile(r"\bgfedcb?\s*$")
 _FD_TYPE_TAG_RE = re.compile(r"\[([A-Za-z0-9]+)\]")
 
 # An owner column token (SP/DC/JT) appearing right after the [TYPE] tag.
-_FD_OWNER_AFTER_TYPE_RE = re.compile(r"\][\s]*(SP|DC|JT)\b")
+# Case-insensitive: the case-mangled rendering (SPEC §2.2) lowercases the
+# small-caps owner tokens unpredictably (``Sp`` / ``Jt``); extractors normalize
+# the captured token with .upper().
+_FD_OWNER_AFTER_TYPE_RE = re.compile(r"\][\s]*(SP|DC|JT)\b", re.IGNORECASE)
 
 # An amount-range bucket; FD ranges wrap across lines, so we match all occurrences
 # in the assembled (de-wrapped) item text. ``Over $X`` / open-ended values do not
@@ -644,6 +647,7 @@ _FD_AMOUNT_RE = re.compile(r"\$[\d,]+\s*-\s*\$[\d,]+")
 _FD_FURNITURE_RE = re.compile(
     r"^(asset owner|asset \[|owner creditor|Source type|Position name|"
     r"Date Parties|type\(s\)|type gains >|gains >|\$1,000\?|\$200\?|filing|current Year|"
+    r"year to year|"
     r"to Preceding|liability|\* For the complete|\* Asset class|name of organization|"
     # E–J column-header furniture (#17): each schedule's header row, on its own
     # line, leads with these tokens; the values below are filer content.
@@ -833,7 +837,7 @@ def _income_type_between(raw: str, start: int, end: int) -> str | None:
 # represented as a ``{low, high}`` bucket. It occupies its column *slot* (so the
 # buckets after it are not mis-assigned one column left) but parses to ``None``;
 # the verbatim ``raw_text`` keeps the wording.
-_FD_A_OVER_RE = re.compile(r"Over\s+\$[\d,]+")
+_FD_A_OVER_RE = re.compile(r"Over\s+\$[\d,]+", re.IGNORECASE)
 # Any bare money token — the candidate pool for wrapped high bounds, filtered in
 # ``_fd_amount_entries`` down to tokens claimed by no bucket/Over/dangling span.
 _FD_BARE_AMOUNT_RE = re.compile(r"\$[\d,]+")
@@ -972,9 +976,18 @@ def _schedule_a_amounts(
 # name wraps off the glyph-bearing line never carries tag+glyph together. The
 # signature anchors in **every** rendering now; the glyph remains an additional
 # anchor signal, never a gate.
-_FD_A_ROW_AFTER_TYPE_RE = re.compile(
-    r"\]\s*(?:SP|DC|JT)?\s*(?:\$[\d,]+\s*-|Over\b|\$[\d,]+\.\d{2}|None\b|Undetermined\b)"
-)
+# The literal words match case-insensitively via (?i:…) — the case-mangled
+# rendering lowercases them (``none`` / ``over``) like every other small-caps
+# victim; the owner tokens in the two row signatures below get the same
+# treatment. The money forms are case-free.
+_FD_VALUE_START = r"(?:\$[\d,]+\s*-|(?i:Over)\b|\$[\d,]+\.\d{2}|(?i:None)\b|(?i:Undetermined)\b)"
+_FD_A_ROW_AFTER_TYPE_RE = re.compile(rf"\]\s*(?i:SP|DC|JT)?\s*{_FD_VALUE_START}")
+# The same value-column signature after the subholding arrow. A bare ``⇒`` is
+# NOT a row anchor (GH-0070): a long parent name can wrap with the arrow
+# landing on the *continuation* line among the wrapped high bounds
+# (``LISA BLUNT ROCHESTER TR ⇒ $500,000 Dividends $2,500``) — only an arrow
+# followed by the value column's start opens a row.
+_FD_A_ROW_AFTER_ARROW_RE = re.compile(rf"⇒\s*(?i:SP|DC|JT)?\s*{_FD_VALUE_START}")
 
 # A value column that *opens* with the literal ``None``/``Undetermined`` —
 # immediately after the ``[TYPE]`` tag or the subholding arrow (plus the
@@ -984,7 +997,9 @@ _FD_A_ROW_AFTER_TYPE_RE = re.compile(
 # filer explicitly declared None. The ``]``/``⇒`` anchor is what keeps this
 # sound: a ``None`` in the *income* columns sits after the value bucket, never
 # in this position.
-_FD_A_NONE_VALUE_RE = re.compile(r"[\]⇒]\s*(?:SP|DC|JT)?\s*(?:None|Undetermined)\b")
+_FD_A_NONE_VALUE_RE = re.compile(
+    r"[\]⇒]\s*(?:SP|DC|JT)?\s*(?:None|Undetermined)\b", re.IGNORECASE
+)
 
 
 def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
@@ -1006,10 +1021,22 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
         # a row; everything else is judged by the column signatures above.
         if _FD_DETAIL_RE.match(s):
             return False
+        if _FD_GLYPH_RE.search(s):
+            # The checkbox is the row's LAST column, so a glyph-terminated line
+            # IS a row line — even with no [TYPE] on it (a long name can push
+            # the tag onto the wrap with the glyph still on the row line:
+            # ``Public Employees' Retirement System of Mississippi Undetermined
+            # Tax-Deferred gfedc`` / ``[DB]``). The one exception is a stranded
+            # glyph alone on its line (a wrapped checkbox remnant, same
+            # artifact as the PTR page-break case): that belongs to the row
+            # above and must fold in, not anchor an empty one.
+            return not _PTR_GLYPH_ONLY_RE.match(s)
         if _FD_TYPE_TAG_RE.search(s):
-            return bool(_FD_GLYPH_RE.search(s) or _FD_A_ROW_AFTER_TYPE_RE.search(s))
+            return bool(_FD_A_ROW_AFTER_TYPE_RE.search(s))
         if "⇒" in s:
-            return True
+            # Only an arrow followed by the value column opens a row — a bare
+            # arrow can sit on a wrapped continuation (see the regex comment).
+            return bool(_FD_A_ROW_AFTER_ARROW_RE.search(s))
         # Tag-less line carrying a dangling value low bound (``Hackett &
         # Associates, PC …, 100% $250,001 - None``): the asset name ran long
         # enough to push the [TYPE] tag onto the next line, so the value
@@ -1034,7 +1061,7 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
         asset_type = type_m.group(1) if type_m else None
         asset = _scrub_field(raw[: type_m.start()].strip() if type_m else raw.strip())
         owner_m = _FD_OWNER_AFTER_TYPE_RE.search(raw)
-        owner = owner_m.group(1) if owner_m else None
+        owner = owner_m.group(1).upper() if owner_m else None
         # Column amounts are positional — see _schedule_a_amounts for the
         # None-value shift and the SPEC §2.2 wrap repair.
         value_of_asset, income_type, income_amount, income_preceding = (
@@ -1069,6 +1096,15 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
 _FD_B_ROW_RE = re.compile(
     r"\b(\d{1,2}/\d{1,2}/\d{4})\s+([Ss] \(partial\)|[PpSsEe])\s+(?:\$[\d,]|Over\b)"
 )
+# A subholding B row: the arrow plus the type+amount columns identify it. The
+# Date column is deliberately NOT required — filers put periodicity words there
+# (``457 Sooner Savings ⇒ Semi-Annually S $15,001 - …``), and such a row still
+# has the type letter and amount. A bare ``⇒`` is NOT an anchor — a wrapped
+# parent name can put the arrow on a continuation line among wrapped high
+# bounds (same artifact as Schedule A's ``_FD_A_ROW_AFTER_ARROW_RE``).
+_FD_B_ARROW_ROW_RE = re.compile(
+    r"⇒.*?\b([Ss] \(partial\)|[PpSsEe])\s+(?:\$[\d,]|Over\b)"
+)
 # A B row's Date column value (same unpadded forms; strptime's %m/%d accepts
 # unpadded components) — used on ⇒-anchored rows, whose asset side never
 # carries the column signature.
@@ -1090,7 +1126,12 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
     def starts(s: str) -> bool:
         if _FD_DETAIL_RE.match(s):
             return False
-        return "⇒" in s or bool(_FD_B_ROW_RE.search(s))
+        if _FD_GLYPH_RE.search(s):
+            # The cap-gains checkbox is the row's last column — a
+            # glyph-terminated line IS a row line, except a stranded glyph
+            # alone (a wrapped checkbox remnant folds into its row).
+            return not _PTR_GLYPH_ONLY_RE.match(s)
+        return bool(_FD_B_ROW_RE.search(s) or _FD_B_ARROW_ROW_RE.search(s))
 
     items: list[ScheduleBItem] = []
     for raw in _group_items(lines, starts_item=starts):
@@ -1101,11 +1142,16 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
         # boundary), which silently collapsed every partial sale to a bare S.
         token = None
         if "⇒" in raw:
-            owner_m = re.search(r"⇒\s*(SP|DC|JT)?\b", raw)
-            owner = owner_m.group(1) if owner_m and owner_m.group(1) else None
+            owner_m = re.search(r"⇒\s*(SP|DC|JT)?\b", raw, re.IGNORECASE)
+            owner = (
+                owner_m.group(1).upper() if owner_m and owner_m.group(1) else None
+            )
             # The Date column is the first date after the asset name; the type
             # letter follows it. (A subholding row's asset side never carries
             # the column signature, so the first date IS the Date column.)
+            # Filers can put a periodicity word there instead of a date
+            # (``⇒ Semi-Annually S $15,001 - …``): then the date degrades to
+            # None and the type comes from the type+amount signature.
             date_m = _FD_B_DATE_RE.search(raw)
             asset = _scrub_field(raw.split("⇒", 1)[0].strip())
             if date_m:
@@ -1113,6 +1159,9 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
                     r"[Ss] \(partial\)|[PpSsEe]\b", raw[date_m.end() :].lstrip()
                 )
                 token = tt_m.group(0) if tt_m else None
+            else:
+                tt_m = _FD_B_ARROW_ROW_RE.search(raw)
+                token = tt_m.group(1) if tt_m else None
         else:
             # Directly-held row (GH-0070): the owner column (if any) sits right
             # after the [TYPE] tag, as on Schedule A — and the date/type come
@@ -1121,7 +1170,7 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
             # mistaken for the Date column. A salvaged pre-anchor item has no
             # signature match and correctly degrades to None.
             after_type = _FD_OWNER_AFTER_TYPE_RE.search(raw)
-            owner = after_type.group(1) if after_type else None
+            owner = after_type.group(1).upper() if after_type else None
             date_m = _FD_B_ROW_RE.search(raw)
             asset = _scrub_field(raw[: date_m.start()].strip() if date_m else raw)
             token = date_m.group(2) if date_m else None
@@ -1131,6 +1180,11 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
         ttype = None
         if token:
             ttype = "S(partial)" if "(partial)" in token else token[0].upper()
+            # The "(partial)" marker can wrap onto the asset-name continuation
+            # line, detached from its S; only sales carry it, so an S row whose
+            # raw text holds the marker anywhere is a partial sale.
+            if ttype == "S" and "(partial)" in raw:
+                ttype = "S(partial)"
         type_m = _FD_TYPE_TAG_RE.search(raw)
         asset_type = type_m.group(1) if type_m else None
         glyph_m = re.search(r"\bgfedcb?\b", raw)
@@ -1232,8 +1286,8 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
 
     items: list[ScheduleDItem] = []
     for raw in _group_items(lines, starts_item=starts):
-        owner_m = re.match(r"(SP|DC|JT)\b", raw)
-        owner = owner_m.group(1) if owner_m else None
+        owner_m = re.match(r"(SP|DC|JT)\b", raw, re.IGNORECASE)
+        owner = owner_m.group(1).upper() if owner_m else None
         # The fuller date forms win; a bare year is the fallback (and is what
         # anchored the row when no fuller form is present).
         date_m = _FD_DATE_RE.search(raw) or _FD_D_BARE_YEAR_RE.search(raw)
@@ -1527,6 +1581,32 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
         # fallback. Never silently drop.
         if not items:
             items = _salvage_raw(letter, content)
+        # Completeness guard (GH-0070), the FD analog of the PTR FILINg STATUS:
+        # block count: an A/B row normally carries one [TYPE] tag — on its
+        # anchor line or a wrapped continuation — so the segment's tag count
+        # approximates a row count INDEPENDENT of the row anchors (a guard that
+        # shares the anchor's failure mode passes 0 == 0 and stays silent,
+        # which is exactly how every post-2022-04 PTR parsed as empty). The
+        # invariant is approximate, not exact (measured on a 300-doc stratified
+        # sample: ~30% of documents drift by a row or two — tag-less rows,
+        # filer text carrying brackets, header fragments), so the guard fires
+        # only on the two unambiguous failure classes, never on small drift:
+        # a TOTAL COLLAPSE (one item where the tags say several rows — the
+        # GH-0070 headline failure) and a SEVERE MERGE (fewer than half the
+        # tag-counted rows anchored). Those become extract_failed — explicit
+        # in the unparsed manifest — rather than a plausible-but-wrong body
+        # with status ok. Only A and B carry per-row tags, so only they are
+        # guarded; small drift passes, with verbatim raw_text still complete.
+        if letter in ("A", "B"):
+            expected = sum(len(_FD_TYPE_TAG_RE.findall(ln)) for ln in content)
+            collapse = len(items) == 1 and expected >= 3
+            severe = len(items) * 2 <= expected and expected >= 4
+            if collapse or severe:
+                raise PdfExtractError(
+                    f"FD Schedule {letter} extraction incomplete for {pdf_path}: "
+                    f"anchored {len(items)} row(s) but the segment carries "
+                    f"{expected} [TYPE] tag(s) — rows merged"
+                )
         schedules[letter] = [it.model_dump(mode="json") for it in items]
 
     return FdBody(schedules=schedules)
