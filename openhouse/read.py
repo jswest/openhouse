@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import cli as cli_mod
+from .schemas import SCHEMA_VERSION
 
 # Asset types that *should* carry a tradable ticker symbol (stocks, options). A
 # null ticker on one of these is a real gap in what ``--ticker`` can search — the
@@ -126,12 +127,16 @@ def _residual_counts(data_dir: Path, years: list[int]) -> dict:
     """Tally, across ``years``, how many in-range filings did NOT parse.
 
     Sourced from each year's ``parse-manifest.json`` ``counts`` block: ``scanned``
-    + ``missing`` (``by_pdf_class``) and ``error`` (``by_parse_status``) — the
-    filings present in the index but absent from the usable parsed set. Returns
-    ``{"parsed", "unparsed", "scanned", "missing", "error"}``; ``parsed`` is the
-    e-filed count the answer is complete over.
+    + ``missing`` (``by_pdf_class``), ``error`` (``by_parse_status``), and
+    ``not_classified`` — the filings present in the index but absent from the
+    usable parsed set. ``not_classified`` is its own residual bucket: after a
+    ``--types ptr`` partial parse those filings appear in neither the parsed nor
+    the scanned/missing/error sides, so leaving them out would under-report the
+    unknown. Returns ``{"parsed", "unparsed", "scanned", "missing", "error",
+    "not_classified"}``; ``parsed`` is the e-filed count the answer is complete
+    over.
     """
-    scanned = missing = error = efiled = 0
+    scanned = missing = error = efiled = not_classified = 0
     for year in years:
         manifest = _load_manifest(data_dir, year)
         if manifest is None:
@@ -143,25 +148,79 @@ def _residual_counts(data_dir: Path, years: list[int]) -> dict:
         scanned += by_class.get("scanned", 0)
         missing += by_class.get("missing", 0)
         error += by_status.get("error", 0)
+        not_classified += counts.get("not_classified", 0)
     return {
         "parsed": efiled,
-        "unparsed": scanned + missing + error,
+        "unparsed": scanned + missing + error + not_classified,
         "scanned": scanned,
         "missing": missing,
         "error": error,
+        "not_classified": not_classified,
     }
 
 
-def _print_residual(data_dir: Path, years: list[int]) -> None:
-    """Emit the universal residual line to stderr for a range query (SPEC §5)."""
+def _ptr_efiled_count(data_dir: Path, years: list[int]) -> int:
+    """Count e-filed **type-``P``** (PTR) filings across ``years`` from ``filings.json``.
+
+    The body-bearing base for ``trades``: only e-filed PTRs carry transaction
+    bodies. ``by_pdf_class.efiled`` in the manifest counts e-filed FDs too (which
+    have no PTR bodies), so it overstates the population a ``trades`` answer is
+    complete over. Counted from ``filings.json`` (the per-record source of truth)
+    rather than the manifest roll-up, which has no e-filed-by-type breakdown.
+    """
+    count = 0
+    for year in years:
+        for f in _load_year_filings(data_dir, year) or []:
+            if (f.get("filing_type") or {}).get("code") != "P":
+                continue
+            if f.get("pdf_class") == "efiled":
+                count += 1
+    return count
+
+
+def _print_residual(
+    data_dir: Path, years: list[int], *, parsed_override: Optional[int] = None
+) -> None:
+    """Emit the universal residual line to stderr for a range query (SPEC §5).
+
+    ``parsed_override`` replaces the "complete over the N filings parsed" base for
+    callers (``trades``) whose body-bearing population is narrower than the
+    manifest's e-filed total — there, N is the e-filed **type-``P``** count.
+    """
     r = _residual_counts(data_dir, years)
+    parsed = r["parsed"] if parsed_override is None else parsed_override
     print(
-        f"residual: complete over the {r['parsed']} e-filed filings parsed in "
+        f"residual: complete over the {parsed} e-filed filings parsed in "
         f"range; {r['unparsed']} did not parse "
-        f"(scanned {r['scanned']} / missing {r['missing']} / error {r['error']}) "
+        f"(scanned {r['scanned']} / missing {r['missing']} / error {r['error']} / "
+        f"not_classified {r['not_classified']}) "
         f"and are not represented in these results.",
         file=sys.stderr,
     )
+
+
+def _warn_schema_drift(data_dir: Path, years: list[int]) -> None:
+    """Emit ONE stderr warning if any in-range manifest's ``schema_version`` differs.
+
+    ``read`` queries the on-disk JSON shape directly; a tree written by an older
+    schema may not match what this code expects. Per "re-parse, not migrate"
+    (CLAUDE.md) we only warn — never migrate. Reports the first drifting version
+    found (one line per run, not per year) and names the re-parse remedy.
+    """
+    for year in years:
+        manifest = _load_manifest(data_dir, year)
+        if manifest is None:
+            continue
+        version = manifest.get("schema_version")
+        if version != SCHEMA_VERSION:
+            print(
+                f"warning: parsed tree was written by schema_version {version!r}, "
+                f"but this read expects {SCHEMA_VERSION}. Results may not match the "
+                f"current shape; re-run `openhouse parse` to refresh (re-parse, not "
+                f"migrate).",
+                file=sys.stderr,
+            )
+            return
 
 
 def _print_skipped(skipped: list[int]) -> None:
@@ -335,6 +394,7 @@ def _filings_table(filings: list[dict]):
 def cmd_filings(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _warn_schema_drift(data_dir, present)
 
     matched: list[dict] = []
     for year in present:
@@ -400,6 +460,7 @@ def cmd_filing(args, data_dir: Path) -> int:
         )
         return 1
     year, filing = found
+    _warn_schema_drift(data_dir, [year])
 
     body = None
     # A body only exists for PTRs that parsed to an e-filed JSON. Its absence is
@@ -558,6 +619,7 @@ def _trades_table(trades: list[dict]):
 def cmd_trades(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _warn_schema_drift(data_dir, present)
 
     trades = _collect_trades(data_dir, present, args)
     _emit(trades, table=args.table, table_fn=_trades_table)
@@ -575,7 +637,9 @@ def cmd_trades(args, data_dir: Path, years: list[int]) -> int:
         print(
             f"residual (--ticker blind spot): {null_tickered} in-range [ST]/[OP] "
             f"transaction(s) have a null ticker and could not be searched by "
-            f"symbol; use --asset to catch trades by asset name.",
+            f"symbol; use --asset to catch trades by asset name. (Scoped by "
+            f"--member/dates only, ignoring --owner/--type/--min-amount, so this "
+            f"is a conservative over-report against a filtered query's population.)",
             file=sys.stderr,
         )
     if args.asset:
@@ -586,7 +650,11 @@ def cmd_trades(args, data_dir: Path, years: list[int]) -> int:
             file=sys.stderr,
         )
 
-    _print_residual(data_dir, present)
+    # The body-bearing base is the e-filed type-P filings, not every e-filed
+    # filing (e-filed FDs carry no PTR body) — see _ptr_efiled_count.
+    _print_residual(
+        data_dir, present, parsed_override=_ptr_efiled_count(data_dir, present)
+    )
     return 0
 
 
@@ -622,6 +690,7 @@ def _summary_table(payload: dict):
 def cmd_summary(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _warn_schema_drift(data_dir, present)
 
     year_summaries = []
     for year in present:
@@ -647,8 +716,8 @@ def cmd_summary(args, data_dir: Path, years: list[int]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _add_range_arg(p) -> None:
-    p.add_argument("range", help="YYYY or YYYY-YYYY")
+def _add_range_arg(p, *, help: str = "YYYY or YYYY-YYYY") -> None:
+    p.add_argument("range", help=help)
 
 
 def build_read_parser() -> argparse.ArgumentParser:
@@ -708,7 +777,12 @@ def build_read_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="PTR transactions flattened across the range, filer attached",
     )
-    _add_range_arg(p_trades)
+    _add_range_arg(
+        p_trades,
+        help="YYYY or YYYY-YYYY — range = filing year; transactions may predate it "
+        "(a Dec-2020 trade in a 2021 filing), so widen the range when bounding by "
+        "transaction date.",
+    )
     p_trades.add_argument(
         "--ticker",
         help="SOUND query: exact (case-insensitive) ticker match. No false "
