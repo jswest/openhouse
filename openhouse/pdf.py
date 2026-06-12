@@ -131,7 +131,7 @@ def classify(pdf_path: Path) -> str:
 _PTR_ROW_RE = re.compile(
     r"^(?:(SP|DC|JT)\s+)?"  # owner column (blank → self)
     r"(.+?)\s+"  # asset blob (non-greedy up to the type)
-    r"([SsEe] \(partial\)|[PpSsEe])\s+"  # transaction type (small-caps → lower)
+    r"([Ss] \(partial\)|[PpSsEe])\s+"  # transaction type (only S can be partial)
     r"(\d{2}/\d{2}/\d{4})\s+"  # transaction date
     r"(\d{2}/\d{2}/\d{4})\s+"  # notification date
     r"(\$[\d,]+)\s+-\s+(\$[\d,]+)?\s*"  # amount range: low, then optional high
@@ -471,9 +471,17 @@ def _group_items(lines: list[str], *, starts_item) -> list[str]:
     following line (wrapped column, ``LOCATION:``/``DESCRIPTION:`` detail, wrapped
     amount) folds into the current item until the next start. Returns one joined
     ``raw_text`` string per item, in document order.
+
+    Any lines *before* the first item-start anchor are not dropped — a row whose
+    anchor was lost (a Schedule D liability with a blank ``Date incurred``, an A/B
+    row whose glyph rendered off, a signature-split row) would otherwise vanish
+    with no ``raw_text`` and no manifest entry, violating CLAUDE.md's "never
+    silently drop / verbatim raw_text on every line item". They are folded into a
+    single leading raw item so their text survives verbatim.
     """
     items: list[str] = []
     cur: list[str] = []
+    pre: list[str] = []  # lines seen before the first item-start anchor
     for ln in lines:
         s = ln.strip()
         if not s:
@@ -484,42 +492,94 @@ def _group_items(lines: list[str], *, starts_item) -> list[str]:
             cur = [s]
         elif cur:
             cur.append(s)
-        # A line before any item-start (stray header remnant) is dropped.
+        else:
+            pre.append(s)  # pre-anchor line — preserved, never dropped
     if cur:
         items.append(" ".join(cur))
+    # Emit the salvaged pre-anchor text as a leading raw item so nothing is lost.
+    if pre:
+        items.insert(0, " ".join(pre))
     return items
 
 
-# A dangling value-range low bound (``$100,001 -``) whose high bound did not
-# follow on the same span — the income column intruded and the high bound wrapped
-# to the line end (SPEC §2.2 column interleave).
-_FD_DANGLING_LOW_RE = re.compile(r"\$([\d,]+)\s*-\s*(?!\$)")
+# A dangling value-range low bound (``$100,001 - Interest``) whose high bound did
+# not follow on the same span — the income column (a word, e.g. ``Interest`` /
+# ``Rent``) intruded right after the dash and the value's high bound wrapped to the
+# line end (SPEC §2.2 column interleave). Requiring a *letter* after the dash (not
+# merely "not a $") is what distinguishes a real interleave from an ordinary
+# complete ``$lo - $hi`` bucket: the latter's dash is followed by whitespace then
+# ``$``, never a word, so it must not be mistaken for a dangling low.
+_FD_DANGLING_LOW_RE = re.compile(r"\$([\d,]+)\s+-\s+(?=[A-Za-z])")
 # A standalone amount at the very end of the (de-wrapped) row — the wrapped high
 # bound when the value range was split by the income column.
 _FD_TRAILING_AMOUNT_RE = re.compile(r"\$([\d,]+)\s*$")
 
 
-def _schedule_a_amounts(raw: str) -> tuple[AmountRange | None, AmountRange | None]:
-    """Untangle Schedule A's ``value_of_asset`` and ``income_amount`` from ``raw``.
+def _income_type_between(raw: str, start: int, end: int) -> str | None:
+    """The income-category word(s) sitting between offsets ``start`` and ``end``.
 
-    Normal case: the two complete ``$lo - $hi`` buckets in order. Interleave case
+    Schedule A's income *type* (``Rent`` / ``Dividends`` / ``Interest`` / …) prints
+    between the value range and the income range. We take the text in that gap,
+    strip the trailing ``$`` of a dangling low and any glyph remnant, and return the
+    remaining words (or ``None`` if the gap is empty). Verbatim ``raw_text`` still
+    carries the row regardless.
+    """
+    gap = raw[start:end]
+    # Drop a leading dangling-low remnant ("- " after the value low) and any glyph.
+    gap = re.sub(r"^\s*-\s*", "", gap)
+    gap = _FD_GLYPH_RE.sub("", gap)
+    gap = re.sub(r"\bgfedcb?\b", "", gap)
+    cleaned = gap.strip(" -")
+    return cleaned or None
+
+
+def _schedule_a_amounts(
+    raw: str,
+) -> tuple[AmountRange | None, str | None, AmountRange | None]:
+    """Untangle Schedule A's ``value_of_asset``, ``income_type``, ``income_amount``.
+
+    Normal case: the two complete ``$lo - $hi`` buckets in order, with the income
+    *type* word(s) (``Rent``/``Dividends``/…) sitting between them. Interleave case
     (SPEC §2.2): the value range's low bound is dangling (``$100,001 -`` with the
     income column right after) and its high bound wrapped to the row's end
-    (``… gfedc $250,000``); we pair them. A failure to untangle leaves the field
+    (``… gfedc $250,000``); we pair them, and the income type sits between the
+    dangling ``-`` and the income bucket. A failure to untangle leaves the field
     ``None`` — the verbatim ``raw_text`` still carries the row in full.
     """
     dangling = _FD_DANGLING_LOW_RE.search(raw)
-    trailing = _FD_TRAILING_AMOUNT_RE.search(raw)
-    if dangling and trailing:
-        value = _parse_amount_range(f"${dangling.group(1)} - ${trailing.group(1)}")
-        # Income is the first *complete* bucket sitting between the two halves.
+    if dangling:
+        # Interleave case: the value low bound dangled. Its high bound is the
+        # trailing wrapped amount if one materialized — otherwise the wrap is
+        # unresolved and value stays None rather than mis-assigning the income
+        # bucket to it (#12's "degrade to None rather than a wrong value"). The
+        # income range and its type come from the first complete bucket after the
+        # dangling ``-``, with the gap before that bucket holding the type word.
+        trailing = _FD_TRAILING_AMOUNT_RE.search(raw)
+        value = (
+            _parse_amount_range(f"${dangling.group(1)} - ${trailing.group(1)}")
+            if trailing
+            else None
+        )
         income_match = _FD_AMOUNT_RE.search(raw, dangling.end())
-        income = _bucket(income_match.group(0)) if income_match else None
-        return value, income
-    amounts = [_bucket(m.group(0)) for m in _FD_AMOUNT_RE.finditer(raw)]
-    value = amounts[0] if amounts else None
-    income = amounts[1] if len(amounts) > 1 else None
-    return value, income
+        if income_match:
+            income = _bucket(income_match.group(0))
+            income_type = _income_type_between(
+                raw, dangling.end(), income_match.start()
+            )
+            return value, income_type, income
+        if value is not None:
+            return value, None, None
+        # value None and no bucket after the dangling — fall through to the
+        # generic two-bucket scan over the whole row (unchanged from #12).
+    matches = list(_FD_AMOUNT_RE.finditer(raw))
+    value = _bucket(matches[0].group(0)) if matches else None
+    income = _bucket(matches[1].group(0)) if len(matches) > 1 else None
+    income_type = (
+        _income_type_between(raw, matches[0].end(), matches[1].start())
+        if len(matches) > 1
+        else None
+    )
+    return value, income_type, income
 
 
 def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
@@ -555,13 +615,14 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
         # Interest $201 - $1,000 gfedc $250,000``). _schedule_a_amounts untangles
         # that common interleave; otherwise the two complete buckets are taken in
         # order. raw_text always carries the verbatim row regardless.
-        value_of_asset, income_amount = _schedule_a_amounts(raw)
+        value_of_asset, income_type, income_amount = _schedule_a_amounts(raw)
         items.append(
             ScheduleAItem(
                 asset=asset,
                 owner=owner,
                 asset_type=asset_type,
                 value_of_asset=value_of_asset,
+                income_type=income_type,
                 income_amount=income_amount,
                 location=location,
                 description=description,
@@ -590,12 +651,17 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
         transaction_date = (
             datetime.strptime(date_m.group(1), "%m/%d/%Y").date() if date_m else None
         )
-        # Transaction type: the P/S/E letter sitting after the date.
+        # Transaction type: the P/S/E letter sitting after the date, with the
+        # ``S (partial)`` marker preserved. The ``\b`` must sit on the *letter*
+        # branch only — a trailing ``\b`` after ``S (partial)`` never matches (``)``
+        # then space is not a word boundary), which silently collapsed every
+        # partial sale to a bare ``S``. Mirror the PTR normalization instead.
         ttype = None
         if date_m:
-            tt_m = re.match(r"(S \(partial\)|[PSE])\b", raw[date_m.end() :].lstrip())
+            tt_m = re.match(r"(S \(partial\)|[PSE]\b)", raw[date_m.end() :].lstrip())
             if tt_m:
-                ttype = "S(partial)" if tt_m.group(1) == "S (partial)" else tt_m.group(1)
+                token = tt_m.group(1)
+                ttype = "S(partial)" if "(partial)" in token else token
         type_m = _FD_TYPE_TAG_RE.search(raw)
         asset_type = type_m.group(1) if type_m else None
         # Asset name = everything before the ⇒ arrow, plus any wrapped tail with

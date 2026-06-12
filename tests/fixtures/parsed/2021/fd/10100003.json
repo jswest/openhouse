@@ -1,0 +1,25 @@
+{
+  "schedules": {
+    "A": [
+      {
+        "asset": "Apple Inc. (AAPL)",
+        "asset_type": "ST",
+        "description": null,
+        "income_amount": {
+          "high": 1000,
+          "label": "$201 - $1,000",
+          "low": 201
+        },
+        "income_type": "Dividends",
+        "location": null,
+        "owner": "JT",
+        "raw_text": "Apple Inc. (AAPL) [ST] JT $1,001 - $15,000 Dividends $201 - $1,000 gfedc",
+        "value_of_asset": {
+          "high": 15000,
+          "label": "$1,001 - $15,000",
+          "low": 1001
+        }
+      }
+    ]
+  }
+}

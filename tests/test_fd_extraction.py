@@ -96,6 +96,49 @@ def test_schedule_a_description_detail_captured():
     assert "consulting company" in blb["description"]
 
 
+def test_schedule_a_income_type_is_populated():
+    # #5: income_type sits between the value and income amount buckets (Rent /
+    # Interest / Dividends) and must be populated, not left None.
+    body = extract_fd_schedules(THOMPSON)
+    a = body.schedules["A"]
+    rent = next(i for i in a if i["asset"].startswith("2 acres unimproved"))
+    assert rent["income_type"] == "Rent"
+    assert rent["income_amount"]["label"] == "$201 - $1,000"
+    assert rent["value_of_asset"] is not None  # not clobbered by the income word
+    # The interleave row (value high bound wrapped to line end) also gets its type.
+    bancorp = next(i for i in a if i["asset"].startswith("BancorpSouth"))
+    assert bancorp["income_type"] == "Interest"
+    # A value-only asset (no income column) keeps income_type None.
+    rp = next(i for i in a if i["asset_type"] == "RP" and i["income_amount"] is None)
+    assert rp["income_type"] is None
+
+
+def test_schedule_a_dangling_low_without_high_degrades_value_to_none(monkeypatch):
+    # #7: a row whose value low dangles (income column intrudes) but whose high
+    # bound never materializes must NOT mis-assign the income bucket to
+    # value_of_asset. Per "degrade to None rather than a wrong value", value is
+    # None and the first complete bucket is income.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "BancorpSouth Bank [BA] JT $100,001 - Interest $201 - $1,000 gfedc",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    item = body.schedules["A"][0]
+    assert item["value_of_asset"] is None  # NOT $201 - $1,000 (that's income)
+    assert item["income_type"] == "Interest"
+    assert item["income_amount"] == {
+        "low": 201,
+        "high": 1000,
+        "label": "$201 - $1,000",
+    }
+    assert "$100,001 -" in item["raw_text"]  # raw_text still carries the row
+
+
 def test_every_schedule_a_item_has_raw_text():
     body = extract_fd_schedules(THOMPSON)
     for item in body.schedules["A"]:
@@ -215,6 +258,55 @@ def test_schedule_b_and_d_structured_synthetic(monkeypatch):
     }
 
 
+def test_schedule_b_partial_sale_marker_survives(monkeypatch):
+    # #6: "S (partial)" must parse to "S(partial)", not collapse to a bare "S".
+    page = "\n".join(
+        [
+            "ScheDule B: tranSactionS",
+            "asset owner Date tx. amount cap.",
+            "UBS Account (XYZ) [ST] ⇒ SP 04/21/2020 S (partial) $1,001 - $15,000 gfedc",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    b = body.schedules["B"]
+    assert len(b) == 1
+    assert b[0]["transaction_type"] == "S(partial)"
+
+
+def test_schedule_d_pre_anchor_row_is_not_dropped(monkeypatch):
+    # A Schedule D liability row whose "Date incurred" is blank does NOT match the
+    # date item-start anchor. Before the fix it (and its wrapped amount line) were
+    # silently dropped — no raw_text, no manifest entry. Now the pre-anchor lines
+    # are salvaged into a leading raw item so the row's verbatim text survives.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            # Undated liability row — no Date incurred, so no anchor match.
+            "JT CapitalOne Mortgage $100,001 -",
+            "$250,000",
+            # A normal dated row after it, which DOES anchor.
+            "SP PennyMac Loan Services December 2015 Home Mortgage $15,001 - $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    d = body.schedules["D"]
+    # Both rows present: the salvaged pre-anchor row + the dated row. Nothing lost.
+    assert len(d) == 2
+    all_raw = " ".join(item["raw_text"] for item in d)
+    # The undated row's verbatim text (creditor + both wrapped amount halves)
+    # survives somewhere in the parsed items.
+    assert "CapitalOne Mortgage" in all_raw
+    assert "$100,001 -" in all_raw and "$250,000" in all_raw
+    # The dated row still parses structured as before.
+    dated = next(i for i in d if i["date_incurred"] == "December 2015")
+    assert dated["creditor"] == "PennyMac Loan Services"
+
+
 # --- failure paths -------------------------------------------------------------
 
 
@@ -313,3 +405,38 @@ def test_parse_extension_writes_no_fd_body(tmp_path, monkeypatch):
     assert records[0].pdf_class == "efiled"
     assert not (parsed_dir / "fd" / "10042852.json").exists()
     assert not unparsed
+
+
+def test_parse_annual_fd_with_lost_headings_is_extract_failed(tmp_path, monkeypatch):
+    # A genuine annual report (FilingType O) whose body renders with the schedule
+    # headings fully lost would raise NotAnFdBody — but for an annual-report type
+    # that is a REAL extraction failure (an invisible gap), not a benign cover
+    # sheet. It must land in the unparsed manifest as extract_failed (status
+    # error), never silently ok with no body.
+    raw = tmp_path / "raw" / "2020"
+    (raw / "fd").mkdir(parents=True, exist_ok=True)
+    (raw / "2020FD.xml").write_text(_ONE_FD_XML)  # FilingType O
+    (raw / "fd" / "10042852.pdf").write_text("placeholder")
+
+    monkeypatch.setattr("openhouse.parse.classify", lambda _p: "efiled")
+
+    def _raise_not_fd(_p):
+        raise NotAnFdBody("headings lost")
+
+    monkeypatch.setattr("openhouse.parse.extract_fd_schedules", _raise_not_fd)
+
+    records = build_filing_records(raw / "2020FD.xml", 2020)
+    parsed_dir = tmp_path / "parsed" / "2020"
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+    unparsed = _classify_records(
+        records,
+        data_dir=tmp_path,
+        types=["ptr", "fd"],
+        year=2020,
+        parsed_dir=parsed_dir,
+    )
+    assert records[0].filing_type.code == "O"
+    assert records[0].parse_status == "error"
+    assert records[0].pdf_class is None
+    assert not (parsed_dir / "fd" / "10042852.json").exists()
+    assert [u["reason"] for u in unparsed] == ["extract_failed"]

@@ -128,12 +128,28 @@ def test_filing_table(capsys):
     assert "doc_id" in out and "transactions" in out
 
 
-def test_filing_non_ptr_has_no_body(capsys):
+def test_filing_fd_body_is_loaded(capsys):
+    # #12 writes parsed/<year>/fd/<DocID>.json for an annual FD; cmd_filing must
+    # load it under ``body`` (not emit a bare null like a non-PTR used to).
     rc = run(["filing", "10100003"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["filing"]["doc_id"] == "10100003"
+    assert payload["body"] is not None
+    assert "schedules" in payload["body"]
+    assert "A" in payload["body"]["schedules"]
+
+
+def test_filing_fd_without_body_notes_no_body(capsys):
+    # An fd-family filing with no parsed body (a cover sheet/extension) → body null
+    # plus a clear "no parsed body" note that now covers FDs, not just PTRs.
+    rc = run(["filing", "10200002"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["filing"]["doc_id"] == "10200002"
     assert payload["body"] is None
+    assert "no parsed body" in captured.err and "FD" in captured.err
 
 
 def test_filing_unknown_doc_id_errors(capsys):
@@ -397,25 +413,46 @@ def test_trades_residual_base_is_ptr_efiled_not_all_efiled(capsys):
     # type-P base (2), not the manifest's all-efiled total (3).
     run(["trades", "2021"])
     err = capsys.readouterr().err
-    assert "complete over the 2 e-filed filings" in err
+    # The wording must make clear the base is the e-filed PTR (type-P) population.
+    assert "complete over the 2 e-filed PTR (type-P) filings" in err
 
 
 def test_trades_residual_includes_not_classified(capsys):
-    # The 2021 manifest declares not_classified 1; it belongs in neither the parsed
-    # nor the scanned/missing/error side, so the residual must surface it so the
-    # unknown is not under-reported.
+    # The 2021 manifest declares not_classified 2 (which INCLUDES the 1 errored
+    # record — an errored extraction keeps pdf_class=None, matching real parse
+    # output where error ⊆ not_classified). The residual must surface
+    # not_classified so the unknown is not under-reported, but must NOT add error
+    # in again (that double-counts every error).
     run(["trades", "2021"])
     err = capsys.readouterr().err
-    assert "not_classified 1" in err
-    # unparsed total folds it in: scanned 1 + missing 1 + error 1 + not_classified 1.
+    assert "not_classified 2" in err
+    assert "of which error 1" in err  # error shown as a sub-breakdown, not added
+    # unparsed total = scanned 1 + missing 1 + not_classified 2 = 4 (error NOT added).
     assert "4 did not parse" in err
+
+
+def test_trades_residual_reconciles_parsed_plus_unparsed_equals_total():
+    # The reconciling invariant (matching parse.py): efiled + unparsed == total,
+    # where unparsed = scanned + missing + not_classified and error ⊆
+    # not_classified. The 2021 fixture's not_classified (2) INCLUDES its 1 errored
+    # record, so adding error into the total would over-count (5 unparsed, 8 ≠ 7).
+    from openhouse.read import _residual_counts
+
+    manifest = json.loads(
+        (FIXTURES / "2021" / "parse-manifest.json").read_text()
+    )
+    total = manifest["counts"]["total"]
+    r = _residual_counts(FIXTURES.parent, [2021])
+    assert r["parsed"] + r["unparsed"] == total  # efiled + unparsed == total
+    assert r["unparsed"] == r["scanned"] + r["missing"] + r["not_classified"]
+    assert r["error"] <= r["not_classified"]  # error ⊆ not_classified, never added
 
 
 def test_filings_residual_includes_not_classified(capsys):
     # The not_classified bucket surfaces on every range residual, not just trades.
     run(["filings", "2021"])
     err = capsys.readouterr().err
-    assert "not_classified 1" in err
+    assert "not_classified 2" in err
 
 
 def test_ticker_blind_spot_states_filter_asymmetry(capsys):

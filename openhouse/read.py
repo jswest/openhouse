@@ -27,8 +27,11 @@ The sound-or-complete agreement (CLAUDE.md) is the heart of ``trades``:
 
 Every range query (``filings`` / ``trades`` / ``summary``) prints a **residual**
 line to stderr: the manifest's count of in-range filings that did *not* parse
-(scanned / missing / error), so the answer is explicitly "complete over the K
-parsed filings; M did not parse". For ``--ticker`` it additionally reports the
+(scanned / missing / not_classified, with error a labeled sub-breakdown of
+not_classified — an errored record has ``pdf_class=None``, so it is already in
+not_classified and is never added in again), so the answer is explicitly
+"complete over the K parsed filings; M did not parse". For ``--ticker`` it
+additionally reports the
 in-range ``[ST]``/``[OP]`` transactions whose ``ticker`` is null — the symbol the
 filer omitted, which the sound query cannot search.
 """
@@ -93,6 +96,14 @@ def _load_ptr_body(data_dir: Path, year: int, doc_id: str) -> Optional[dict]:
     return _load_json(path)
 
 
+def _load_fd_body(data_dir: Path, year: int, doc_id: str) -> Optional[dict]:
+    """One annual-FD body (``fd/<DocID>.json``) for a year, or ``None`` if absent."""
+    path = _year_dir(data_dir, year) / "fd" / f"{doc_id}.json"
+    if not path.exists():
+        return None
+    return _load_json(path)
+
+
 def _load_manifest(data_dir: Path, year: int) -> Optional[dict]:
     """The ``parse-manifest.json`` for one year, or ``None`` if the year isn't parsed."""
     path = _year_dir(data_dir, year) / "parse-manifest.json"
@@ -126,15 +137,20 @@ def _resolve_years(data_dir: Path, years: list[int]) -> tuple[list[int], list[in
 def _residual_counts(data_dir: Path, years: list[int]) -> dict:
     """Tally, across ``years``, how many in-range filings did NOT parse.
 
-    Sourced from each year's ``parse-manifest.json`` ``counts`` block: ``scanned``
-    + ``missing`` (``by_pdf_class``), ``error`` (``by_parse_status``), and
-    ``not_classified`` — the filings present in the index but absent from the
-    usable parsed set. ``not_classified`` is its own residual bucket: after a
-    ``--types ptr`` partial parse those filings appear in neither the parsed nor
-    the scanned/missing/error sides, so leaving them out would under-report the
-    unknown. Returns ``{"parsed", "unparsed", "scanned", "missing", "error",
-    "not_classified"}``; ``parsed`` is the e-filed count the answer is complete
-    over.
+    Sourced from each year's ``parse-manifest.json`` ``counts`` block. The
+    reconciling identity (mirroring ``parse.py``) is
+    ``efiled + scanned + missing + not_classified == total``: a record that
+    errored during extraction keeps ``pdf_class=None`` (so it is counted in
+    ``not_classified``) *and* ``parse_status="error"`` — i.e. **error ⊆
+    not_classified**. The unparsed total is therefore
+    ``scanned + missing + not_classified`` (NOT ``+ error``, which would
+    double-count every error). ``not_classified`` also absorbs out-of-scope
+    filings after a ``--types`` partial parse, so leaving it out would
+    under-report the unknown. ``error`` is still returned as a labeled
+    sub-breakdown of ``not_classified`` (never added into the total). Returns
+    ``{"parsed", "unparsed", "scanned", "missing", "error", "not_classified"}``;
+    ``parsed`` is the e-filed count the answer is complete over, so
+    ``parsed + unparsed == total``.
     """
     scanned = missing = error = efiled = not_classified = 0
     for year in years:
@@ -151,7 +167,9 @@ def _residual_counts(data_dir: Path, years: list[int]) -> dict:
         not_classified += counts.get("not_classified", 0)
     return {
         "parsed": efiled,
-        "unparsed": scanned + missing + error + not_classified,
+        # error ⊆ not_classified (an errored record has pdf_class=None), so the
+        # unparsed total must NOT add error in again — that double-counts it.
+        "unparsed": scanned + missing + not_classified,
         "scanned": scanned,
         "missing": missing,
         "error": error,
@@ -189,11 +207,17 @@ def _print_residual(
     """
     r = _residual_counts(data_dir, years)
     parsed = r["parsed"] if parsed_override is None else parsed_override
+    # When the base is the type-P override (trades), the body-bearing population is
+    # the e-filed **PTR** (type-P) filings specifically, not every e-filed filing
+    # (e-filed FDs carry no PTR body); say so to avoid implying the broader base.
+    base_label = (
+        "e-filed filings" if parsed_override is None else "e-filed PTR (type-P) filings"
+    )
     print(
-        f"residual: complete over the {parsed} e-filed filings parsed in "
+        f"residual: complete over the {parsed} {base_label} parsed in "
         f"range; {r['unparsed']} did not parse "
-        f"(scanned {r['scanned']} / missing {r['missing']} / error {r['error']} / "
-        f"not_classified {r['not_classified']}) "
+        f"(scanned {r['scanned']} / missing {r['missing']} / "
+        f"not_classified {r['not_classified']}, of which error {r['error']}) "
         f"and are not represented in these results.",
         file=sys.stderr,
     )
@@ -433,9 +457,16 @@ def _find_filing(data_dir: Path, doc_id: str) -> Optional[tuple[int, dict]]:
 def _filing_detail_table(payload: dict):
     f = payload["filing"]
     body = payload.get("body")
-    txn_cell = (
-        str(len(body.get("transactions", []))) if body else "(no body)"
-    )
+    # A PTR body carries ``transactions``; an annual-FD body carries ``schedules``.
+    # Show whichever this filing has (txn count, or schedule-letter count).
+    if not body:
+        body_label, body_cell = "body", "(no body)"
+    elif "transactions" in body:
+        body_label = "transactions"
+        body_cell = str(len(body.get("transactions", [])))
+    else:
+        body_label = "schedules"
+        body_cell = str(len(body.get("schedules", {})))
     headers = ["field", "value"]
     rows = [
         ["doc_id", f.get("doc_id", "")],
@@ -445,7 +476,7 @@ def _filing_detail_table(payload: dict):
         ["state", _filing_state(f)],
         ["filing_date", f.get("filing_date") or ""],
         ["pdf_class", f.get("pdf_class") or ""],
-        ["transactions", txn_cell],
+        [body_label, body_cell],
     ]
     return headers, rows
 
@@ -463,16 +494,23 @@ def cmd_filing(args, data_dir: Path) -> int:
     _warn_schema_drift(data_dir, [year])
 
     body = None
-    # A body only exists for PTRs that parsed to an e-filed JSON. Its absence is
-    # not an error (scanned/missing/non-PTR filings have no body), but say so.
-    if (filing.get("filing_type") or {}).get("code") == "P":
+    # A body exists for an e-filed PTR (ptr/<DocID>.json, the §6.3 transactions[])
+    # OR an e-filed annual FD (fd/<DocID>.json, the §6.3 schedule map). Its absence
+    # is not an error (scanned/missing PDFs, and fd-family cover sheets/extensions,
+    # have no parsed body), but say so rather than emit a bare ``body: null`` that
+    # is indistinguishable from "loaded but empty".
+    is_ptr = (filing.get("filing_type") or {}).get("code") == "P"
+    if is_ptr:
         body = _load_ptr_body(data_dir, year, args.doc_id)
-        if body is None:
-            print(
-                f"note: filing {args.doc_id} is a PTR but has no parsed body "
-                f"(pdf_class={filing.get('pdf_class')!r}); metadata only.",
-                file=sys.stderr,
-            )
+    else:
+        body = _load_fd_body(data_dir, year, args.doc_id)
+    if body is None:
+        kind = "PTR" if is_ptr else "FD"
+        print(
+            f"note: filing {args.doc_id} is a {kind} but has no parsed body "
+            f"(pdf_class={filing.get('pdf_class')!r}); metadata only.",
+            file=sys.stderr,
+        )
 
     payload = {"filing": filing, "body": body}
     _emit(payload, table=args.table, table_fn=_filing_detail_table)

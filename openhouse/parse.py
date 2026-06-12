@@ -50,6 +50,19 @@ STRICT_ERROR_EXIT = 1
 NOTHING_PARSED_EXIT = 1
 
 
+# FilingType codes whose e-filed PDF is a genuine **annual-FD body** carrying the
+# §6.3 schedules (SPEC §2.3): the original annual report (``O``) and its amendment
+# (``A``), both of which render the full Schedule A–J document. For these, a
+# :class:`~openhouse.pdf.NotAnFdBody` (no schedule headings found) is NOT benign —
+# it means the body's headings were lost and a real disclosure would be silently
+# dropped, so we record it as ``extract_failed`` (explicit manifest entry) rather
+# than a no-body ``ok``. Every *other* fd-family code (``X`` extension and the
+# candidate/cover-sheet/etc. types) legitimately has no schedule body, so
+# ``NotAnFdBody`` there is the benign "no body" path. #12 introduced
+# ``NotAnFdBody`` specifically for the e-filed extension cover sheet (``X``).
+_ANNUAL_FD_CODES = frozenset({"O", "A"})
+
+
 class ParseError(Exception):
     """A parse failed in a way the user must see (printed to stderr, non-zero exit)."""
 
@@ -241,6 +254,16 @@ def _classify_records(
                     try:
                         fd_body = extract_fd_schedules(pdf_path)
                     except NotAnFdBody:
+                        # No schedule headings. Benign for a cover-sheet/extension
+                        # type (legitimately no body); but on an annual-report type
+                        # (O/A) it means a real FD body's headings were lost — an
+                        # invisible gap — so escalate to extract_failed.
+                        if rec.filing_type.code in _ANNUAL_FD_CODES:
+                            raise PdfExtractError(
+                                f"annual-FD body for {pdf_path} (FilingType "
+                                f"{rec.filing_type.code!r}) has no schedule headings "
+                                "— extraction failed, not a cover sheet"
+                            )
                         fd_body = None  # extension/cover sheet — no body, not error
             except PdfExtractError:
                 rec.pdf_class = None
