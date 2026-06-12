@@ -108,13 +108,19 @@ _PTR_ROW_RE = re.compile(
     r"(gfedcb?)\s*$"  # cap-gains glyph
 )
 
-# Lines that end a row's asset-name wrap (the row's detail/section lines). An
-# asset continuation is any line that is none of these and not a new header.
-_PTR_DETAIL_RE = re.compile(
-    r"^(FILINg STATUS:|SUBHOLDINg OF:|DESCRIPTION:|ID Owner Asset|Type Date|\$200\?)",
-)
+# Detail/section lines that END a row's asset-name wrap.
+_PTR_DETAIL_RE = re.compile(r"^(FILINg STATUS:|SUBHOLDINg OF:|DESCRIPTION:)")
 
-_TICKER_RE = re.compile(r"\(([^()]+)\)")  # the parenthesized symbol in an asset name
+# Per-page table furniture pdfplumber repeats at the top of every page. When a
+# row's asset name wraps across a page break, this furniture lands BETWEEN the
+# header line and the wrapped continuation, so it must be skipped WITHOUT ending
+# the wrap — otherwise the "(TICKER) [TYPE]" continuation is silently dropped
+# (null ticker and asset_type, truncated asset, invisible to the §-residual).
+_PTR_FURNITURE_RE = re.compile(r"^(ID Owner Asset|Type Date|Gains >|\$200\?)")
+
+_TICKER_RE = re.compile(r"\(([^()]+)\)")  # a parenthesized symbol in an asset name
+# The ticker is the paren group immediately before the bracketed [TYPE] tag.
+_TICKER_BEFORE_TYPE_RE = re.compile(r"\(([^()]+)\)\s*\[[^\[\]]+\]")
 _ASSET_TYPE_RE = re.compile(r"\[([^\[\]]+)\]")  # the bracketed [ST]-style tag
 
 
@@ -134,9 +140,18 @@ def _ticker_from_asset(asset: str) -> str | None:
     correct ``None``, never a sentinel. The ticker is **never** inferred from the
     company name. Uppercasing defeats pdfplumber's small-caps glyph artifact
     (``AAPl`` → ``AAPL``, ``bRK.b`` → ``BRK.B``); precision is 1 by design.
+
+    The symbol is the paren group **immediately before the ``[TYPE]`` tag** (the
+    Clerk's ticker slot): an asset can carry an earlier parenthetical that is not
+    the symbol — ``Coca-Cola Company (The) (KO) [ST]`` → ``KO``, not ``THE`` (a
+    fabricated symbol would break ``--ticker`` soundness). When the asset has no
+    ``[TYPE]`` tag at all, fall back to the last paren group.
     """
-    match = _TICKER_RE.search(asset)
-    return match.group(1).strip().upper() if match else None
+    match = _TICKER_BEFORE_TYPE_RE.search(asset)
+    if match:
+        return match.group(1).strip().upper()
+    parens = _TICKER_RE.findall(asset)
+    return parens[-1].strip().upper() if parens else None
 
 
 def _asset_type_from_asset(asset: str) -> str | None:
@@ -195,6 +210,9 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
                 seen_detail = True
             elif _PTR_DETAIL_RE.match(nxt):
                 seen_detail = True
+            elif _PTR_FURNITURE_RE.match(nxt):
+                pass  # repeated per-page table header (page break) — skip, don't
+                # end the wrap and don't fold it into the asset name
             elif nxt and not seen_detail:
                 asset_parts.append(nxt)  # asset-name wrap
             j += 1
@@ -215,5 +233,20 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             )
         )
         i = j
+
+    # Guard against a silently partial extraction (CLAUDE.md "never silently drop
+    # a filing"): every transaction has exactly one "FILINg STATUS:" line, so a
+    # count mismatch means a header row failed the one-line signature and was
+    # skipped (or the body came back empty). Surface it loudly as extract_failed
+    # rather than writing a too-short {"transactions": [...]} with status "ok".
+    status_blocks = sum(
+        1 for ln in lines if ln.strip().startswith("FILINg STATUS:")
+    )
+    if status_blocks != len(transactions):
+        raise PdfExtractError(
+            f"PTR extraction incomplete for {pdf_path}: matched "
+            f"{len(transactions)} transaction row(s) but found {status_blocks} "
+            "'FILINg STATUS:' block(s) — the layout was not fully parsed"
+        )
 
     return transactions

@@ -352,3 +352,36 @@ def test_read_makes_no_network_call(monkeypatch, capsys):
     rc = run(["trades", "2021-2022"])
     assert rc == 0
     capsys.readouterr()
+
+
+# --- critic regression: --data-dir / --table accepted in either position -------
+
+
+def test_dataflags_accepted_after_subcommand(capsys):
+    # The natural position (matching `parse 2021 --data-dir X`): flags AFTER the
+    # subcommand must be honored, not just before it.
+    dd = str(FIXTURES.parent)
+    rc = read_mod.run(["filings", "2021", "--data-dir", dd], current_year=CURRENT_YEAR)
+    assert rc == 0
+    recs = json.loads(capsys.readouterr().out)
+    assert isinstance(recs, list) and recs  # --data-dir honored → real records
+
+
+def test_table_flag_accepted_after_subcommand(capsys):
+    dd = str(FIXTURES.parent)
+    rc = read_mod.run(
+        ["filings", "2021", "--data-dir", dd, "--table"], current_year=CURRENT_YEAR
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(out)  # --table → aligned text, not JSON
+
+
+def test_dataflags_accepted_before_subcommand(capsys):
+    # The leading position must still work too.
+    dd = str(FIXTURES.parent)
+    rc = read_mod.run(
+        ["--table", "--data-dir", dd, "filings", "2021"], current_year=CURRENT_YEAR
+    )
+    assert rc == 0

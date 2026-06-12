@@ -652,22 +652,35 @@ def _add_range_arg(p) -> None:
 
 
 def build_read_parser() -> argparse.ArgumentParser:
+    # `--data-dir`/`--table` live on a shared parent so they are accepted EITHER
+    # before the subcommand (`read --table filings 2021`) or after it
+    # (`read filings 2021 --table`) — the latter is how the sibling commands
+    # (`parse 2021 --data-dir X`) read. SUPPRESS defaults so a value given in one
+    # position is never clobbered by the other parser's default; run() applies the
+    # real defaults once after parsing.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--data-dir",
+        default=argparse.SUPPRESS,
+        help="root data directory (default: ./data)",
+    )
+    common.add_argument(
+        "--table",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="render a human-readable aligned table instead of JSON",
+    )
     parser = argparse.ArgumentParser(
         prog="openhouse read",
         description="Query parsed House financial disclosures (offline, read-only).",
-    )
-    parser.add_argument(
-        "--data-dir", default="./data", help="root data directory (default: ./data)"
-    )
-    parser.add_argument(
-        "--table",
-        action="store_true",
-        help="render a human-readable aligned table instead of JSON",
+        parents=[common],
     )
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
     # filings <range>
-    p_filings = sub.add_parser("filings", help="matching filing-metadata records")
+    p_filings = sub.add_parser(
+        "filings", parents=[common], help="matching filing-metadata records"
+    )
     _add_range_arg(p_filings)
     p_filings.add_argument("--type", help="filing type: a code (P) or label (ptr)")
     p_filings.add_argument(
@@ -685,13 +698,15 @@ def build_read_parser() -> argparse.ArgumentParser:
 
     # filing <doc_id>
     p_filing = sub.add_parser(
-        "filing", help="one filing: metadata + body (if parsed)"
+        "filing", parents=[common], help="one filing: metadata + body (if parsed)"
     )
     p_filing.add_argument("doc_id", help="the filing's DocID")
 
     # trades <range>
     p_trades = sub.add_parser(
-        "trades", help="PTR transactions flattened across the range, filer attached"
+        "trades",
+        parents=[common],
+        help="PTR transactions flattened across the range, filer attached",
     )
     _add_range_arg(p_trades)
     p_trades.add_argument(
@@ -730,7 +745,9 @@ def build_read_parser() -> argparse.ArgumentParser:
     )
 
     # summary <range>
-    p_summary = sub.add_parser("summary", help="per-year roll-up from the manifests")
+    p_summary = sub.add_parser(
+        "summary", parents=[common], help="per-year roll-up from the manifests"
+    )
     _add_range_arg(p_summary)
 
     return parser
@@ -746,6 +763,11 @@ def run(remainder: list[str], *, current_year: int) -> int:
     """
     parser = build_read_parser()
     args = parser.parse_args(remainder)
+    # The shared flags use SUPPRESS defaults (accepted in either position); apply
+    # the real defaults once, so a value passed before the subcommand is kept and
+    # downstream code can read args.data_dir / args.table unconditionally.
+    args.data_dir = getattr(args, "data_dir", "./data")
+    args.table = getattr(args, "table", False)
     data_dir = Path(args.data_dir)
 
     try:

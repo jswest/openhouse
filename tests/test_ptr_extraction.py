@@ -199,3 +199,91 @@ def test_parse_extract_failure_sets_error_and_unparsed(tmp_path):
         for u in unparsed
     ]
     assert not (parsed_dir / "ptr" / "20017980.json").exists()
+
+
+# --- critic regressions: page-break wrap, partial-extraction guard, ticker slot -
+
+
+class _FakePage:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def extract_text(self) -> str:
+        return self._text
+
+
+class _FakePdf:
+    def __init__(self, pages: list[str]) -> None:
+        self.pages = [_FakePage(t) for t in pages]
+
+    def __enter__(self) -> "_FakePdf":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def _fake_pdfplumber(monkeypatch, pages: list[str]) -> None:
+    # extract_ptr_transactions joins page text across pages, so a synthetic
+    # multi-page layout exercises page-break behavior offline (no PDF needed).
+    monkeypatch.setattr(
+        "openhouse.pdf.pdfplumber.open", lambda _path: _FakePdf(pages)
+    )
+
+
+def test_asset_wrap_across_page_break_is_not_dropped(monkeypatch):
+    # The row header ends page 1; its asset-name continuation "(ACI) [ST]" lands
+    # on page 2 *after* the repeated table-header furniture. The furniture must
+    # not end the wrap (else ticker/asset_type silently null — a residual-
+    # invisible blind spot the sound-or-complete contract forbids).
+    page1 = (
+        "JT Albertsons Companies, Inc. Class A S 12/16/2020 01/01/2021 "
+        "$1,001 - $15,000 gfedc"
+    )
+    page2 = "\n".join(
+        [
+            "ID Owner Asset Transaction Date Notification Amount Cap.",
+            "Type Date Gains >",
+            "$200?",
+            "(ACI) [ST]",
+            "FILINg STATUS: New",
+            "SUBHOLDINg OF: DSL Living Trust",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page1, page2])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert len(txns) == 1
+    assert txns[0].ticker == "ACI"
+    assert txns[0].asset_type == "ST"
+    assert txns[0].asset == "Albertsons Companies, Inc. Class A (ACI) [ST]"
+
+
+def test_partial_extraction_raises_rather_than_silently_dropping(monkeypatch):
+    # Two rows each with a FILINg STATUS block, but the second's amount is a
+    # one-sided "Over $1,000,000" the header regex can't match → it would be
+    # silently skipped. The status-block guard turns that into a loud
+    # extract_failed instead of a too-short body with status "ok".
+    page = "\n".join(
+        [
+            "JT Apple Inc. (AAPL) [ST] P 12/16/2020 01/01/2021 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+            "JT Tesla Inc. (TSLA) [ST] S 12/17/2020 01/01/2021 Over $1,000,000 gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    with pytest.raises(PdfExtractError):
+        extract_ptr_transactions(Path("synthetic.pdf"))
+
+
+def test_ticker_is_the_symbol_adjacent_to_the_type_tag():
+    # The ticker is the paren group immediately before [TYPE], not the first
+    # parenthetical — "(The) (KO) [ST]" → KO, never the fabricated "THE" (which
+    # would be a --ticker false positive).
+    from openhouse.pdf import _ticker_from_asset
+
+    assert _ticker_from_asset("Coca-Cola Company (The) (KO) [ST]") == "KO"
+    assert _ticker_from_asset("Apple Inc. (AAPL) [ST]") == "AAPL"
+    assert _ticker_from_asset("Cinemark USA Inc [CS]") is None
+    # No [TYPE] tag at all → fall back to the last paren group.
+    assert _ticker_from_asset("Some Holding (BAR)") == "BAR"

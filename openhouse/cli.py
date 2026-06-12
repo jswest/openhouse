@@ -240,8 +240,9 @@ def main(argv: list[str] | None = None) -> int:
     fetched_at = now.isoformat()
 
     # `read` owns its own sub-parser (read.py), so hand it everything after the
-    # `read` token verbatim — argparse's REMAINDER mis-handles a leading global
-    # flag (e.g. `read --table filings 2021`), and slicing here is order-robust.
+    # `read` token verbatim. read.py accepts `--data-dir`/`--table` before OR
+    # after its subcommand (shared parent parser), which a top-level REMAINDER
+    # arg could not express.
     if raw_argv and raw_argv[0] == "read":
         return read_mod.run(raw_argv[1:], current_year=current_year)
 
