@@ -10,12 +10,27 @@ classification is the ground truth a test asserts against.
 |---|---|---|---|---|
 | `efiled_fd_10042852.pdf` | 10042852 | fd (annual) | `efiled` | 4 pages, ~1,348 chars/page |
 | `efiled_ptr_20016766.pdf` | 20016766 | ptr | `efiled` | 1 page, ~1,127 chars |
+| `efiled_ptr_20017980.pdf` | 20017980 | ptr | `efiled` | 7 pages, 57 transaction rows |
 | `scanned_fd_8217722.pdf` | 8217722 | fd (annual) | `scanned` | 1 page, **0** chars (image-only) |
 | `scanned_ptr_8217326.pdf` | 8217326 | ptr | `scanned` | 1 page, **0** chars (image-only) |
 
 The DocID prefix matches SPEC §2.2: 8-digit `1`/`2` → e-filed (text-extractable);
 7-digit `8` → paper/scanned (image-only, 0 chars). Text extraction is the
 *authoritative* test; the prefix is a fast pre-filter only.
+
+## PTR body-extraction ground truth (issue #9, SPEC §6.3)
+
+The two e-filed PTRs double as body-extraction fixtures (`tests/test_ptr_extraction.py`):
+
+- **`efiled_ptr_20017980.pdf`** — Hon. Susie Lee, 2021 (`data/raw/2021/ptr/20017980.pdf`).
+  **57** transaction rows across 7 pages: 37 `P`, 12 `S(partial)`, 8 `S`. Exercises
+  multi-line wrapped asset names (`Albertsons Companies, Inc. Class A` / `(ACI) [ST]`),
+  `S (partial)` (normalized to `S(partial)`), the cap-gains glyph both set
+  (`gfedcb`, 12 rows) and unset (`gfedc`), the `JT` owner, `SUBHOLDINg OF` detail
+  lines, and small-caps tickers (`(CSgP)`→`CSGP`, `(gPC)`→`GPC`).
+- **`efiled_ptr_20016766.pdf`** — Hon. Alan Lowenthal, 2020: the **null-ticker**
+  case. A single `SP` Cinemark `[CS]` (corp-bond) **sale** with no parenthesized
+  symbol (`ticker: null`, correct — not a sentinel) and a `DESCRIPTION:` line.
 
 **Legal (SPEC §1).** Clerk FD data carries a statutory use restriction: not for
 commercial use, soliciting, or establishing credit ratings. These files are

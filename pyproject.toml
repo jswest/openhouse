@@ -2,7 +2,7 @@
 name = "openhouse"
 # Kept 1:1 with openhouse.schemas.SCHEMA_VERSION — see docs/decisions/GH-0030.
 # tests/test_schemas.py::test_pyproject_version_matches_schema_version enforces it.
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",
