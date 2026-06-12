@@ -133,14 +133,26 @@ def classify(pdf_path: Path) -> str:
 # the next line. Without this, ~two-thirds of 2020 PTRs failed the completeness
 # guard and were dropped wholesale — exactly the trades the spec says never to
 # silently lose.
-_PTR_ROW_RE = re.compile(
+# The five leading groups every row form shares: owner, asset blob, type, and
+# the date pair. ``_match_ptr_header`` unpacks all four row regexes positionally,
+# so the group count and order MUST stay in lockstep across them — composing
+# from this one fragment (the ``_PTR_*_LABEL`` idiom below) makes that
+# structural, not a convention.
+_PTR_ROW_PREFIX = (
     r"^(?:(SP|DC|JT)\s+)?"  # owner column (blank → self)
     r"(.+?)\s+"  # asset blob (non-greedy up to the type)
     r"([Ss] \(partial\)|[PpSsEe])\s+"  # transaction type (only S can be partial)
     r"(\d{2}/\d{2}/\d{4})\s+"  # transaction date
     r"(\d{2}/\d{2}/\d{4})\s+"  # notification date
-    r"(\$[\d,]+)\s+-\s+(\$[\d,]+)?\s*"  # amount range: low, then optional high
-    r"(gfedcb?)\s*$"  # cap-gains glyph
+)
+# The exact-dollar amount token shared by the two exact-row forms (GH-0049):
+# one bare ``$N[,NNN][.NN]`` money value, no dash. Whole-dollar values are
+# accepted; cents are not required.
+_PTR_EXACT_AMOUNT = r"(\$[\d,]+(?:\.\d{2})?)"
+_PTR_ROW_RE = re.compile(
+    _PTR_ROW_PREFIX
+    + r"(\$[\d,]+)\s+-\s+(\$[\d,]+)?\s*"  # amount range: low, then optional high
+    + r"(gfedcb?)\s*$"  # cap-gains glyph
 )
 # Exact-dollar amount variant (GH-0049). A minority of real PTR rows disclose a
 # single **exact** dollar value (e.g. ``$894.97``) in the amount column instead of
@@ -153,14 +165,29 @@ _PTR_ROW_RE = re.compile(
 # fabricate a range). Whole-dollar exact values (``$500``) are accepted too;
 # cents are not required.
 _PTR_EXACT_ROW_RE = re.compile(
-    r"^(?:(SP|DC|JT)\s+)?"  # owner column (blank → self)
-    r"(.+?)\s+"  # asset blob (non-greedy up to the type)
-    r"([Ss] \(partial\)|[PpSsEe])\s+"  # transaction type (only S can be partial)
-    r"(\d{2}/\d{2}/\d{4})\s+"  # transaction date
-    r"(\d{2}/\d{2}/\d{4})\s+"  # notification date
-    r"(\$[\d,]+(?:\.\d{2})?)\s+"  # amount: a single exact dollar value, no dash
-    r"(gfedcb?)\s*$"  # cap-gains glyph
+    _PTR_ROW_PREFIX
+    + _PTR_EXACT_AMOUNT
+    + r"\s+(gfedcb?)\s*$"  # exact value, then the cap-gains glyph
 )
+# Glyphs-lost rendering row variants (SPEC §2.2 NUL form; PTRs cut over around
+# 2022-04). In those documents the cap-gains checkbox glyph (``gfedc``/
+# ``gfedcb``) is not in the text layer AT ALL, so the trailing-glyph anchor
+# above can never fire and every row would be silently skipped. The remaining
+# signature — optional owner, type letter, date pair, amount column anchored at
+# end of line — is still unambiguous (the ``\s+`` adjacency between the
+# notification date and the leading ``$`` keeps a one-sided ``Over $1,000,000``
+# from matching, exactly as the glyph anchor did). The checkbox *state* is
+# unrecoverable from the text layer: those rows carry ``cap_gains_over_200:
+# None`` ("unknown"), never a fabricated boolean. These variants are consulted
+# only for documents detected as glyphless (NULs in the furniture), so intact
+# documents take exactly the same code paths as before. The high bound is
+# optional for the same column-wrap reason as ``_PTR_ROW_RE`` — a wrapped
+# header now ends ``$LOW -`` bare (no glyph after the dash).
+_PTR_ROW_GLYPHLESS_RE = re.compile(
+    _PTR_ROW_PREFIX
+    + r"(\$[\d,]+)\s+-(?:\s+(\$[\d,]+))?\s*$"  # amount range: low, optional high
+)
+_PTR_EXACT_ROW_GLYPHLESS_RE = re.compile(_PTR_ROW_PREFIX + _PTR_EXACT_AMOUNT + r"\s*$")
 # A wrapped high bound spilled to the next line. It is the lone ``$N`` money token
 # on that continuation line, and may sit either at the **start** (``$50,000`` —
 # the asset name did not also wrap) or **end** (``Shares (COLD) [ST] $50,000`` —
@@ -175,14 +202,28 @@ _PTR_WRAPPED_HIGH_RE = re.compile(r"\$[\d,]+")
 # ``FIlINg STaTuS:`` — 10+ renderings seen across 2020 alone), so only the
 # letter sequence is stable, never the case. Matching a fixed-case literal here
 # silently dropped the detail boundary on the majority of real PTRs.
+#
+# Each label also carries a NUL branch (the ``\x00+`` alternations) for the
+# glyphs-lost rendering (SPEC §2.2 NUL form, same as ``_FD_DETAIL_RE``): the
+# small-caps labels extract as NUL runs, one per lost glyph — ``FILING STATUS:``
+# becomes ``F\x00{5} S\x00{5}:``, ``SUBHOLDING OF:`` becomes ``S\x00{9} O\x00:``,
+# ``DESCRIPTION:`` becomes ``D\x00{10}:``. NULs never occur in filer-entered
+# content (the verified §2.2 invariant), so the NUL branches are collision-proof.
+_PTR_STATUS_LABEL = r"F(?:ILING|\x00+) S(?:TATUS|\x00+):"
+_PTR_SUBHOLDING_LABEL = r"S(?:UBHOLDING|\x00+) O(?:F|\x00+):"
+_PTR_DESCRIPTION_LABEL = r"D(?:ESCRIPTION|\x00+):"
 _PTR_DETAIL_RE = re.compile(
-    r"^(FILING STATUS:|SUBHOLDING OF:|DESCRIPTION:)", re.IGNORECASE
+    rf"^({_PTR_STATUS_LABEL}|{_PTR_SUBHOLDING_LABEL}|{_PTR_DESCRIPTION_LABEL})",
+    re.IGNORECASE,
 )
 # The per-row "FILING STATUS:" line, used to count blocks for the completeness
-# guard — same case-insensitive shape as above (just the status line).
-_PTR_STATUS_RE = re.compile(r"^FILING STATUS:", re.IGNORECASE)
-# A row's DESCRIPTION: detail line (case-insensitive, same small-caps reason).
-_PTR_DESCRIPTION_RE = re.compile(r"^DESCRIPTION:", re.IGNORECASE)
+# guard — same case-insensitive + NUL-branch shape as above (just the status
+# line). Keeping this NUL-aware is what makes the guard LOUD on a glyphless
+# document: a zero-extraction body still counts its real status blocks, so
+# 0 != N raises extract_failed instead of returning a silent empty list.
+_PTR_STATUS_RE = re.compile(rf"^{_PTR_STATUS_LABEL}", re.IGNORECASE)
+# A row's DESCRIPTION: detail line (case-insensitive + NUL branch, as above).
+_PTR_DESCRIPTION_RE = re.compile(rf"^{_PTR_DESCRIPTION_LABEL}", re.IGNORECASE)
 
 # Per-page table furniture pdfplumber repeats at the top of every page. When a
 # row's asset name wraps across a page break, this furniture lands BETWEEN the
@@ -197,6 +238,17 @@ _PTR_FURNITURE_RE = re.compile(r"^(ID Owner Asset|Type Date|Gains >|\$200\?)")
 # wrapped-high search skips both furniture and this glyph remnant so the page-break
 # case recovers the high bound rather than dropping the whole row.
 _PTR_GLYPH_ONLY_RE = re.compile(r"^gfedcb?\s*$")
+
+# The TRANSACTIONS table's footnote, printed exactly once, after the last row
+# (regular font — identical in both renderings). Everything beyond it is
+# document trailer: the ASSET CLASS DETAILS appendix (whose per-asset
+# ``LOCATION:``/``DESCRIPTION:`` detail lines would otherwise bleed into the
+# *last row's* description), the IPO section, and the certification block.
+# Extraction truncates the line list here; every per-row ``FILING STATUS:``
+# block counted by the completeness guard lives above the footnote.
+_PTR_TABLE_END_RE = re.compile(
+    r"^\* For the complete list of asset type abbreviations", re.IGNORECASE
+)
 
 _TICKER_RE = re.compile(r"\(([^()]+)\)")  # a parenthesized symbol in an asset name
 # The ticker is the paren group immediately before the bracketed [TYPE] tag.
@@ -252,16 +304,68 @@ def _asset_type_from_asset(asset: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def _is_ptr_header(line: str) -> bool:
+def _match_ptr_header(
+    line: str, *, glyphless: bool
+) -> tuple[bool, tuple[str | None, ...], str | None] | None:
+    """Match a PTR row header line → ``(is_exact, fields, glyph)``, else ``None``.
+
+    ``fields`` is ``(owner, asset_head, txn_type, txn_date, notif_date, …amount)``
+    — two amount fields (low, optional high) for a range row, one (the exact
+    token) for an exact-dollar row. ``glyph`` is the trailing cap-gains glyph, or
+    ``None`` in the glyphs-lost rendering where the checkbox is not in the text
+    layer at all. The glyph-anchored forms are always tried first (they cannot
+    match a glyphless line, nor vice versa — the end-of-line anchors are mutually
+    exclusive); the glyphless variants are consulted only when the document was
+    detected as glyphless, so intact documents behave exactly as before.
+    """
+    m = _PTR_ROW_RE.match(line)
+    if m:
+        *fields, glyph = m.groups()
+        return False, tuple(fields), glyph
+    m = _PTR_EXACT_ROW_RE.match(line)
+    if m:
+        *fields, glyph = m.groups()
+        return True, tuple(fields), glyph
+    if glyphless:
+        m = _PTR_ROW_GLYPHLESS_RE.match(line)
+        if m:
+            return False, m.groups(), None
+        m = _PTR_EXACT_ROW_GLYPHLESS_RE.match(line)
+        if m:
+            return True, m.groups(), None
+    return None
+
+
+def _is_ptr_header(line: str, *, glyphless: bool = False) -> bool:
     """True if ``line`` opens a PTR transaction row — range OR exact-dollar form.
 
     Used as the row boundary throughout extraction so an exact-dollar row (#49)
     both starts a new row and ends the previous one, exactly like a range row.
     """
-    return bool(_PTR_ROW_RE.match(line) or _PTR_EXACT_ROW_RE.match(line))
+    return _match_ptr_header(line, glyphless=glyphless) is not None
 
 
-def _wrapped_range_tail_follows(lines: list[str], start: int, n: int) -> bool:
+def _is_ptr_skippable(stripped: str) -> bool:
+    """True for a line that carries no row content — skip without ending a wrap.
+
+    Blank lines, repeated per-page table furniture, a stray glyph remnant, and
+    NUL-bearing non-detail lines (the glyphs-lost rendering's form furniture —
+    section titles etc.; SPEC §2.2: NULs never occur in filer content). The
+    wrap-recovery loop and the GH-0049 exact-row guard MUST share one view of
+    "skippable" — the guard exists precisely to mirror the recovery loop's walk,
+    so a divergence here silently breaks its soundness claim.
+    """
+    return bool(
+        not stripped
+        or _PTR_FURNITURE_RE.match(stripped)
+        or _PTR_GLYPH_ONLY_RE.match(stripped)
+        or "\x00" in stripped
+    )
+
+
+def _wrapped_range_tail_follows(
+    lines: list[str], start: int, n: int, *, glyphless: bool = False
+) -> bool:
     """True if the next content line begins with ``-`` (a spilled ``- $HIGH`` tail).
 
     GH-0049 soundness guard (critic): an exact-dollar match (``$N`` + glyph on the
@@ -278,9 +382,9 @@ def _wrapped_range_tail_follows(lines: list[str], start: int, n: int) -> bool:
     k = start
     while k < n:
         nxt = lines[k].strip()
-        if _is_ptr_header(nxt) or _PTR_DETAIL_RE.match(nxt):
+        if _is_ptr_header(nxt, glyphless=glyphless) or _PTR_DETAIL_RE.match(nxt):
             return False
-        if not nxt or _PTR_FURNITURE_RE.match(nxt) or _PTR_GLYPH_ONLY_RE.match(nxt):
+        if _is_ptr_skippable(nxt):
             k += 1
             continue
         return nxt.startswith("-")
@@ -306,19 +410,33 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             f"could not extract PTR body from {pdf_path}: {exc}"
         ) from exc
 
+    # The TRANSACTIONS table ends at its footnote; drop the trailer (appendix /
+    # IPO / certification) so its detail lines never fold into the last row.
+    for idx, ln in enumerate(lines):
+        if _PTR_TABLE_END_RE.match(ln.strip()):
+            lines = lines[:idx]
+            break
+
+    # The glyphs-lost rendering (SPEC §2.2): small-caps furniture extracted as
+    # NUL runs and the checkbox glyphs gone from the text layer. NULs never
+    # occur in an intact-rendering body, so this flag is a precise document-
+    # level marker — intact documents take exactly the same code paths as
+    # before (same detection as the FD extractor).
+    glyphless = any("\x00" in ln for ln in lines)
+
     transactions: list[PtrTransaction] = []
     i = 0
     n = len(lines)
     while i < n:
-        match = _PTR_ROW_RE.match(lines[i].strip())
-        exact_match = None if match else _PTR_EXACT_ROW_RE.match(lines[i].strip())
-        if not match and not exact_match:
+        header = _match_ptr_header(lines[i].strip(), glyphless=glyphless)
+        if header is None:
             i += 1
             continue
+        is_exact, fields, glyph = header
 
-        if match:
-            owner, asset_head, txn_type, txn_date, notif_date, amount_low, amount_high, glyph = (
-                match.groups()
+        if not is_exact:
+            owner, asset_head, txn_type, txn_date, notif_date, amount_low, amount_high = (
+                fields
             )
             amount: AmountRange | None = None  # filled once the high bound is known
         else:
@@ -326,14 +444,12 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             # not a ``$LOW - $HIGH`` bucket. No amount-column wrap to recover — the
             # value is complete on the header line — so ``amount`` is set now and
             # ``amount_high`` is sentinel-non-None to skip the wrap-recovery block.
-            owner, asset_head, txn_type, txn_date, notif_date, exact_token, glyph = (
-                exact_match.groups()
-            )
+            owner, asset_head, txn_type, txn_date, notif_date, exact_token = fields
             # Soundness guard (critic): refuse the exact reading if a wrapped
             # range tail ("- $HIGH") follows — that's a range that lost its dash to
             # a line wrap, not a lone exact value. Fall through to extract_failed
             # rather than fabricate a point.
-            if _wrapped_range_tail_follows(lines, i + 1, n):
+            if _wrapped_range_tail_follows(lines, i + 1, n, glyphless=glyphless):
                 i += 1
                 continue
             amount = _parse_exact_amount(exact_token)
@@ -365,12 +481,13 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             k = j
             while k < n:
                 nxt = lines[k].strip()
-                if _is_ptr_header(nxt) or _PTR_DETAIL_RE.match(nxt):
+                if _is_ptr_header(nxt, glyphless=glyphless) or _PTR_DETAIL_RE.match(nxt):
                     break  # reached the next row / this row's detail — high bound
                     # never materialized; leave amount_high None (row drops below).
-                if not nxt or _PTR_FURNITURE_RE.match(nxt) or _PTR_GLYPH_ONLY_RE.match(nxt):
+                if _is_ptr_skippable(nxt):
                     k += 1
-                    continue  # page-break furniture / stray glyph — skip, keep looking
+                    continue  # page-break furniture / stray glyph / NUL-run form
+                    # furniture (never filer content — SPEC §2.2) — skip, keep looking
                 high_m = _PTR_WRAPPED_HIGH_RE.search(nxt)
                 if high_m:
                     amount_high = high_m.group(0)
@@ -384,7 +501,7 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
 
         while j < n:
             nxt = lines[j].strip()
-            if _is_ptr_header(nxt):
+            if _is_ptr_header(nxt, glyphless=glyphless):
                 break  # next transaction row — end of this row
             desc_m = _PTR_DESCRIPTION_RE.match(nxt)
             if desc_m:
@@ -392,9 +509,11 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
                 seen_detail = True
             elif _PTR_DETAIL_RE.match(nxt):
                 seen_detail = True
-            elif _PTR_FURNITURE_RE.match(nxt):
-                pass  # repeated per-page table header (page break) — skip, don't
-                # end the wrap and don't fold it into the asset name
+            elif _PTR_FURNITURE_RE.match(nxt) or "\x00" in nxt:
+                pass  # repeated per-page table header (page break) or NUL-run
+                # form furniture (glyphs-lost rendering — never filer content,
+                # SPEC §2.2) — skip, don't end the wrap and don't fold it into
+                # the asset name
             elif nxt and not seen_detail:
                 asset_parts.append(nxt)  # asset-name wrap
             j += 1
@@ -411,7 +530,7 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
         # exact-dollar row already set ``amount`` at the top of the iteration.
         if amount is None:
             amount = _parse_amount_range(f"{amount_low} - {amount_high}")
-        asset = " ".join(part for part in asset_parts if part)
+        asset = _scrub_field(" ".join(part for part in asset_parts if part))
         transactions.append(
             PtrTransaction(
                 owner=owner or "self",
@@ -422,8 +541,11 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
                 transaction_date=datetime.strptime(txn_date, "%m/%d/%Y").date(),
                 notification_date=datetime.strptime(notif_date, "%m/%d/%Y").date(),
                 amount_range=amount,
-                cap_gains_over_200=(glyph == "gfedcb"),
-                description=description,
+                # In the glyphs-lost rendering the checkbox glyph is absent from
+                # the text layer entirely, so its state is unrecoverable: None
+                # means "unknown", never a fabricated boolean (SPEC §6.3).
+                cap_gains_over_200=(glyph == "gfedcb") if glyph is not None else None,
+                description=_scrub_field(description),
             )
         )
         i = j

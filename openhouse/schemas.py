@@ -216,7 +216,12 @@ class PtrTransaction(BaseModel):
       an ``{exact, label}`` point when the row discloses a single exact dollar
       value instead of a range (GH-0049).
     - ``cap_gains_over_200`` — the cap-gains checkbox (the form renders
-      ``gfedc`` unchecked vs ``gfedcb`` checked at the row's end).
+      ``gfedc`` unchecked vs ``gfedcb`` checked at the row's end). ``None``
+      means **unknown**: in the glyphs-lost rendering (SPEC §2.2 NUL form,
+      dominant for PTRs from ~2022-04 on) the checkbox glyph vanishes from the
+      text layer entirely, so the state is unrecoverable — recorded as ``null``,
+      never coerced to a boolean (the same unrecoverable-field treatment as the
+      FD Schedule B ``cap_gains_over_200``).
     - ``description`` — the ``DESCRIPTION:`` line text if present, else ``None``.
     """
 
@@ -228,7 +233,7 @@ class PtrTransaction(BaseModel):
     transaction_date: date
     notification_date: date
     amount_range: AmountRange
-    cap_gains_over_200: bool
+    cap_gains_over_200: Optional[bool] = None
     description: Optional[str] = None
 
 

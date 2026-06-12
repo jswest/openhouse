@@ -130,7 +130,8 @@ respectively, tentatively); 7-digit prefixed `8`/`9` are paper. Use the prefix t
   one or the other, never mixed):
   - **letters survive, case-mangled** (dominant through 2020): `ScheDule A:` /
     `ScHeDule A:` / `SCheDuLe A:` — sequence intact, case unstable.
-  - **glyphs extract as U+0000 NULs** (dominant 2021 onward), one NUL per lost
+  - **glyphs extract as U+0000 NULs** (dominant 2021 onward for annual FDs;
+    PTRs cut over around **2022-04**), one NUL per lost
     glyph: `Schedule A:` extracts as `S\x00{7} A:`. NUL is not regex `\s`, not
     removed by `str.strip()`, and invisible in viewers. The NUL form also hits
     the other small-caps furniture: section titles (`E\x00…` = "Exclusions
@@ -485,7 +486,7 @@ however many times it filed).
   "transaction_date": "2023-12-21",
   "notification_date": "2024-01-08",
   "amount_range": { "low": 1001, "high": 15000, "label": "$1,001 - $15,000" },
-  "cap_gains_over_200": false,
+  "cap_gains_over_200": false,       // true | false | null — null = UNKNOWN (see below)
   "description": null
 }
 ```
@@ -497,6 +498,12 @@ a fake `low == high` range (#49). The two shapes are mutually exclusive; `read`'
 amount filters treat an exact value `X` as the closed point `[X, X]`. A row that is
 neither a published bucket nor an exact value still fails loudly (`extract_failed`
 in the unparsed manifest) rather than fabricating a range.
+
+`cap_gains_over_200` is `null` when the state is **unrecoverable**: PTRs hit the
+§2.2 glyphs-lost (NUL) rendering around **2022-04**, and in that rendering the
+`gfedc`/`gfedcb` checkbox glyphs vanish from the text layer entirely — there is
+nothing to read, so the field records *unknown*, never a fabricated boolean
+(same treatment as the annual-FD Schedule B checkbox).
 
 **Annual FD body** — schedules (line-item arrays; keys present only when the schedule
 has data). ✅ VERIFIED: live e-filed FDs carry these labels (A–F observed directly;

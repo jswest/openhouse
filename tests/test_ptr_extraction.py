@@ -49,6 +49,7 @@ def test_wrapped_range_tail_guard_distinguishes_exact_from_wrapped_range():
 LEE = PDF_FIXTURES / "efiled_ptr_20017980.pdf"
 LOWENTHAL = PDF_FIXTURES / "efiled_ptr_20016766.pdf"
 GAETZ_WRAP = PDF_FIXTURES / "efiled_ptr_wrap_20013811.pdf"
+ADERHOLT_NULGLYPH = PDF_FIXTURES / "efiled_ptr_nulglyph_20022132.pdf"
 
 
 # --- 20017980 (Lee): 57 rows, the curated rows --------------------------------
@@ -191,6 +192,144 @@ def test_gaetz_wrap_smallcaps_anchors_and_description():
     assert ps[0].description == (
         "5,000 shares of First Florida Bank stock (closely held) were sold."
     )
+
+
+# --- 20022132 (Aderholt): the glyphs-lost (NUL) PTR rendering ------------------
+#
+# The Clerk's PTR generator cut over to the SPEC §2.2 NUL rendering around
+# 2022-04: small-caps labels extract as NUL runs (``FILING STATUS:`` →
+# ``F\x00{5} S\x00{5}:``) and the cap-gains checkbox glyphs vanish from the text
+# layer entirely. Before the fix, no row matched (the trailing-glyph anchor never
+# fired) AND no status block was counted (the status regex was NUL-blind), so the
+# completeness guard passed 0 == 0 and every post-April-2022 PTR silently parsed
+# as {"transactions": []} with status "ok".
+
+
+def test_aderholt_nulglyph_extracts_the_tesla_sale():
+    txns = extract_ptr_transactions(ADERHOLT_NULGLYPH)
+    assert len(txns) == 1
+    t = txns[0]
+    assert t.owner == "DC"
+    assert t.asset == "Tesla, Inc. (TSLA) [ST]"
+    assert t.ticker == "TSLA"
+    assert t.asset_type == "ST"
+    assert t.transaction_type == "S"
+    assert str(t.transaction_date) == "2022-12-05"
+    assert str(t.notification_date) == "2022-12-05"
+    assert (t.amount_range.low, t.amount_range.high) == (1001, 15000)
+    # The checkbox glyph is not in the text layer at all → unknown, never a
+    # fabricated boolean.
+    assert t.cap_gains_over_200 is None
+    assert t.description is None
+
+
+def test_aderholt_nulglyph_raw_fields_carry_no_nuls():
+    # NUL furniture must never leak into the emitted fields (scrubbed/absent).
+    txns = extract_ptr_transactions(ADERHOLT_NULGLYPH)
+    for t in txns:
+        for value in (t.asset, t.description or ""):
+            assert "\x00" not in value
+
+
+# --- synthetic glyphless cases (NUL-pattern pages, _fake_pdfplumber below) -----
+
+_NUL_STATUS = "F\x00\x00\x00\x00\x00 S\x00\x00\x00\x00\x00: New"
+_NUL_SUBHOLDING = "S\x00\x00\x00\x00\x00\x00\x00\x00\x00 O\x00:"
+_NUL_DESCRIPTION = "D\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00:"
+
+
+def test_glyphless_wrapped_high_bound_is_recovered(monkeypatch):
+    # In the NUL rendering an amount-column wrap leaves the header ending
+    # ``$15,001 -`` bare (no glyph after the dash); the $HIGH bound on the next
+    # line must still fold in, and the NUL status line must bound the row.
+    page = "\n".join(
+        [
+            "T\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",  # TRANSACTIONS title
+            "Flipside Crypto, Inc. [OT] S 03/22/2022 03/23/2022 $15,001 -",
+            "$50,000",
+            _NUL_STATUS,
+            f"{_NUL_SUBHOLDING} Flipside Crypto Investor Holdings, LLC",
+            f"{_NUL_DESCRIPTION} Sold equity interest back to company.",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert len(txns) == 1
+    assert (txns[0].amount_range.low, txns[0].amount_range.high) == (15001, 50000)
+    assert txns[0].asset == "Flipside Crypto, Inc. [OT]"
+    assert txns[0].cap_gains_over_200 is None
+    assert txns[0].description == "Sold equity interest back to company."
+
+
+def test_glyphless_rows_bound_each_other(monkeypatch):
+    # Two NUL-rendering rows: each ends at the next header/status line; the
+    # status-block count (NUL-aware) matches the row count, so no guard trip.
+    page = "\n".join(
+        [
+            "DC Tesla, Inc. (TSLA) [ST] S 12/05/2022 12/05/2022 $1,001 - $15,000",
+            _NUL_STATUS,
+            "Apple Inc. (AAPL) [ST] P 12/06/2022 12/07/2022 $15,001 - $50,000",
+            _NUL_STATUS,
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert [t.ticker for t in txns] == ["TSLA", "AAPL"]
+    assert all(t.cap_gains_over_200 is None for t in txns)
+
+
+def test_glyphless_zero_extraction_fails_loudly(monkeypatch):
+    # The regression at the heart of the bug: a glyphless body whose rows don't
+    # match (here a one-sided "Over $1,000,000") must NOT return a silent
+    # {"transactions": []} with status ok — the NUL-aware status count (1) vs
+    # the row count (0) trips the completeness guard into extract_failed.
+    page = "\n".join(
+        [
+            "JT Tesla Inc. (TSLA) [ST] S 12/17/2022 01/01/2023 Over $1,000,000",
+            _NUL_STATUS,
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    with pytest.raises(PdfExtractError):
+        extract_ptr_transactions(Path("synthetic.pdf"))
+
+
+def test_glyphless_row_form_is_gated_on_nul_detection(monkeypatch):
+    # In an intact-rendering document (no NULs anywhere) a row line WITHOUT the
+    # trailing checkbox glyph must still fail loudly, exactly as before the fix:
+    # the glyph-free row variants are consulted only for documents detected as
+    # glyphless, so the legacy soundness anchor is not weakened.
+    page = "\n".join(
+        [
+            "JT Apple Inc. (AAPL) [ST] P 12/16/2020 01/01/2021 $1,001 - $15,000",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    with pytest.raises(PdfExtractError):
+        extract_ptr_transactions(Path("synthetic.pdf"))
+
+
+def test_trailer_description_does_not_bleed_into_last_row(monkeypatch):
+    # Real glyphless layouts (e.g. 2022/20020708) carry an ASSET CLASS DETAILS
+    # appendix after the table footnote, with its own D\x00…: detail lines. The
+    # footnote ends the table — the appendix description must not overwrite the
+    # row's own description.
+    page = "\n".join(
+        [
+            "Flipside Crypto, Inc. [OT] S 03/22/2022 03/23/2022 $15,001 - $50,000",
+            _NUL_STATUS,
+            f"{_NUL_DESCRIPTION} The row's own description.",
+            "* For the complete list of asset type abbreviations, please visit"
+            " https://fd.house.gov/reference/asset-type-codes.aspx.",
+            "A\x00\x00\x00\x00 C\x00\x00\x00\x00 D\x00\x00\x00\x00\x00\x00",
+            f"{_NUL_DESCRIPTION} Appendix text that must not bleed in.",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert len(txns) == 1
+    assert txns[0].description == "The row's own description."
 
 
 # --- extraction-failure path → PdfExtractError --------------------------------

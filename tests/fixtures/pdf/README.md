@@ -12,6 +12,7 @@ classification is the ground truth a test asserts against.
 | `efiled_fd_nulglyph_10049721.pdf` | 10049721 | fd (annual, **2021**) | `efiled` | 2 pages; small-caps glyphs extract as **NUL runs** |
 | `efiled_ptr_20016766.pdf` | 20016766 | ptr | `efiled` | 1 page, ~1,127 chars |
 | `efiled_ptr_20017980.pdf` | 20017980 | ptr | `efiled` | 7 pages, 57 transaction rows |
+| `efiled_ptr_nulglyph_20022132.pdf` | 20022132 | ptr (**2022**) | `efiled` | 1 page; small-caps glyphs extract as **NUL runs**, checkbox glyphs absent |
 | `efiled_ptr_wrap_20013811.pdf` | 20013811 | ptr | `efiled` | 1 page, 3 amount-wrapped rows |
 | `scanned_fd_8217722.pdf` | 8217722 | fd (annual) | `scanned` | 1 page, **0** chars (image-only) |
 | `scanned_ptr_8217326.pdf` | 8217326 | ptr | `scanned` | 1 page, **0** chars (image-only) |
@@ -50,6 +51,19 @@ The two e-filed PTRs double as body-extraction fixtures (`tests/test_ptr_extract
 - **`efiled_ptr_20016766.pdf`** — Hon. Alan Lowenthal, 2020: the **null-ticker**
   case. A single `SP` Cinemark `[CS]` (corp-bond) **sale** with no parenthesized
   symbol (`ticker: null`, correct — not a sentinel) and a `DESCRIPTION:` line.
+- **`efiled_ptr_nulglyph_20022132.pdf`** — Hon. Robert B. Aderholt, **2022**
+  (`data/raw/2022/ptr/20022132.pdf`): the **glyphs-lost (NUL) PTR** case. The
+  Clerk's PTR generator cut over to the SPEC §2.2 NUL rendering around
+  **2022-04**: the form's small-caps furniture extracts as NUL runs (`FILING
+  STATUS:` → `F\x00{5} S\x00{5}:`) and the `gfedc`/`gfedcb` cap-gains checkbox
+  glyphs **vanish from the text layer entirely**. Ground truth: **1** row — a
+  `DC` Tesla, Inc. `(TSLA) [ST]` sale, transaction + notification date
+  12/05/2022, `$1,001 - $15,000`, no `DESCRIPTION:` line. With the checkbox
+  unrecoverable, `cap_gains_over_200` is `null` ("unknown" — never a fabricated
+  boolean). Before the glyphless PTR fix this rendering matched zero rows AND
+  zero status blocks, so the completeness guard passed 0 == 0 and every
+  post-April-2022 PTR silently parsed as `{"transactions": []}` with status
+  "ok".
 - **`efiled_ptr_wrap_20013811.pdf`** — Hon. Matt Gaetz, 2020 (issue #46): the
   **amount-column wrap + small-caps** case. **3** rows, each with the `$HIGH`
   bound wrapped onto the next line (`$15,001 -` … `$50,000`; `$50,001 -` …
