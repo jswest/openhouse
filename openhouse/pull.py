@@ -328,7 +328,13 @@ def pull_legislators(
         print(f"reference: fetching {url}", file=sys.stderr)
         response = polite_get(client, url, sleep=sleep)
         ref_dir.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(response.content)
+        # Atomic write (critic): an interrupted fetch must never leave a truncated
+        # file behind — the skip-if-present check above would then permanently
+        # serve the partial file, silently disabling the bioguide join. Write to a
+        # .part sidecar and rename into place (rename is atomic on POSIX).
+        tmp = dest.with_name(dest.name + ".part")
+        tmp.write_bytes(response.content)
+        tmp.replace(dest)
         written.append(name)
     print(
         f"reference: {len(written)} fetched, {len(skipped)} present/skipped "

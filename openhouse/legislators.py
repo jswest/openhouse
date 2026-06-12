@@ -32,6 +32,7 @@ caller falls back to the last-resort ``name:`` key. We never synthesize a
 from __future__ import annotations
 
 import json
+import sys
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,7 +138,17 @@ def load_legislator_index(data_dir: Path) -> LegislatorIndex:
             continue
         try:
             records = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
+            # A present-but-unreadable reference file (e.g. a download truncated by
+            # Ctrl-C) must not silently disable the join — warn loudly and name the
+            # remedy. The join still degrades gracefully (every filer falls back to
+            # name:), but the operator gets a signal instead of mystery name-keys.
+            print(
+                f"warning: reference file {path} is present but unreadable "
+                f"({exc}); skipping it — bioguide identity will be incomplete. "
+                f"Re-fetch with `openhouse pull --force`.",
+                file=sys.stderr,
+            )
             continue
         if isinstance(records, list):
             _index_records(records, by_seat)

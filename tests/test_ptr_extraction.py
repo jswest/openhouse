@@ -21,11 +21,30 @@ from pathlib import Path
 
 import pytest
 
-from openhouse.pdf import PdfExtractError, extract_ptr_transactions
+from openhouse.pdf import (
+    PdfExtractError,
+    _wrapped_range_tail_follows,
+    extract_ptr_transactions,
+)
 from openhouse.parse import _classify_records
 from openhouse.index import build_filing_records
 
 PDF_FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
+
+
+def test_wrapped_range_tail_guard_distinguishes_exact_from_wrapped_range():
+    # GH-0049 soundness guard (critic): a range whose " - $HIGH" tail wrapped off
+    # the header looks like an exact row. The guard peeks the next content line —
+    # a leading dash means a wrapped range, so the exact reading is refused (the
+    # row falls to extract_failed rather than fabricating a point).
+    assert _wrapped_range_tail_follows(["- $15,000"], 0, 1) is True
+    # Furniture / glyph / blank lines are skipped before the dash is found.
+    assert _wrapped_range_tail_follows(["", "gfedc", "- $15,000"], 0, 3) is True
+    # A genuine exact value: the next content line is a detail/description or the
+    # next row — never a dash tail.
+    assert _wrapped_range_tail_follows(["DESCRIPTION: a thing"], 0, 1) is False
+    # Nothing follows → not a wrapped range.
+    assert _wrapped_range_tail_follows([], 0, 0) is False
 
 LEE = PDF_FIXTURES / "efiled_ptr_20017980.pdf"
 LOWENTHAL = PDF_FIXTURES / "efiled_ptr_20016766.pdf"

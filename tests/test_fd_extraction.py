@@ -20,10 +20,22 @@ from openhouse.parse import _classify_records
 from openhouse.pdf import (
     NotAnFdBody,
     PdfExtractError,
+    _parse_schedule_e,
     _scrub_field,
     _scrub_raw_text,
     extract_fd_schedules,
 )
+
+
+def test_schedule_parser_skips_nul_only_furniture_line():
+    # A NUL-only line (glyphless furniture — NUL isn't stripped by str.strip) must
+    # not become an empty-raw_text item; it carries no filer content, so _group_items
+    # skips it (matching _salvage_raw). Critic 🟢 finding.
+    assert _parse_schedule_e(["\x00\x00\x00"]) == []
+    # A real row beside furniture still yields exactly one item.
+    items = _parse_schedule_e(["\x00\x00", "Board Member  Acme Corp"])
+    assert len(items) == 1
+    assert items[0].raw_text == "Board Member Acme Corp"
 
 PDF_FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
 THOMPSON = PDF_FIXTURES / "efiled_fd_10042852.pdf"

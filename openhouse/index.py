@@ -227,13 +227,20 @@ def build_filing_records(
             suffix=suffix,
             state=state_district.state if state_district else None,
         )
+        # The seat join pins a filer to the member who HELD that (state, district)
+        # seat. A candidate report (FilingType "C") is filed by someone RUNNING for
+        # the seat — definitionally not its holder — so a surname+seat collision
+        # with any current or historical rep of that seat would be a false-positive
+        # identity, and (since the warning only fires on UNmatched filers) a silent
+        # one. Candidates get the honest last-resort name: key instead. (GH-0016 /
+        # critic finding: never a false-positive bioguide.)
         bioguide_id = (
             legislators.match(
                 last=last,
                 state=state_district.state if state_district else None,
                 district=state_district.district if state_district else None,
             )
-            if legislators is not None
+            if legislators is not None and raw_type != "C"
             else None
         )
         # Two-tier ladder: bioguide where it matched, else the name key. Where

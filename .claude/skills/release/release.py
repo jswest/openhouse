@@ -41,10 +41,11 @@ from typing import Any
 # This file lives at <repo>/.claude/skills/release/release.py (GH-0020 pattern).
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# The committed fingerprint of the parsed-schema models as of the last schema
-# bump (GH-0043). Lives beside ``schemas.py`` so a schema edit and its
-# fingerprint update land in the same diff; the release tool reads it back as
-# "the fingerprint the last tag shipped" without re-checking out the tag.
+# The committed fingerprint of the parsed-schema models (GH-0043). Lives beside
+# ``schemas.py`` and is refreshed in the same diff as any schema change, so the
+# working-tree copy always tracks the live models (a test enforces it). Its job
+# is to make the *next* tag carry an accurate fingerprint; the drift guard reads
+# the *last* tag's copy from the tagged tree (see ``tag_fingerprint``).
 FINGERPRINT_PATH = REPO_ROOT / "openhouse" / "schemas.fingerprint"
 
 
@@ -55,8 +56,10 @@ FINGERPRINT_PATH = REPO_ROOT / "openhouse" / "schemas.fingerprint"
 # changed is ``SCHEMA_VERSION`` rising. This guard makes that self-enforcing —
 # if the pydantic models in ``openhouse/schemas.py`` change shape but the int
 # stays put, the release refuses to tag. The fingerprint is a *pure* function of
-# the models' normalized JSON schemas; the committed ``schemas.fingerprint``
-# records the value as of the last tag, so drift = (live != committed).
+# the models' normalized JSON schemas. Drift is (live != the fingerprint the
+# LAST TAG shipped) at a static SCHEMA_VERSION — the guard reads the tag's copy
+# via ``tag_fingerprint``, never the working-tree file (which a test pins to
+# live, so comparing against it would be tautologically equal and never fire).
 # ---------------------------------------------------------------------------
 
 # Keys in ``model_json_schema()`` that are documentation, not structure: prose
@@ -230,11 +233,40 @@ def live_fingerprint() -> str:
     return fingerprint(parsed_schema_models())
 
 
-def recorded_fingerprint() -> str | None:
-    """The committed fingerprint (last tag's value), or None if absent."""
+def committed_fingerprint() -> str | None:
+    """The fingerprint in the working tree's ``schemas.fingerprint``, or None.
+
+    Refreshed (``release.py --write-fingerprint``) in the same commit as any
+    schema change, so it always tracks the live models — a test enforces this.
+    Its job is to make the *next* tag carry an accurate fingerprint; the drift
+    guard itself reads the *last* tag's copy via :func:`tag_fingerprint`.
+    """
     if not FINGERPRINT_PATH.exists():
         return None
     return FINGERPRINT_PATH.read_text(encoding="utf-8").strip() or None
+
+
+def tag_fingerprint(last_tag: str | None) -> str | None:
+    """The schema fingerprint recorded *at the last release tag*, or None.
+
+    Read straight from the tagged tree
+    (``git show <tag>:openhouse/schemas.fingerprint``) — this is the value the
+    guard compares ``live`` against. Returns None when there is no prior tag, or
+    the tag predates the fingerprint file (so there is nothing to compare and the
+    baseline case applies). Reading the *tag* — not the working tree — is what
+    makes the guard sound: the working-tree copy always tracks live, so comparing
+    live against it is tautologically equal and could never catch a schema edit
+    that skipped a ``SCHEMA_VERSION`` bump.
+    """
+    if last_tag is None:
+        return None
+    result = subprocess.run(
+        ["git", "show", f"{last_tag}:openhouse/schemas.fingerprint"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
 
 
 def write_fingerprint() -> str:
@@ -305,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     last_tag = last_release_tag()
 
     drift = check_drift(
-        live_fingerprint(), recorded_fingerprint(), schema_version, last_tag,
+        live_fingerprint(), tag_fingerprint(last_tag), schema_version, last_tag,
     )
     if drift is not None:
         print(drift, file=sys.stderr)

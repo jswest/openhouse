@@ -261,6 +261,32 @@ def _is_ptr_header(line: str) -> bool:
     return bool(_PTR_ROW_RE.match(line) or _PTR_EXACT_ROW_RE.match(line))
 
 
+def _wrapped_range_tail_follows(lines: list[str], start: int, n: int) -> bool:
+    """True if the next content line begins with ``-`` (a spilled ``- $HIGH`` tail).
+
+    GH-0049 soundness guard (critic): an exact-dollar match (``$N`` + glyph on the
+    header) is only *really* exact if the amount was a lone value. A range whose
+    ``- $HIGH`` tail wrapped off the header — leaving ``… $LOW <glyph>`` — looks
+    identical to an exact row, and would fabricate a point. Peeking the next
+    content line distinguishes them: a leading dash means a wrapped range, not an
+    exact value, so the row must fall through to ``extract_failed`` (never
+    fabricate). Skips blank / per-page furniture / glyph-only lines like the wrap
+    recovery; stops (``False``) at the next header or a detail line. This shape is
+    unobserved in 2020–2021 real data (the dash stays on the header there); the
+    guard upholds the binding invariant for any future filing that wraps it.
+    """
+    k = start
+    while k < n:
+        nxt = lines[k].strip()
+        if _is_ptr_header(nxt) or _PTR_DETAIL_RE.match(nxt):
+            return False
+        if not nxt or _PTR_FURNITURE_RE.match(nxt) or _PTR_GLYPH_ONLY_RE.match(nxt):
+            k += 1
+            continue
+        return nxt.startswith("-")
+    return False
+
+
 def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
     """Extract an e-filed PTR's §6.3 ``transactions[]`` from its PDF. Offline.
 
@@ -303,6 +329,13 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             owner, asset_head, txn_type, txn_date, notif_date, exact_token, glyph = (
                 exact_match.groups()
             )
+            # Soundness guard (critic): refuse the exact reading if a wrapped
+            # range tail ("- $HIGH") follows — that's a range that lost its dash to
+            # a line wrap, not a lone exact value. Fall through to extract_failed
+            # rather than fabricate a point.
+            if _wrapped_range_tail_follows(lines, i + 1, n):
+                i += 1
+                continue
             amount = _parse_exact_amount(exact_token)
             amount_low = amount_high = exact_token  # not None → skip wrap recovery
         # Small-caps can lower-case the type letter (``s``/``p``/``e``); normalize
@@ -620,7 +653,11 @@ def _group_items(lines: list[str], *, starts_item) -> list[str]:
     pre: list[str] = []  # lines seen before the first item-start anchor
     for ln in lines:
         s = ln.strip()
-        if not s:
+        if not s or not _scrub_raw_text(s):
+            # Blank, whitespace-, or NUL-only furniture (NUL isn't stripped by
+            # str.strip but scrubs to empty): it carries no filer content, so it
+            # must not seed an empty-raw_text item — matches _salvage_raw, which
+            # also skips such lines. Never drops content (there is none).
             continue
         if starts_item(s):
             if cur:

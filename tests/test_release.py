@@ -172,7 +172,40 @@ def test_check_drift_no_prior_tag_or_fingerprint_is_clean():
 
 
 def test_committed_fingerprint_matches_live_models():
-    # The committed openhouse/schemas.fingerprint must track the current models,
-    # so a real release of the unchanged schema reads "no drift". A failure here
-    # means someone changed schemas.py without refreshing the fingerprint.
-    assert release.recorded_fingerprint() == release.live_fingerprint()
+    # The committed openhouse/schemas.fingerprint must track the current models so
+    # the NEXT tag carries an accurate fingerprint. A failure here means someone
+    # changed schemas.py without refreshing the fingerprint (release.py
+    # --write-fingerprint).
+    assert release.committed_fingerprint() == release.live_fingerprint()
+
+
+def test_drift_guard_reads_tag_not_working_tree(monkeypatch, capsys):
+    # The defeat scenario the guard must catch: the working-tree fingerprint
+    # equals live (so test_committed_fingerprint_matches_live_models is GREEN),
+    # but the LAST TAG shipped a different fingerprint at the SAME schema int —
+    # i.e. a model was reshaped and the fingerprint refreshed without bumping
+    # SCHEMA_VERSION. The guard must still refuse, because it compares against the
+    # tag's copy, not the working tree. (With the old wiring — comparing live to
+    # the working-tree file — this was structurally inert and always passed.)
+    monkeypatch.setattr(release, "read_schema_version", lambda: 5)
+    monkeypatch.setattr(release, "last_release_tag", lambda: "v0.5.0")
+    monkeypatch.setattr(release, "live_fingerprint", lambda: "live-fp")
+    monkeypatch.setattr(release, "committed_fingerprint", lambda: "live-fp")
+    monkeypatch.setattr(release, "tag_fingerprint", lambda _t: "different-tag-fp")
+    rc = release.main([])  # dry run — the guard runs before any tagging
+    assert rc == 1
+    assert "SCHEMA_VERSION" in capsys.readouterr().err
+
+
+def test_drift_guard_clean_when_tag_fingerprint_matches(monkeypatch, capsys):
+    # Same schema int and the tag's fingerprint equals live → no drift, release
+    # proceeds (here: a patch bump, no commits-since short-circuit needed because
+    # we stub the tag to None-free path via a non-empty schema match).
+    monkeypatch.setattr(release, "read_schema_version", lambda: 5)
+    monkeypatch.setattr(release, "last_release_tag", lambda: "v0.5.0")
+    monkeypatch.setattr(release, "live_fingerprint", lambda: "fp")
+    monkeypatch.setattr(release, "tag_fingerprint", lambda _t: "fp")
+    monkeypatch.setattr(release, "commits_since", lambda _t: ["feat: a thing"])
+    rc = release.main([])  # dry run
+    assert rc == 0
+    assert "error: parsed-schema models changed" not in capsys.readouterr().err

@@ -107,7 +107,11 @@ def _fixture_legislators(tmp_path):
 
 def test_bioguide_attaches_on_matched_house_seat(tmp_path):
     # The trimmed fixture's real members match the CC0 legislators fixture by
-    # (last, state, district): Allen GA12, Adams NC12, Norton DC, González PR.
+    # (last, state, district): Allen GA12, Adams NC12, González PR — all
+    # non-candidate filings, so the seat join pins each to its bioguide. (Norton's
+    # 2024 filing is a candidate report and is covered separately — see
+    # test_candidate_report_never_bioguide_matched; the historical-file match path
+    # itself is exercised in test_legislators.py.)
     records = build_filing_records(
         TRIMMED_XML, 2024, _fixture_legislators(tmp_path)
     )
@@ -115,9 +119,11 @@ def test_bioguide_attaches_on_matched_house_seat(tmp_path):
     assert by_doc["10066961"].bioguide_id == "A000372"  # Allen GA12
     assert by_doc["10066961"].filer_id == "bioguide:A000372"
     assert by_doc["20024277"].bioguide_id == "A000370"  # Adams NC12
-    assert by_doc["10067000"].bioguide_id == "N000147"  # Norton DC (historical)
     # González-Colón spelled with diacritics in the reference, plain in the FD.
     assert by_doc["30022163"].bioguide_id == "G000582"
+    # Norton's 2024 filing is a candidate report → name-keyed, not bioguide.
+    assert by_doc["10067000"].bioguide_id is None
+    assert by_doc["10067000"].filer_id.startswith("name:")
 
 
 def test_unmatched_filer_falls_back_to_name_key_and_warns(tmp_path):
@@ -156,6 +162,32 @@ def test_ambiguous_seat_does_not_false_match(tmp_path):
     records = build_filing_records(path, 2024, _fixture_legislators(tmp_path))
     assert records[0].bioguide_id is None
     assert records[0].filer_id == "name:tx.smith.john"
+
+
+def test_candidate_report_never_bioguide_matched(tmp_path):
+    # A candidate report (FilingType "C") is filed by someone RUNNING for a seat,
+    # not its holder — a surname+seat collision with the real rep must NOT pin the
+    # candidate to that member's bioguide. It would be a *silent* false positive,
+    # since _detect_identity_warnings only flags UNmatched filers. A member filing
+    # on the same seat key still matches; the candidate falls back to name:.
+    member = (
+        "<Member><Last>Allen</Last><First>Rick</First><Suffix></Suffix>"
+        "<FilingType>{t}</FilingType><StateDst>GA12</StateDst>"
+        "<DocID>{d}</DocID></Member>"
+    )
+    xml = (
+        "<FinancialDisclosure>"
+        + member.format(t="O", d="9001")  # member filing → matches the seat
+        + member.format(t="C", d="9002")  # candidate report → must NOT match
+        + "</FinancialDisclosure>"
+    )
+    path = tmp_path / "cand.xml"
+    path.write_text(xml)
+    records = build_filing_records(path, 2024, _fixture_legislators(tmp_path))
+    by_doc = {r.doc_id: r for r in records}
+    assert by_doc["9001"].bioguide_id == "A000372"  # member: pinned
+    assert by_doc["9002"].bioguide_id is None  # candidate: not pinned
+    assert by_doc["9002"].filer_id.startswith("name:")
 
 
 def test_no_reference_index_keeps_everyone_name_keyed():
