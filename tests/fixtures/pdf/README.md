@@ -11,6 +11,7 @@ classification is the ground truth a test asserts against.
 | `efiled_fd_10042852.pdf` | 10042852 | fd (annual) | `efiled` | 4 pages, ~1,348 chars/page |
 | `efiled_ptr_20016766.pdf` | 20016766 | ptr | `efiled` | 1 page, ~1,127 chars |
 | `efiled_ptr_20017980.pdf` | 20017980 | ptr | `efiled` | 7 pages, 57 transaction rows |
+| `efiled_ptr_wrap_20013811.pdf` | 20013811 | ptr | `efiled` | 1 page, 3 amount-wrapped rows |
 | `scanned_fd_8217722.pdf` | 8217722 | fd (annual) | `scanned` | 1 page, **0** chars (image-only) |
 | `scanned_ptr_8217326.pdf` | 8217326 | ptr | `scanned` | 1 page, **0** chars (image-only) |
 
@@ -31,6 +32,15 @@ The two e-filed PTRs double as body-extraction fixtures (`tests/test_ptr_extract
 - **`efiled_ptr_20016766.pdf`** — Hon. Alan Lowenthal, 2020: the **null-ticker**
   case. A single `SP` Cinemark `[CS]` (corp-bond) **sale** with no parenthesized
   symbol (`ticker: null`, correct — not a sentinel) and a `DESCRIPTION:` line.
+- **`efiled_ptr_wrap_20013811.pdf`** — Hon. Matt Gaetz, 2020 (issue #46): the
+  **amount-column wrap + small-caps** case. **3** rows, each with the `$HIGH`
+  bound wrapped onto the next line (`$15,001 -` … `$50,000`; `$50,001 -` …
+  `$100,000`) and *every* detail anchor rendered in small-caps with
+  per-filing-inconsistent case (`FILING STaTUS:`, `SUBHoLDING oF:`,
+  `DESCRIPTIoN:`, `LoCaTIoN:`). Also covers the `E` (exchange) type, cap-gains
+  both set and unset, a small-caps `DESCRIPTIoN:` line that must still be
+  captured, and a null-ticker `[PS]` row. Before #46 this PDF (and ~2/3 of all
+  2020 e-filed PTRs) failed the completeness guard and was dropped wholesale.
 
 **Legal (SPEC §1).** Clerk FD data carries a statutory use restriction: not for
 commercial use, soliciting, or establishing credit ratings. These files are

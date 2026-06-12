@@ -119,18 +119,46 @@ def classify(pdf_path: Path) -> str:
 # The transaction header line: optional owner letters, an asset blob, the
 # transaction type, the date pair, the amount range, and the cap-gains glyph
 # (``gfedc`` unchecked / ``gfedcb`` checked) anchored at end of line.
+#
+# The amount range's **high bound is optional here** (SPEC §2.2 column wrap): on a
+# sizable minority of real e-filed PTRs the amount column wraps, leaving the
+# header line ending ``$LOW - <glyph>`` with the ``$HIGH`` bound spilled onto the
+# *following* line (``$50,000``). We capture the low bound and the (maybe-absent)
+# high bound separately; the extractor folds the wrapped high bound back in from
+# the next line. Without this, ~two-thirds of 2020 PTRs failed the completeness
+# guard and were dropped wholesale — exactly the trades the spec says never to
+# silently lose.
 _PTR_ROW_RE = re.compile(
     r"^(?:(SP|DC|JT)\s+)?"  # owner column (blank → self)
     r"(.+?)\s+"  # asset blob (non-greedy up to the type)
-    r"(S \(partial\)|[PSE])\s+"  # transaction type
+    r"([SsEe] \(partial\)|[PpSsEe])\s+"  # transaction type (small-caps → lower)
     r"(\d{2}/\d{2}/\d{4})\s+"  # transaction date
     r"(\d{2}/\d{2}/\d{4})\s+"  # notification date
-    r"(\$[\d,]+ - \$[\d,]+)\s+"  # amount range label
+    r"(\$[\d,]+)\s+-\s+(\$[\d,]+)?\s*"  # amount range: low, then optional high
     r"(gfedcb?)\s*$"  # cap-gains glyph
 )
+# A wrapped high bound spilled to the next line. It is the lone ``$N`` money token
+# on that continuation line, and may sit either at the **start** (``$50,000`` —
+# the asset name did not also wrap) or **end** (``Shares (COLD) [ST] $50,000`` —
+# the asset name wrapped onto the same line). Across 2020 every wrap-continuation
+# line carries exactly one money token, so a single ``$N`` find is unambiguous;
+# whatever else is on the line is asset-name wrap and folds back in normally.
+_PTR_WRAPPED_HIGH_RE = re.compile(r"\$[\d,]+")
 
-# Detail/section lines that END a row's asset-name wrap.
-_PTR_DETAIL_RE = re.compile(r"^(FILINg STATUS:|SUBHOLDINg OF:|DESCRIPTION:)")
+# Detail/section lines that END a row's asset-name wrap. Matched
+# case-INSENSITIVELY: SPEC §2.2's small-cap glyphs land on different letters from
+# one filing to the next (``FILINg STATUS:`` / ``FIlINg STATuS:`` /
+# ``FIlINg STaTuS:`` — 10+ renderings seen across 2020 alone), so only the
+# letter sequence is stable, never the case. Matching a fixed-case literal here
+# silently dropped the detail boundary on the majority of real PTRs.
+_PTR_DETAIL_RE = re.compile(
+    r"^(FILING STATUS:|SUBHOLDING OF:|DESCRIPTION:)", re.IGNORECASE
+)
+# The per-row "FILING STATUS:" line, used to count blocks for the completeness
+# guard — same case-insensitive shape as above (just the status line).
+_PTR_STATUS_RE = re.compile(r"^FILING STATUS:", re.IGNORECASE)
+# A row's DESCRIPTION: detail line (case-insensitive, same small-caps reason).
+_PTR_DESCRIPTION_RE = re.compile(r"^DESCRIPTION:", re.IGNORECASE)
 
 # Per-page table furniture pdfplumber repeats at the top of every page. When a
 # row's asset name wraps across a page break, this furniture lands BETWEEN the
@@ -138,6 +166,13 @@ _PTR_DETAIL_RE = re.compile(r"^(FILINg STATUS:|SUBHOLDINg OF:|DESCRIPTION:)")
 # the wrap — otherwise the "(TICKER) [TYPE]" continuation is silently dropped
 # (null ticker and asset_type, truncated asset, invisible to the §-residual).
 _PTR_FURNITURE_RE = re.compile(r"^(ID Owner Asset|Type Date|Gains >|\$200\?)")
+
+# A lone cap-gains glyph stranded on its own line. When a header line wraps across
+# a *page break*, the per-page furniture (and sometimes a stray glyph remnant from
+# the header's end) lands between the header and the wrapped ``$HIGH`` bound. The
+# wrapped-high search skips both furniture and this glyph remnant so the page-break
+# case recovers the high bound rather than dropping the whole row.
+_PTR_GLYPH_ONLY_RE = re.compile(r"^gfedcb?\s*$")
 
 _TICKER_RE = re.compile(r"\(([^()]+)\)")  # a parenthesized symbol in an asset name
 # The ticker is the paren group immediately before the bracketed [TYPE] tag.
@@ -209,8 +244,13 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             i += 1
             continue
 
-        owner, asset_head, txn_type, txn_date, notif_date, amount, glyph = (
+        owner, asset_head, txn_type, txn_date, notif_date, amount_low, amount_high, glyph = (
             match.groups()
+        )
+        # Small-caps can lower-case the type letter (``s``/``p``/``e``); normalize
+        # to the schema's canonical form — ``S``/``P``/``E`` or ``S(partial)``.
+        txn_type = (
+            "S(partial)" if "(partial)" in txn_type.lower() else txn_type[0].upper()
         )
         asset_parts = [asset_head.strip()]
         description: str | None = None
@@ -222,12 +262,42 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
         # header line, which the outer loop then picks up.
         seen_detail = False
         j = i + 1
+
+        # Amount-column wrap (SPEC §2.2): when the header line carried only the
+        # low bound (``$LOW - <glyph>``), the ``$HIGH`` bound spilled onto a
+        # following line as the lone money token there. It is usually the very
+        # next line, but when the header wraps across a *page break* the repeated
+        # per-page furniture (and a stray glyph remnant) intervenes — so skip
+        # furniture/glyph-only/blank lines first, then take the high bound wherever
+        # it sits. Whatever else is on that line is asset-name wrap and folds in.
+        if amount_high is None:
+            k = j
+            while k < n:
+                nxt = lines[k].strip()
+                if _PTR_ROW_RE.match(nxt) or _PTR_DETAIL_RE.match(nxt):
+                    break  # reached the next row / this row's detail — high bound
+                    # never materialized; leave amount_high None (row drops below).
+                if not nxt or _PTR_FURNITURE_RE.match(nxt) or _PTR_GLYPH_ONLY_RE.match(nxt):
+                    k += 1
+                    continue  # page-break furniture / stray glyph — skip, keep looking
+                high_m = _PTR_WRAPPED_HIGH_RE.search(nxt)
+                if high_m:
+                    amount_high = high_m.group(0)
+                    remainder = (
+                        nxt[: high_m.start()] + " " + nxt[high_m.end() :]
+                    ).strip()
+                    if remainder:
+                        asset_parts.append(remainder)
+                    j = k + 1
+                break
+
         while j < n:
             nxt = lines[j].strip()
             if _PTR_ROW_RE.match(nxt):
                 break  # next transaction row — end of this row
-            if nxt.startswith("DESCRIPTION:"):
-                description = nxt[len("DESCRIPTION:") :].strip() or None
+            desc_m = _PTR_DESCRIPTION_RE.match(nxt)
+            if desc_m:
+                description = nxt[desc_m.end() :].strip() or None
                 seen_detail = True
             elif _PTR_DETAIL_RE.match(nxt):
                 seen_detail = True
@@ -238,6 +308,14 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
                 asset_parts.append(nxt)  # asset-name wrap
             j += 1
 
+        # If the high bound never materialized (neither on the header line nor as
+        # the next line's lead token), this row is not cleanly parsed: leave it
+        # unmatched so the completeness guard below surfaces the mismatch as
+        # ``extract_failed`` rather than fabricating a half-range.
+        if amount_high is None:
+            i += 1
+            continue
+
         asset = " ".join(part for part in asset_parts if part)
         transactions.append(
             PtrTransaction(
@@ -245,10 +323,10 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
                 asset=asset,
                 ticker=_ticker_from_asset(asset),
                 asset_type=_asset_type_from_asset(asset),
-                transaction_type="S(partial)" if txn_type == "S (partial)" else txn_type,
+                transaction_type=txn_type,
                 transaction_date=datetime.strptime(txn_date, "%m/%d/%Y").date(),
                 notification_date=datetime.strptime(notif_date, "%m/%d/%Y").date(),
-                amount_range=_parse_amount_range(amount),
+                amount_range=_parse_amount_range(f"{amount_low} - {amount_high}"),
                 cap_gains_over_200=(glyph == "gfedcb"),
                 description=description,
             )
@@ -260,9 +338,7 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
     # count mismatch means a header row failed the one-line signature and was
     # skipped (or the body came back empty). Surface it loudly as extract_failed
     # rather than writing a too-short {"transactions": [...]} with status "ok".
-    status_blocks = sum(
-        1 for ln in lines if ln.strip().startswith("FILINg STATUS:")
-    )
+    status_blocks = sum(1 for ln in lines if _PTR_STATUS_RE.match(ln.strip()))
     if status_blocks != len(transactions):
         raise PdfExtractError(
             f"PTR extraction incomplete for {pdf_path}: matched "
