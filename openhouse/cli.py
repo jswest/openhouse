@@ -23,6 +23,7 @@ from pathlib import Path
 from . import parse as parse_mod
 from . import pull as pull_mod
 from . import read as read_mod
+from . import ready as ready_mod
 
 # SPEC §2.1: the bulk index covers 2008 → present; PTRs (STOCK Act) appear only
 # from 2012 onward.
@@ -227,6 +228,16 @@ def build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
 
+    ready_p = subparsers.add_parser(
+        "ready",
+        help="install the agent skill into ~/.claude/skills/openhouse (offline)",
+    )
+    ready_p.add_argument(
+        "--check",
+        action="store_true",
+        help="report up-to-date / stale / hand-edited instead of installing",
+    )
+
     return parser
 
 
@@ -248,6 +259,10 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(raw_argv)
+
+    if args.command == "ready":
+        # Offline, no year range: stamp the packaged skill into ~/.claude/skills.
+        return ready_mod.run(["--check"] if args.check else [])
 
     if args.command in ("pull", "parse"):
         # Validate the range now so a bad argument fails fast and uniformly.

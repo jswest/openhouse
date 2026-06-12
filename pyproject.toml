@@ -22,6 +22,14 @@ build-backend = "hatchling.build"
 [tool.hatch.version]
 source = "vcs"
 
+# Ship the agent-skill prose as package data so `openhouse ready` resolves it via
+# importlib.resources (the repo stays the only source of truth; SPEC §8). The
+# .md files live inside the openhouse package; force-include guarantees the wheel
+# carries them regardless of default file-selection rules.
+[tool.hatch.build.targets.wheel.force-include]
+"openhouse/skill/SKILL.md" = "openhouse/skill/SKILL.md"
+"openhouse/skill/reference.md" = "openhouse/skill/reference.md"
+
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
