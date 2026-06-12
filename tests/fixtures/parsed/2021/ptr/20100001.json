@@ -1,0 +1,52 @@
+{
+  "transactions": [
+    {
+      "owner": "SP",
+      "asset": "Apple Inc. (AAPL) [ST]",
+      "ticker": "AAPL",
+      "asset_type": "ST",
+      "transaction_type": "P",
+      "transaction_date": "2021-03-01",
+      "notification_date": "2021-03-15",
+      "amount_range": { "low": 1001, "high": 15000, "label": "$1,001 - $15,000" },
+      "cap_gains_over_200": false,
+      "description": null
+    },
+    {
+      "owner": "self",
+      "asset": "AAPL Hospitality Trust [ST]",
+      "ticker": null,
+      "asset_type": "ST",
+      "transaction_type": "P",
+      "transaction_date": "2021-03-02",
+      "notification_date": "2021-03-15",
+      "amount_range": { "low": 15001, "high": 50000, "label": "$15,001 - $50,000" },
+      "cap_gains_over_200": false,
+      "description": "filer omitted the ticker symbol"
+    },
+    {
+      "owner": "JT",
+      "asset": "U.S. Treasury Bond 2.5% 2031 [CS]",
+      "ticker": null,
+      "asset_type": "CS",
+      "transaction_type": "S",
+      "transaction_date": "2021-03-05",
+      "notification_date": "2021-03-15",
+      "amount_range": { "low": 50001, "high": 100000, "label": "$50,001 - $100,000" },
+      "cap_gains_over_200": true,
+      "description": null
+    },
+    {
+      "owner": "SP",
+      "asset": "Microsoft Corporation (MSFT) [ST]",
+      "ticker": "MSFT",
+      "asset_type": "ST",
+      "transaction_type": "S(partial)",
+      "transaction_date": "2021-03-10",
+      "notification_date": "2021-03-15",
+      "amount_range": { "low": 1001, "high": 15000, "label": "$1,001 - $15,000" },
+      "cap_gains_over_200": false,
+      "description": null
+    }
+  ]
+}
