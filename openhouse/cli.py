@@ -101,6 +101,32 @@ def _parse_one(token: str, arg: str) -> int:
     return int(token)
 
 
+DATA_DIR_ENV = "OPENHOUSE_DATA_DIR"
+DEFAULT_DATA_DIR = "./data"
+
+_DATA_DIR_HELP = (
+    f"root data directory (precedence: this flag, then ${DATA_DIR_ENV}, then "
+    f"the {DEFAULT_DATA_DIR} default)"
+)
+
+
+def resolve_data_dir(flag_value: str | None) -> Path:
+    """Resolve the data root, precedence: ``--data-dir`` flag → ``OPENHOUSE_DATA_DIR``
+    env → ``./data`` default.
+
+    ``flag_value`` is the explicitly-passed ``--data-dir`` (or ``None`` if the flag
+    was omitted — the flag's argparse default must be ``None`` for this to be
+    distinguishable). The environment is read here, not at import time, so a single
+    resolver governs all three verbs and tests can drive it with ``monkeypatch``.
+    """
+    if flag_value is not None:
+        return Path(flag_value)
+    env_value = os.environ.get(DATA_DIR_ENV)
+    if env_value:
+        return Path(env_value)
+    return Path(DEFAULT_DATA_DIR)
+
+
 VALID_PDF_TYPES = ("ptr", "fd")
 
 
@@ -152,8 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pull_p.add_argument(
         "--data-dir",
-        default="./data",
-        help="root data directory (default: ./data)",
+        default=None,
+        help=_DATA_DIR_HELP,
     )
     pull_p.add_argument(
         "--delay",
@@ -210,8 +236,8 @@ def build_parser() -> argparse.ArgumentParser:
     parse_p.add_argument("years", help="YYYY or YYYY-YYYY")
     parse_p.add_argument(
         "--data-dir",
-        default="./data",
-        help="root data directory (default: ./data)",
+        default=None,
+        help=_DATA_DIR_HELP,
     )
     parse_p.add_argument(
         "--types",
@@ -290,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 return parse_mod.parse(
                     years,
-                    data_dir=Path(args.data_dir),
+                    data_dir=resolve_data_dir(args.data_dir),
                     types=types,
                     strict=args.strict,
                     fetched_at=fetched_at,
@@ -308,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return pull_mod.pull(
                 years,
-                data_dir=Path(args.data_dir),
+                data_dir=resolve_data_dir(args.data_dir),
                 index_only=args.index_only,
                 delay=args.delay,
                 concurrency=args.concurrency,
