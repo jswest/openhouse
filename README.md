@@ -31,8 +31,10 @@ openhouse read trades 2024 --ticker NVDA --table
   in a manifest with a reason.
 - **`read`** answers questions from the parsed JSON — filings by member or
   type, a single filing's full contents, stock transactions flattened across
-  years, per-year summaries. JSON to stdout for machines and `jq`; `--table`
-  for humans.
+  years, per-year summaries. Every query tells you which way to trust it:
+  whether its results are exhaustive (an upper bound — "at most these") or a
+  floor (a lower bound — "at least these"), so a zero-result answer is never
+  ambiguous. JSON to stdout for machines and `jq`; `--table` for humans.
 
 ## What's in the data
 
