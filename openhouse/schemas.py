@@ -28,8 +28,9 @@ from pydantic import BaseModel, Field
 # It moves iff the parsed-data schema changes — which forces a re-parse, not a
 # migrate (CLAUDE.md): bump this, delete old code, re-run ``parse`` from ``raw/``.
 # Read by ``parse`` (#6), the per-PDF pass (#7), and the release tool. Generation
-# 3 adds PTR body extraction (§6.3 transactions[]).
-SCHEMA_VERSION = 3
+# 3 adds PTR body extraction (§6.3 transactions[]); generation 4 adds e-filed FD
+# schedule bodies (§6.3 schedules A–D structured, E–J raw_text-only).
+SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
@@ -168,3 +169,95 @@ class PtrTransaction(BaseModel):
     amount_range: AmountRange
     cap_gains_over_200: bool
     description: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# E-filed annual-FD schedule bodies (SPEC §6.3).
+#
+# An annual FD is a schedule-by-schedule document (A–J). SPEC §6.3 depth-orders
+# the work: schedules A–D are **fully structured**; E–J ship as raw_text-only
+# line items. *Every* line item — structured or not — carries a verbatim
+# ``raw_text`` so nothing extracted is lost to a schema gap, and an empty
+# schedule (the literal ``None disclosed.``) is recorded as **absent** (its key
+# is simply omitted from the body's ``schedules`` map). Headings are matched by
+# schedule letter, never by full heading text (SPEC §2.2 small-caps caveat).
+#
+# The structured column sets below mirror the live e-filed form's headers;
+# fields are ``Optional`` because the form leaves many cells blank (a blank
+# income column, no ``LOCATION``/``DESCRIPTION`` detail, an open-ended amount the
+# range parser cannot bucket, etc.). When a structured column cannot be read the
+# field is ``None`` and the verbatim ``raw_text`` still carries the row in full —
+# completeness over the known, explicit residual in the text (CLAUDE.md).
+# ---------------------------------------------------------------------------
+
+
+class ScheduleAItem(BaseModel):
+    """Schedule A line item — assets & "unearned" income (SPEC §6.3)."""
+
+    asset: str
+    owner: Optional[str] = None
+    asset_type: Optional[str] = None
+    value_of_asset: Optional[AmountRange] = None
+    income_type: Optional[str] = None
+    income_amount: Optional[AmountRange] = None
+    location: Optional[str] = None
+    description: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleBItem(BaseModel):
+    """Schedule B line item — transactions (SPEC §6.3)."""
+
+    asset: str
+    owner: Optional[str] = None
+    asset_type: Optional[str] = None
+    transaction_date: Optional[date] = None
+    transaction_type: Optional[str] = None
+    amount_range: Optional[AmountRange] = None
+    cap_gains_over_200: Optional[bool] = None
+    raw_text: str
+
+
+class ScheduleCItem(BaseModel):
+    """Schedule C line item — earned income (SPEC §6.3)."""
+
+    source: str
+    income_type: Optional[str] = None
+    amount: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleDItem(BaseModel):
+    """Schedule D line item — liabilities (SPEC §6.3)."""
+
+    creditor: str
+    owner: Optional[str] = None
+    date_incurred: Optional[str] = None
+    liability_type: Optional[str] = None
+    amount_range: Optional[AmountRange] = None
+    raw_text: str
+
+
+class RawLineItem(BaseModel):
+    """A raw_text-only line item for schedules E–J (SPEC §6.3 depth-ordering).
+
+    Schedules E (positions), F (agreements), G (gifts), H (travel), I (charity
+    in lieu of honoraria), and J (excess compensation) are *not* column-parsed in
+    this generation — each item ships as the verbatim joined text of its row so
+    nothing is lost (deeper structure is a tracked post-v1 issue).
+    """
+
+    raw_text: str
+
+
+class FdBody(BaseModel):
+    """An e-filed annual-FD body — schedules keyed by letter (SPEC §6.3, §6.4).
+
+    ``schedules`` holds only the letters that have data: a schedule rendered
+    ``None disclosed.`` is **absent** (omitted), never an empty array, so a
+    consumer can tell "disclosed nothing" from "we failed to read it". A–D carry
+    structured items; E–J carry ``raw_text``-only items. Written one-per-body to
+    ``parsed/<year>/fd/<DocID>.json``.
+    """
+
+    schedules: dict[str, list] = Field(default_factory=dict)

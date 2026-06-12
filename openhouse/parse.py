@@ -11,7 +11,9 @@ computed ``filer_id`` (SPEC §6.2) and identity collisions are surfaced; then ea
 on-disk PDF is classified ``efiled`` / ``scanned`` / ``missing`` by authoritative
 text extraction (SPEC §2.2). For an ``efiled`` **PTR** (filing type ``P``) the
 §6.3 ``transactions[]`` body is then extracted and written to
-``parsed/<year>/ptr/<DocID>.json``; FD bodies remain deferred. ``--types`` restricts
+``parsed/<year>/ptr/<DocID>.json``; for an ``efiled`` **annual FD** the §6.3
+schedule body (A–D structured, E–J raw_text-only) is extracted and written to
+``parsed/<year>/fd/<DocID>.json``. ``--types`` restricts
 which families are classified (out-of-scope filings stay unclassified yet still
 count toward the total); ``--strict`` exits non-zero if any filing errored.
 """
@@ -27,7 +29,13 @@ from typing import Optional
 from tqdm import tqdm
 
 from .index import build_filing_records
-from .pdf import PdfExtractError, classify, extract_ptr_transactions
+from .pdf import (
+    NotAnFdBody,
+    PdfExtractError,
+    classify,
+    extract_fd_schedules,
+    extract_ptr_transactions,
+)
 from .schemas import SCHEMA_VERSION, UNKNOWN_FILING_LABEL, FilingMetadata
 
 # Exit code returned when ``--strict`` is set and any filing errored (SPEC §4:
@@ -40,6 +48,19 @@ STRICT_ERROR_EXIT = 1
 # nothing is a footgun for `parse … && next-step`; non-zero says "nothing parsed".
 # A range where *some* years parsed and some were skipped still exits 0 (graceful).
 NOTHING_PARSED_EXIT = 1
+
+
+# FilingType codes whose e-filed PDF is a genuine **annual-FD body** carrying the
+# §6.3 schedules (SPEC §2.3): the original annual report (``O``) and its amendment
+# (``A``), both of which render the full Schedule A–J document. For these, a
+# :class:`~openhouse.pdf.NotAnFdBody` (no schedule headings found) is NOT benign —
+# it means the body's headings were lost and a real disclosure would be silently
+# dropped, so we record it as ``extract_failed`` (explicit manifest entry) rather
+# than a no-body ``ok``. Every *other* fd-family code (``X`` extension and the
+# candidate/cover-sheet/etc. types) legitimately has no schedule body, so
+# ``NotAnFdBody`` there is the benign "no body" path. #12 introduced
+# ``NotAnFdBody`` specifically for the e-filed extension cover sheet (``X``).
+_ANNUAL_FD_CODES = frozenset({"O", "A"})
 
 
 class ParseError(Exception):
@@ -136,6 +157,24 @@ def _write_ptr_body(parsed_dir: Path, doc_id: str, transactions: list) -> None:
     )
 
 
+def _write_fd_body(parsed_dir: Path, doc_id: str, fd_body) -> None:
+    """Write one e-filed annual-FD body to ``parsed/<year>/fd/<DocID>.json`` (§6.4).
+
+    Contract shape (mirrors the PTR body's single-key convention): an object with
+    a single ``"schedules"`` key holding the §6.3 schedule map (only the letters
+    that have data; a ``None disclosed.`` schedule is absent). Filing metadata is
+    *not* duplicated — ``filings.json`` is the single source of truth (joined by
+    DocID). Byte-stable (``indent=2``, ``sort_keys``, trailing newline) so re-parse
+    is deterministic, matching parse.py's convention.
+    """
+    fd_dir = parsed_dir / "fd"
+    fd_dir.mkdir(parents=True, exist_ok=True)
+    body = {"schedules": fd_body.schedules}
+    (fd_dir / f"{doc_id}.json").write_text(
+        json.dumps(body, indent=2, sort_keys=True) + "\n"
+    )
+
+
 def _classify_records(
     records: list[FilingMetadata],
     *,
@@ -158,7 +197,12 @@ def _classify_records(
 
     An ``efiled`` PTR (filing type ``P``) additionally has its §6.3
     ``transactions[]`` extracted and written to ``parsed/<year>/ptr/<DocID>.json``
-    (``parsed_dir``) during this pass.
+    (``parsed_dir``) during this pass. An ``efiled`` **annual FD** (fd-family,
+    schedule-bearing) likewise has its §6.3 schedule body extracted and written to
+    ``parsed/<year>/fd/<DocID>.json``; an efiled fd-family PDF with no schedule
+    headings (an extension/cover sheet) is left ``efiled``/``ok`` with no body
+    (it still lives in ``filings.json``), neither dropped nor a misleading empty
+    body.
 
     ``--types`` partial runs: a filing whose family is **not** in ``types`` is not
     classified this run — ``pdf_class`` stays ``None`` and ``parse_status="ok"``,
@@ -193,15 +237,34 @@ def _classify_records(
             unparsed.append(_unparsed_entry(rec, "missing"))
         else:
             pdf_path = data_dir / rec.source_pdf
+            transactions = None
+            fd_body = None
             try:
                 pdf_class = classify(pdf_path)
-                # An e-filed PTR (filing type P) is the v0.3.0 body-extraction
-                # target: extract its §6.3 transactions and write the body file
-                # now. An extraction failure here is the one e-filed path that
-                # lands in the unparsed manifest (reason ``extract_failed``) —
-                # never a crash, never a silent gap.
+                # E-filed bodies are extracted now, per family. PTR (filing type
+                # P) → §6.3 transactions[]; fd-family → §6.3 schedules (annual FD).
+                # An extraction failure here is the one e-filed path that lands in
+                # the unparsed manifest (reason ``extract_failed``) — never a
+                # crash, never a silent gap. A fd-family PDF with no schedule
+                # headings (an extension cover sheet) is *not* a failure: it
+                # stays efiled/ok with no body.
                 if pdf_class == "efiled" and family == "ptr":
                     transactions = extract_ptr_transactions(pdf_path)
+                elif pdf_class == "efiled" and family == "fd":
+                    try:
+                        fd_body = extract_fd_schedules(pdf_path)
+                    except NotAnFdBody:
+                        # No schedule headings. Benign for a cover-sheet/extension
+                        # type (legitimately no body); but on an annual-report type
+                        # (O/A) it means a real FD body's headings were lost — an
+                        # invisible gap — so escalate to extract_failed.
+                        if rec.filing_type.code in _ANNUAL_FD_CODES:
+                            raise PdfExtractError(
+                                f"annual-FD body for {pdf_path} (FilingType "
+                                f"{rec.filing_type.code!r}) has no schedule headings "
+                                "— extraction failed, not a cover sheet"
+                            )
+                        fd_body = None  # extension/cover sheet — no body, not error
             except PdfExtractError:
                 rec.pdf_class = None
                 rec.parse_status = "error"
@@ -209,8 +272,10 @@ def _classify_records(
             else:
                 rec.pdf_class = pdf_class
                 rec.parse_status = "ok"
-                if pdf_class == "efiled" and family == "ptr":
+                if transactions is not None:
                     _write_ptr_body(parsed_dir, rec.doc_id, transactions)
+                if fd_body is not None:
+                    _write_fd_body(parsed_dir, rec.doc_id, fd_body)
                 if pdf_class in ("scanned", "missing"):
                     unparsed.append(_unparsed_entry(rec, pdf_class))
 

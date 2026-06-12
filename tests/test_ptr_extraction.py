@@ -29,6 +29,7 @@ PDF_FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
 
 LEE = PDF_FIXTURES / "efiled_ptr_20017980.pdf"
 LOWENTHAL = PDF_FIXTURES / "efiled_ptr_20016766.pdf"
+GAETZ_WRAP = PDF_FIXTURES / "efiled_ptr_wrap_20013811.pdf"
 
 
 # --- 20017980 (Lee): 57 rows, the curated rows --------------------------------
@@ -115,6 +116,62 @@ def test_lowenthal_single_null_ticker_with_description():
     assert t.transaction_type == "S"
     assert t.asset == "Cinemark USA Inc [CS]"
     assert t.description == "Maturity date is 12/15/2022, interest rate is 5.125%"
+
+
+# --- 20013811 (Gaetz): amount-column wrap + small-caps (issue #46) ------------
+#
+# Before #46 this PDF — and ~2/3 of all 2020 e-filed PTRs — failed the
+# completeness guard and was dropped wholesale: (1) the amount column wraps,
+# leaving the header line ending ``$LOW - <glyph>`` with the ``$HIGH`` bound on
+# the following line; and (2) the detail/status anchors render in small-caps with
+# per-filing-inconsistent case (``FILING STaTUS:`` / ``SUBHoLDING oF:`` /
+# ``DESCRIPTIoN:``), so fixed-case matching missed the row boundaries and the
+# status-block count.
+
+
+def test_gaetz_wrap_extracts_all_three_rows():
+    # All three rows have a wrapped $HIGH bound; case-insensitive status counting
+    # must agree with the row count (else the completeness guard would raise).
+    txns = extract_ptr_transactions(GAETZ_WRAP)
+    assert len(txns) == 3
+
+
+def test_gaetz_wrap_amount_ranges_fold_in_the_wrapped_high():
+    # The $HIGH bound spilled to the next line ($50,000 / $100,000) must fold back
+    # into the range — never a fabricated half-range, never a dropped row.
+    txns = extract_ptr_transactions(GAETZ_WRAP)
+    labels = {(t.amount_range.low, t.amount_range.high) for t in txns}
+    assert (15001, 50000) in labels
+    assert (50001, 100000) in labels
+    for t in txns:
+        assert t.amount_range.label == f"${t.amount_range.low:,} - ${t.amount_range.high:,}"
+
+
+def test_gaetz_wrap_smallcaps_anchors_and_description():
+    # Small-caps DESCRIPTIoN:/SUBHoLDING oF: must still bound the row and a
+    # small-caps DESCRIPTIoN: line must still be captured. The first row is an
+    # ``E`` (exchange) with a description; the wrapped $HIGH line must not be
+    # mistaken for the description or leak into the asset name.
+    txns = extract_ptr_transactions(GAETZ_WRAP)
+    fbsi = [t for t in txns if t.ticker == "FBSI"]
+    assert len(fbsi) == 2  # an E and an S on First Bancshares
+    exchange = [t for t in fbsi if t.transaction_type == "E"]
+    assert exchange, "expected the E (exchange) row"
+    assert exchange[0].asset == "First Bancshares, Inc. (FBSI) [ST]"
+    assert exchange[0].description == (
+        "Due to an acquisition, 1,285 shares of stock were received."
+    )
+    assert exchange[0].cap_gains_over_200 is False
+    # The closely-held [PS] sale has a small-caps LoCaTIoN:/DESCRIPTIoN: and a
+    # null ticker (no parenthesized symbol).
+    ps = [t for t in txns if t.asset_type == "PS"]
+    assert len(ps) == 1
+    assert ps[0].ticker is None
+    assert ps[0].transaction_type == "S"
+    assert ps[0].cap_gains_over_200 is True
+    assert ps[0].description == (
+        "5,000 shares of First Florida Bank stock (closely held) were sold."
+    )
 
 
 # --- extraction-failure path → PdfExtractError --------------------------------
@@ -268,6 +325,81 @@ def test_partial_extraction_raises_rather_than_silently_dropping(monkeypatch):
             "JT Apple Inc. (AAPL) [ST] P 12/16/2020 01/01/2021 $1,001 - $15,000 gfedc",
             "FILINg STATUS: New",
             "JT Tesla Inc. (TSLA) [ST] S 12/17/2020 01/01/2021 Over $1,000,000 gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    with pytest.raises(PdfExtractError):
+        extract_ptr_transactions(Path("synthetic.pdf"))
+
+
+def test_wrapped_high_across_page_break_is_recovered(monkeypatch):
+    # The header line ends page 1 with only the low bound (``$15,001 - gfedc``);
+    # the repeated per-page furniture and a stray glyph remnant land on page 2
+    # BEFORE the wrapped ``$50,000`` high bound. The recovery must skip the
+    # furniture/glyph and still fold the high bound in (else the row drops and the
+    # status-block guard fails the whole PDF) — issue #46's page-break edge.
+    page1 = "JT Intuit Inc. (INTU) [ST] S 12/30/2019 01/10/2020 $15,001 - gfedc"
+    page2 = "\n".join(
+        [
+            "ID Owner Asset Transaction Date Notification Amount Cap.",
+            "Type Date Gains >",
+            "$200?",
+            "gfedc",
+            "$50,000",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page1, page2])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert len(txns) == 1
+    assert txns[0].amount_range.low == 15001
+    assert txns[0].amount_range.high == 50000
+    assert txns[0].asset == "Intuit Inc. (INTU) [ST]"
+
+
+def test_wrapped_high_on_asset_wrap_line_keeps_both(monkeypatch):
+    # The wrapped $HIGH can share its line with an asset-name wrap (the high at
+    # the line end, the asset tail before it). Both must be kept: the range folds
+    # the high in AND the asset tail folds into the name.
+    page = "\n".join(
+        [
+            "Alibaba Group Holding S 02/20/2020 03/03/2020 $15,001 - gfedcb",
+            "ADS (BABA) [ST] $50,000",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert len(txns) == 1
+    assert (txns[0].amount_range.low, txns[0].amount_range.high) == (15001, 50000)
+    assert txns[0].asset == "Alibaba Group Holding ADS (BABA) [ST]"
+    assert txns[0].ticker == "BABA"
+
+
+def test_smallcaps_type_letter_is_normalized(monkeypatch):
+    # The transaction-type glyph can render lower-case (``s``/``p``/``e``) and
+    # ``s (partial)``; all normalize to the schema's canonical upper-case form.
+    page = "\n".join(
+        [
+            "Apple Inc. (AAPL) [ST] p 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+            "Black Knight (BKI) [ST] s (partial) 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert [t.transaction_type for t in txns] == ["P", "S(partial)"]
+
+
+def test_truncated_wrapped_high_still_raises(monkeypatch):
+    # A row whose $HIGH bound never materializes (header ends ``$15,001 -`` and the
+    # next content is the row's own detail line, no money token) must NOT fabricate
+    # a half-range — it drops, and the status-block guard surfaces extract_failed.
+    page = "\n".join(
+        [
+            "Apple Inc. (AAPL) [ST] S 12/30/2019 01/10/2020 $15,001 - gfedc",
             "FILINg STATUS: New",
         ]
     )

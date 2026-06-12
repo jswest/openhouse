@@ -9,14 +9,33 @@ classification is the ground truth a test asserts against.
 | File | DocID | Family | Expected `pdf_class` | Extraction (pdfplumber) |
 |---|---|---|---|---|
 | `efiled_fd_10042852.pdf` | 10042852 | fd (annual) | `efiled` | 4 pages, ~1,348 chars/page |
+| `efiled_fd_nulglyph_10049721.pdf` | 10049721 | fd (annual, **2021**) | `efiled` | 2 pages; small-caps glyphs extract as **NUL runs** |
 | `efiled_ptr_20016766.pdf` | 20016766 | ptr | `efiled` | 1 page, ~1,127 chars |
 | `efiled_ptr_20017980.pdf` | 20017980 | ptr | `efiled` | 7 pages, 57 transaction rows |
+| `efiled_ptr_wrap_20013811.pdf` | 20013811 | ptr | `efiled` | 1 page, 3 amount-wrapped rows |
 | `scanned_fd_8217722.pdf` | 8217722 | fd (annual) | `scanned` | 1 page, **0** chars (image-only) |
 | `scanned_ptr_8217326.pdf` | 8217326 | ptr | `scanned` | 1 page, **0** chars (image-only) |
 
 The DocID prefix matches SPEC §2.2: 8-digit `1`/`2` → e-filed (text-extractable);
 7-digit `8` → paper/scanned (image-only, 0 chars). Text extraction is the
 *authoritative* test; the prefix is a fast pre-filter only.
+
+## Annual-FD glyphs-lost ground truth (SPEC §2.2 NUL rendering)
+
+- **`efiled_fd_nulglyph_10049721.pdf`** — Hon. Alma Adams, **2021** annual report
+  (`data/raw/2021/fd/10049721.pdf`). The dominant 2021+ rendering: the form's
+  small-caps furniture (schedule headings, section titles, `LOCATION:`/
+  `DESCRIPTION:` labels) extracts as **U+0000 NUL runs**, one per lost glyph —
+  `Schedule A:` becomes `S\x00{7} A:`. Filer-entered content stays in a regular
+  font and extracts intact. Ground truth: schedules **A, C, E, F** populated
+  (A: 2 assets incl. a value range wrapped via the dangling-low interleave;
+  C: 2 earned-income rows; E: 1 position; F: 2 agreements), B/D/G/H/I `None
+  disclosed.` → absent, no Schedule J on this form. The NUL furniture folded into
+  a recovered row is scrubbed out of the emitted `raw_text` (each NUL run → one
+  space, whitespace collapsed, ends stripped — issue #52), so no item's
+  `raw_text` contains `U+0000`; the content (asset names, amounts, dates) is
+  unchanged. The scrub is a no-op on NUL-free text, so intact-rendering bodies
+  (all of 2020) are byte-identical to before.
 
 ## PTR body-extraction ground truth (issue #9, SPEC §6.3)
 
@@ -31,6 +50,15 @@ The two e-filed PTRs double as body-extraction fixtures (`tests/test_ptr_extract
 - **`efiled_ptr_20016766.pdf`** — Hon. Alan Lowenthal, 2020: the **null-ticker**
   case. A single `SP` Cinemark `[CS]` (corp-bond) **sale** with no parenthesized
   symbol (`ticker: null`, correct — not a sentinel) and a `DESCRIPTION:` line.
+- **`efiled_ptr_wrap_20013811.pdf`** — Hon. Matt Gaetz, 2020 (issue #46): the
+  **amount-column wrap + small-caps** case. **3** rows, each with the `$HIGH`
+  bound wrapped onto the next line (`$15,001 -` … `$50,000`; `$50,001 -` …
+  `$100,000`) and *every* detail anchor rendered in small-caps with
+  per-filing-inconsistent case (`FILING STaTUS:`, `SUBHoLDING oF:`,
+  `DESCRIPTIoN:`, `LoCaTIoN:`). Also covers the `E` (exchange) type, cap-gains
+  both set and unset, a small-caps `DESCRIPTIoN:` line that must still be
+  captured, and a null-ticker `[PS]` row. Before #46 this PDF (and ~2/3 of all
+  2020 e-filed PTRs) failed the completeness guard and was dropped wholesale.
 
 **Legal (SPEC §1).** Clerk FD data carries a statutory use restriction: not for
 commercial use, soliciting, or establishing credit ratings. These files are

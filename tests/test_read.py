@@ -128,12 +128,28 @@ def test_filing_table(capsys):
     assert "doc_id" in out and "transactions" in out
 
 
-def test_filing_non_ptr_has_no_body(capsys):
+def test_filing_fd_body_is_loaded(capsys):
+    # #12 writes parsed/<year>/fd/<DocID>.json for an annual FD; cmd_filing must
+    # load it under ``body`` (not emit a bare null like a non-PTR used to).
     rc = run(["filing", "10100003"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["filing"]["doc_id"] == "10100003"
+    assert payload["body"] is not None
+    assert "schedules" in payload["body"]
+    assert "A" in payload["body"]["schedules"]
+
+
+def test_filing_fd_without_body_notes_no_body(capsys):
+    # An fd-family filing with no parsed body (a cover sheet/extension) → body null
+    # plus a clear "no parsed body" note that now covers FDs, not just PTRs.
+    rc = run(["filing", "10200002"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["filing"]["doc_id"] == "10200002"
     assert payload["body"] is None
+    assert "no parsed body" in captured.err and "FD" in captured.err
 
 
 def test_filing_unknown_doc_id_errors(capsys):
@@ -385,3 +401,98 @@ def test_dataflags_accepted_before_subcommand(capsys):
         ["--table", "--data-dir", dd, "filings", "2021"], current_year=CURRENT_YEAR
     )
     assert rc == 0
+
+
+# --- GH-0040 LOW: residual base / not_classified / asymmetry / schema drift -----
+
+
+def test_trades_residual_base_is_ptr_efiled_not_all_efiled(capsys):
+    # The 2021 manifest's by_pdf_class.efiled is 3, but only TWO of those are
+    # type-P (PTR) efiled filings (20100001, 20100002); 10100003 is an efiled FD
+    # with no PTR body. The trades residual must be complete over the body-bearing
+    # type-P base (2), not the manifest's all-efiled total (3).
+    run(["trades", "2021"])
+    err = capsys.readouterr().err
+    # The wording must make clear the base is the e-filed PTR (type-P) population.
+    assert "complete over the 2 e-filed PTR (type-P) filings" in err
+
+
+def test_trades_residual_includes_not_classified(capsys):
+    # The 2021 manifest declares not_classified 2 (which INCLUDES the 1 errored
+    # record — an errored extraction keeps pdf_class=None, matching real parse
+    # output where error ⊆ not_classified). The residual must surface
+    # not_classified so the unknown is not under-reported, but must NOT add error
+    # in again (that double-counts every error).
+    run(["trades", "2021"])
+    err = capsys.readouterr().err
+    assert "not_classified 2" in err
+    assert "of which error 1" in err  # error shown as a sub-breakdown, not added
+    # unparsed total = scanned 1 + missing 1 + not_classified 2 = 4 (error NOT added).
+    assert "4 did not parse" in err
+
+
+def test_trades_residual_reconciles_parsed_plus_unparsed_equals_total():
+    # The reconciling invariant (matching parse.py): efiled + unparsed == total,
+    # where unparsed = scanned + missing + not_classified and error ⊆
+    # not_classified. The 2021 fixture's not_classified (2) INCLUDES its 1 errored
+    # record, so adding error into the total would over-count (5 unparsed, 8 ≠ 7).
+    from openhouse.read import _residual_counts
+
+    manifest = json.loads(
+        (FIXTURES / "2021" / "parse-manifest.json").read_text()
+    )
+    total = manifest["counts"]["total"]
+    r = _residual_counts(FIXTURES.parent, [2021])
+    assert r["parsed"] + r["unparsed"] == total  # efiled + unparsed == total
+    assert r["unparsed"] == r["scanned"] + r["missing"] + r["not_classified"]
+    assert r["error"] <= r["not_classified"]  # error ⊆ not_classified, never added
+
+
+def test_filings_residual_includes_not_classified(capsys):
+    # The not_classified bucket surfaces on every range residual, not just trades.
+    run(["filings", "2021"])
+    err = capsys.readouterr().err
+    assert "not_classified 2" in err
+
+
+def test_ticker_blind_spot_states_filter_asymmetry(capsys):
+    # The null-ticker blind-spot count applies --member/dates but NOT
+    # --owner/--type/--min-amount; the output must say so (conservative over-report).
+    run(["trades", "2021", "--ticker", "AAPL", "--owner", "SP"])
+    err = capsys.readouterr().err
+    assert "blind spot" in err
+    assert "ignoring --owner/--type/--min-amount" in err
+
+
+def test_schema_version_drift_warns_once(capsys):
+    # The fixtures carry schema_version "0.2.0", which differs from the current
+    # SCHEMA_VERSION; read must emit exactly ONE drift warning per run.
+    run(["trades", "2021-2022"])
+    err = capsys.readouterr().err
+    assert err.count("warning: parsed tree was written by schema_version") == 1
+    assert "re-parse, not migrate" in err
+
+
+def test_schema_version_drift_warns_on_filing(capsys):
+    # The single-filing path warns too (it has no range, resolves to the found year).
+    run(["filing", "20100001"])
+    err = capsys.readouterr().err
+    assert "schema_version" in err and "re-parse, not migrate" in err
+
+
+def test_no_schema_warning_when_versions_match(tmp_path, capsys):
+    # Rewrite a year's manifest to the current SCHEMA_VERSION → no drift warning.
+    import shutil
+
+    from openhouse.schemas import SCHEMA_VERSION
+
+    dd = tmp_path / "data"
+    shutil.copytree(FIXTURES, dd / "parsed")
+    mpath = dd / "parsed" / "2021" / "parse-manifest.json"
+    manifest = json.loads(mpath.read_text())
+    manifest["schema_version"] = SCHEMA_VERSION
+    mpath.write_text(json.dumps(manifest))
+
+    run(["trades", "2021"], data_dir=dd)
+    err = capsys.readouterr().err
+    assert "schema_version" not in err
