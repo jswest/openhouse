@@ -18,6 +18,14 @@ Clerk into normalized JSON: `pull` (network) → `parse` (offline) → `read`
   failed extraction → a record with explicit `pdf_class`/`parse_status` plus a
   manifest entry, never a gap. Preserve raw values (FilingType letter,
   `raw_text` fallbacks) alongside anything normalized.
+- **Every query must be sound or complete — declare which.** A query with no
+  false positives bounds the truth from below ("as few as" — at least these); one
+  with no false negatives bounds it from above ("as many as" — at most these). A
+  query that yields both in unknown amounts bounds nothing and is useless. State
+  the guarantee, and state it relative to the parsed set plus the manifest's
+  count of what didn't parse (complete over the known, explicit residual for the
+  unknown). When you can't have both, prefer completeness: a missed trade is
+  worse than a spurious hit a human can discard.
 - **`pull` is the only network step.** `parse` and `read` must work offline,
   deterministically. No wall-clock in core logic — one timestamp captured at
   command entry, threaded into manifests.
