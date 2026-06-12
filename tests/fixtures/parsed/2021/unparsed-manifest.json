@@ -1,0 +1,10 @@
+{
+  "schema_version": "0.2.0",
+  "generated_at": "2026-06-11T12:00:00",
+  "year": 2021,
+  "unparsed": [
+    { "doc_id": "8100004", "filer_id": "ny.diaz.diane", "reason": "scanned" },
+    { "doc_id": "30100005", "filer_id": "fl.evans.erin", "reason": "missing" },
+    { "doc_id": "20100006", "filer_id": "oh.ford.frank", "reason": "extract_failed" }
+  ]
+}

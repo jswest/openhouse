@@ -9,8 +9,9 @@ Two passes run here, both offline. First every ``<Member>`` becomes a
 schema-validated :class:`~openhouse.schemas.FilingMetadata` record with a
 computed ``filer_id`` (SPEC §6.2) and identity collisions are surfaced; then each
 on-disk PDF is classified ``efiled`` / ``scanned`` / ``missing`` by authoritative
-text extraction (SPEC §2.2). Body/field extraction is deferred to v0.3.0 — an
-``efiled`` PDF is classified, but its body stays ``null``. ``--types`` restricts
+text extraction (SPEC §2.2). For an ``efiled`` **PTR** (filing type ``P``) the
+§6.3 ``transactions[]`` body is then extracted and written to
+``parsed/<year>/ptr/<DocID>.json``; FD bodies remain deferred. ``--types`` restricts
 which families are classified (out-of-scope filings stay unclassified yet still
 count toward the total); ``--strict`` exits non-zero if any filing errored.
 """
@@ -26,7 +27,7 @@ from typing import Optional
 from tqdm import tqdm
 
 from .index import build_filing_records
-from .pdf import PdfExtractError, classify
+from .pdf import PdfExtractError, classify, extract_ptr_transactions
 from .schemas import SCHEMA_VERSION, UNKNOWN_FILING_LABEL, FilingMetadata
 
 # Exit code returned when ``--strict`` is set and any filing errored (SPEC §4:
@@ -117,8 +118,31 @@ def _unparsed_entry(rec: FilingMetadata, reason: str) -> dict:
     return {"doc_id": rec.doc_id, "filer_id": rec.filer_id, "reason": reason}
 
 
+def _write_ptr_body(parsed_dir: Path, doc_id: str, transactions: list) -> None:
+    """Write one e-filed PTR body to ``parsed/<year>/ptr/<DocID>.json`` (§6.4).
+
+    Exact contract shape (a sibling sub-issue's reader joins on it): an object
+    with a single ``"transactions"`` key holding the §6.3 transaction array.
+    Filing metadata is *not* duplicated here — ``filings.json`` is the single
+    source of truth (joined by DocID). Byte-stable (``indent=2``, ``sort_keys``,
+    trailing newline) so re-parse is deterministic, matching parse.py's
+    convention.
+    """
+    ptr_dir = parsed_dir / "ptr"
+    ptr_dir.mkdir(parents=True, exist_ok=True)
+    body = {"transactions": [t.model_dump(mode="json") for t in transactions]}
+    (ptr_dir / f"{doc_id}.json").write_text(
+        json.dumps(body, indent=2, sort_keys=True) + "\n"
+    )
+
+
 def _classify_records(
-    records: list[FilingMetadata], *, data_dir: Path, types: list[str], year: int
+    records: list[FilingMetadata],
+    *,
+    data_dir: Path,
+    types: list[str],
+    year: int,
+    parsed_dir: Path,
 ) -> list[dict]:
     """Classify each record's on-disk PDF, mutating ``pdf_class``/``parse_status``.
 
@@ -128,8 +152,13 @@ def _classify_records(
     - ``efiled`` / ``scanned`` / ``missing`` → ``parse_status="ok"``. Scanned and
       missing keep their metadata record with ``body: null`` and land in the
       unparsed manifest (SPEC §6.5).
-    - ``extract_failed`` (a present-but-corrupt PDF) → ``parse_status="error"``,
-      ``pdf_class`` stays ``None``, unparsed reason ``extract_failed``.
+    - ``extract_failed`` (a present-but-corrupt PDF, or an efiled PTR whose §6.3
+      body extraction failed) → ``parse_status="error"``, ``pdf_class`` stays
+      ``None``, unparsed reason ``extract_failed``.
+
+    An ``efiled`` PTR (filing type ``P``) additionally has its §6.3
+    ``transactions[]`` extracted and written to ``parsed/<year>/ptr/<DocID>.json``
+    (``parsed_dir``) during this pass.
 
     ``--types`` partial runs: a filing whose family is **not** in ``types`` is not
     classified this run — ``pdf_class`` stays ``None`` and ``parse_status="ok"``,
@@ -166,6 +195,13 @@ def _classify_records(
             pdf_path = data_dir / rec.source_pdf
             try:
                 pdf_class = classify(pdf_path)
+                # An e-filed PTR (filing type P) is the v0.3.0 body-extraction
+                # target: extract its §6.3 transactions and write the body file
+                # now. An extraction failure here is the one e-filed path that
+                # lands in the unparsed manifest (reason ``extract_failed``) —
+                # never a crash, never a silent gap.
+                if pdf_class == "efiled" and family == "ptr":
+                    transactions = extract_ptr_transactions(pdf_path)
             except PdfExtractError:
                 rec.pdf_class = None
                 rec.parse_status = "error"
@@ -173,6 +209,8 @@ def _classify_records(
             else:
                 rec.pdf_class = pdf_class
                 rec.parse_status = "ok"
+                if pdf_class == "efiled" and family == "ptr":
+                    _write_ptr_body(parsed_dir, rec.doc_id, transactions)
                 if pdf_class in ("scanned", "missing"):
                     unparsed.append(_unparsed_entry(rec, pdf_class))
 
@@ -223,9 +261,15 @@ def parse_year(
         by_filing_type[rec.filing_type.code] += 1
     filing_type_counts = dict(sorted(by_filing_type.items()))
 
+    parsed_dir = data_dir / "parsed" / str(year)
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+
     # Authoritative per-PDF classification (SPEC §2.2), mutating each record's
     # pdf_class / parse_status and collecting the unparsed-manifest entries.
-    unparsed = _classify_records(records, data_dir=data_dir, types=types, year=year)
+    # E-filed PTR bodies are extracted and written here (parsed/<year>/ptr/).
+    unparsed = _classify_records(
+        records, data_dir=data_dir, types=types, year=year, parsed_dir=parsed_dir
+    )
 
     by_pdf_class: dict[str, int] = defaultdict(int)
     not_classified = 0
@@ -256,9 +300,6 @@ def parse_year(
             file=sys.stderr,
         )
 
-    parsed_dir = data_dir / "parsed" / str(year)
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-
     # JSON-mode dump so dates serialize as ISO strings; sort_keys + trailing
     # newline so two runs from the same raw produce byte-identical files.
     filings = [rec.model_dump(mode="json") for rec in records]
@@ -287,7 +328,9 @@ def parse_year(
     )
 
     # Every filing not fully usable as an e-filed body, each with a reason (SPEC
-    # §6.5). E-filed filings are NOT here. Order is deterministic (record order).
+    # §6.5). The one e-filed path that can appear here is an efiled PTR whose body
+    # extraction failed (``extract_failed``); otherwise e-filed filings are not
+    # listed. Order is deterministic (record order).
     unparsed_manifest = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": fetched_at,

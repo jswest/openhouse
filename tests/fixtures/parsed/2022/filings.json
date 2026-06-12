@@ -1,0 +1,26 @@
+[
+  {
+    "doc_id": "20200001",
+    "year": 2022,
+    "filer": { "prefix": null, "first": "Albert", "last": "Anders", "suffix": null },
+    "filer_id": "ny.anders.albert",
+    "state_district": { "raw": "NY01", "state": "NY", "district": 1 },
+    "filing_type": { "code": "P", "label": "periodic_transaction_report" },
+    "filing_date": "2022-02-10",
+    "source_pdf": "raw/2022/ptr/20200001.pdf",
+    "pdf_class": "efiled",
+    "parse_status": "ok"
+  },
+  {
+    "doc_id": "10200002",
+    "year": 2022,
+    "filer": { "prefix": null, "first": "Grace", "last": "Green", "suffix": null },
+    "filer_id": "wa.green.grace",
+    "state_district": { "raw": "WA09", "state": "WA", "district": 9 },
+    "filing_type": { "code": "O", "label": "annual_report" },
+    "filing_date": "2022-05-15",
+    "source_pdf": "raw/2022/fd/10200002.pdf",
+    "pdf_class": "efiled",
+    "parse_status": "ok"
+  }
+]
