@@ -771,7 +771,7 @@ def build_read_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--data-dir",
         default=argparse.SUPPRESS,
-        help="root data directory (default: ./data)",
+        help=cli_mod._DATA_DIR_HELP,
     )
     common.add_argument(
         "--table",
@@ -877,12 +877,12 @@ def run(remainder: list[str], *, current_year: int) -> int:
     """
     parser = build_read_parser()
     args = parser.parse_args(remainder)
-    # The shared flags use SUPPRESS defaults (accepted in either position); apply
-    # the real defaults once, so a value passed before the subcommand is kept and
-    # downstream code can read args.data_dir / args.table unconditionally.
-    args.data_dir = getattr(args, "data_dir", "./data")
+    # The shared flags use SUPPRESS defaults (accepted in either position); resolve
+    # the data root once through the shared resolver (flag → OPENHOUSE_DATA_DIR env
+    # → ./data), so a value passed before the subcommand is honored. args.table is
+    # likewise normalized once so downstream code can read it unconditionally.
+    data_dir = cli_mod.resolve_data_dir(getattr(args, "data_dir", None))
     args.table = getattr(args, "table", False)
-    data_dir = Path(args.data_dir)
 
     try:
         if args.subcommand == "filing":
