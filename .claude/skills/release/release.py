@@ -30,16 +30,105 @@ the on-main / clean / synced preconditions around this script.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import inspect
+import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 # This file lives at <repo>/.claude/skills/release/release.py (GH-0020 pattern).
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+# The committed fingerprint of the parsed-schema models as of the last schema
+# bump (GH-0043). Lives beside ``schemas.py`` so a schema edit and its
+# fingerprint update land in the same diff; the release tool reads it back as
+# "the fingerprint the last tag shipped" without re-checking out the tag.
+FINGERPRINT_PATH = REPO_ROOT / "openhouse" / "schemas.fingerprint"
+
 
 # ---------------------------------------------------------------------------
-# Pure helpers (unit-tested)
+# Schema-drift guard (GH-0043)
+#
+# A re-parse, not a migrate (CLAUDE.md): the only signal that ``parsed/`` shape
+# changed is ``SCHEMA_VERSION`` rising. This guard makes that self-enforcing —
+# if the pydantic models in ``openhouse/schemas.py`` change shape but the int
+# stays put, the release refuses to tag. The fingerprint is a *pure* function of
+# the models' normalized JSON schemas; the committed ``schemas.fingerprint``
+# records the value as of the last tag, so drift = (live != committed).
+# ---------------------------------------------------------------------------
+
+# Keys in ``model_json_schema()`` that are documentation, not structure: prose
+# docstrings (``description``) and name-derived labels (``title``). Dropping them
+# means a reworded docstring or a renamed-for-readability nothing-else change
+# doesn't false-positive as drift; a field add/remove/retype still does.
+_NOISE_KEYS = frozenset({"description", "title"})
+
+
+def _strip_noise(node: Any) -> Any:
+    """Recursively drop documentation keys and sort dict keys for stable output."""
+    if isinstance(node, dict):
+        return {
+            k: _strip_noise(v)
+            for k, v in sorted(node.items())
+            if k not in _NOISE_KEYS
+        }
+    if isinstance(node, list):
+        return [_strip_noise(v) for v in node]
+    return node
+
+
+def fingerprint(models: list[type]) -> str:
+    """A stable SHA-256 over the normalized JSON schemas of ``models``.
+
+    Pure function of the models' structure: each model's ``model_json_schema()``
+    is stripped of documentation noise (docstrings, name-derived titles) and
+    key-sorted, then the lot is dumped canonically and hashed. Incidental
+    ordering or prose edits don't move it; a structural change (a field added,
+    removed, retyped, or made (non-)optional) does.
+    """
+    normalized = {
+        m.__name__: _strip_noise(m.model_json_schema())
+        for m in sorted(models, key=lambda m: m.__name__)
+    }
+    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def check_drift(
+    live_fingerprint: str,
+    recorded_fingerprint: str | None,
+    schema_version: int,
+    last_tag: str | None,
+) -> str | None:
+    """Return an error message when the schema drifted without a version bump.
+
+    Drift is exactly: the model fingerprint changed since the last tag, yet
+    ``SCHEMA_VERSION`` still matches that tag's minor. That is the one state the
+    release must refuse — a reshaped ``parsed/`` output with a static generation
+    int, which would ship un-re-parsed data under an unchanged compatibility
+    signal. Returns ``None`` (no drift) when there's no prior tag/fingerprint,
+    when the fingerprint is unchanged, or when the schema int already moved
+    (the bump *is* the acknowledgement).
+    """
+    if last_tag is None or recorded_fingerprint is None:
+        return None
+    if schema_moved(schema_version, last_tag):
+        return None
+    if live_fingerprint == recorded_fingerprint:
+        return None
+    return (
+        "error: parsed-schema models changed but SCHEMA_VERSION is still "
+        f"{schema_version} (last tag {last_tag}). A reshaped `parsed/` output "
+        "must bump SCHEMA_VERSION — re-parse, not migrate (CLAUDE.md). Bump the "
+        "int in openhouse/schemas.py and refresh openhouse/schemas.fingerprint "
+        "(release.py --write-fingerprint), then retag."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Version arithmetic + notes (unit-tested)
 # ---------------------------------------------------------------------------
 
 def parse_version_tag(tag: str) -> tuple[int, int, int]:
@@ -117,6 +206,44 @@ def read_schema_version() -> int:
     return SCHEMA_VERSION
 
 
+def parsed_schema_models() -> list[type]:
+    """Every pydantic model defined in ``openhouse.schemas`` (the parsed shape).
+
+    Auto-discovered so there's no list to maintain — a model added to the module
+    is fingerprinted automatically. Filtered to classes *defined* in the module
+    (not imported ``BaseModel`` itself or anything pulled in).
+    """
+    import pydantic
+    from openhouse import schemas
+
+    return [
+        obj
+        for _, obj in inspect.getmembers(schemas, inspect.isclass)
+        if issubclass(obj, pydantic.BaseModel)
+        and obj is not pydantic.BaseModel
+        and obj.__module__ == "openhouse.schemas"
+    ]
+
+
+def live_fingerprint() -> str:
+    """The fingerprint of the schema models as they are right now."""
+    return fingerprint(parsed_schema_models())
+
+
+def recorded_fingerprint() -> str | None:
+    """The committed fingerprint (last tag's value), or None if absent."""
+    if not FINGERPRINT_PATH.exists():
+        return None
+    return FINGERPRINT_PATH.read_text(encoding="utf-8").strip() or None
+
+
+def write_fingerprint() -> str:
+    """Write the live fingerprint to ``schemas.fingerprint`` and return it."""
+    fp = live_fingerprint()
+    FINGERPRINT_PATH.write_text(fp + "\n", encoding="utf-8")
+    return fp
+
+
 def last_release_tag() -> str | None:
     """The most recent ``v0.*`` tag reachable from HEAD, or None if untagged."""
     result = subprocess.run(
@@ -160,11 +287,29 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-dirty", action="store_true",
         help="Permit a tag on a dirty working tree (refused by default).",
     )
+    parser.add_argument(
+        "--write-fingerprint", action="store_true",
+        help="Record the current schema fingerprint to openhouse/schemas.fingerprint "
+             "and exit (do this in the same commit as a SCHEMA_VERSION bump).",
+    )
     args = parser.parse_args(argv)
     do_tag = args.tag or args.push
 
+    if args.write_fingerprint:
+        fp = write_fingerprint()
+        print(f"Wrote schema fingerprint {fp[:12]}… to {FINGERPRINT_PATH}.",
+              file=sys.stderr)
+        return 0
+
     schema_version = read_schema_version()
     last_tag = last_release_tag()
+
+    drift = check_drift(
+        live_fingerprint(), recorded_fingerprint(), schema_version, last_tag,
+    )
+    if drift is not None:
+        print(drift, file=sys.stderr)
+        return 1
 
     next_version = compute_next_version(schema_version, last_tag)
     new_tag = f"v{next_version}"

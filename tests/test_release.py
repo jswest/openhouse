@@ -81,3 +81,98 @@ def test_build_release_notes_schema_bump_banner():
     assert "3 → 4" in notes
     assert "re-run `openhouse parse`" in notes
     assert "- feat: new schedule" in notes
+
+
+# ---------------------------------------------------------------------------
+# Schema-drift guard (GH-0043) — pure fingerprint() + check_drift().
+# ---------------------------------------------------------------------------
+
+from typing import Optional  # noqa: E402
+
+from pydantic import BaseModel, Field  # noqa: E402
+
+
+class _ModelV1(BaseModel):
+    """A first-shape model (this docstring is noise the fingerprint must ignore)."""
+
+    asset: str
+    owner: Optional[str] = None
+
+
+# Same NAME as _ModelV1 (so the by-name fingerprint key matches) but different
+# prose: a different docstring and a Field(description=...). Both are documentation
+# noise — the structure (fields, types, optionality) is identical to _ModelV1.
+class _ModelV1RewordedDoc(BaseModel):
+    """Totally different prose — but the structure is identical to ``_ModelV1``."""
+
+    asset: str = Field(description="now has a Field description, still noise")
+    owner: Optional[str] = None
+
+
+_ModelV1RewordedDoc.__name__ = "_ModelV1"
+
+
+class _ModelV2AddedField(BaseModel):
+    """Same intent, but with one extra field — a real structural change."""
+
+    asset: str
+    owner: Optional[str] = None
+    ticker: Optional[str] = None
+
+
+def test_fingerprint_is_pure_and_stable():
+    # Same models, called twice → identical hash (no wall-clock, no ordering noise).
+    assert release.fingerprint([_ModelV1]) == release.fingerprint([_ModelV1])
+    # Order of the model list doesn't matter.
+    assert release.fingerprint([_ModelV1, _ModelV2AddedField]) == release.fingerprint(
+        [_ModelV2AddedField, _ModelV1]
+    )
+
+
+def test_fingerprint_ignores_docstring_and_description_noise():
+    # A reworded docstring / added Field(description=...) is NOT structural drift.
+    assert release.fingerprint([_ModelV1]) == release.fingerprint([_ModelV1RewordedDoc])
+
+
+def test_fingerprint_changes_on_structural_change():
+    # Adding a field changes the shape → the fingerprint must move.
+    assert release.fingerprint([_ModelV1]) != release.fingerprint([_ModelV2AddedField])
+
+
+def test_check_drift_changed_model_static_version_is_drift():
+    # The model fingerprint changed since the last tag, but SCHEMA_VERSION (4)
+    # still matches the tag's minor → refuse to tag.
+    msg = release.check_drift("new-fp", "old-fp", schema_version=4, last_tag="v0.4.0")
+    assert msg is not None
+    assert "SCHEMA_VERSION" in msg
+
+
+def test_check_drift_version_bump_is_clean():
+    # Fingerprint changed AND the schema int moved past the tag's minor → the
+    # bump is the acknowledgement; no drift.
+    assert (
+        release.check_drift("new-fp", "old-fp", schema_version=5, last_tag="v0.4.0")
+        is None
+    )
+
+
+def test_check_drift_non_schema_edit_is_clean():
+    # Fingerprint unchanged (a non-schema edit, e.g. release.py or docs) at a
+    # static version → no drift.
+    assert (
+        release.check_drift("same-fp", "same-fp", schema_version=4, last_tag="v0.4.0")
+        is None
+    )
+
+
+def test_check_drift_no_prior_tag_or_fingerprint_is_clean():
+    # Nothing to compare against → never drift (baseline release).
+    assert release.check_drift("fp", None, schema_version=4, last_tag="v0.4.0") is None
+    assert release.check_drift("fp", "old", schema_version=4, last_tag=None) is None
+
+
+def test_committed_fingerprint_matches_live_models():
+    # The committed openhouse/schemas.fingerprint must track the current models,
+    # so a real release of the unchanged schema reads "no drift". A failure here
+    # means someone changed schemas.py without refreshing the fingerprint.
+    assert release.recorded_fingerprint() == release.live_fingerprint()
