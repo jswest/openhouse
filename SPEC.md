@@ -425,9 +425,11 @@ without violating acceptance (§11).
   (timestamp injected by the tool, since scripts have no clock — see §9).
 - `parse-manifest.json` — counts by filing type, `efiled` vs `scanned` vs `missing`,
   ok vs error, `identity_warnings` (§6.2), and the schema version used.
-- `unparsed-manifest.json` — every filing not fully parsed, with `reason`
-  (`scanned`, `extract_failed`, `unknown_type`, `validation_error`) for a clean OCR/
-  follow-up backlog.
+- `unparsed-manifest.json` — every filing not fully parsed, with `doc_id`,
+  `filer_id` (so a no-DocID row stays joinable), and a `reason`
+  (`scanned`, `missing`, `extract_failed`, `unknown_type`, `validation_error`) for a
+  clean OCR/follow-up backlog. (`missing` = the index lists the filing but no PDF is
+  on disk; `validation_error` is reserved — no emit path in v0.2.0.)
 
 ---
 

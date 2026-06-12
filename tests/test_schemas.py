@@ -20,6 +20,7 @@ def _base_kwargs(**overrides):
         doc_id="20024277",
         year=2024,
         filer=Filer(first="Richard W.", last="Allen"),
+        filer_id="ga.allen.richard",
         state_district=StateDistrict(raw="GA12", state="GA", district=12),
         filing_type=FilingTypeInfo.from_code("P"),
         filing_date=date(2024, 1, 8),

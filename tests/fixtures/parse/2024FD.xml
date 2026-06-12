@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FinancialDisclosure>
+  <!-- Same person, three filings, same district: NORMAL, no warning. -->
+  <Member>
+    <Last>Adams</Last><First>Alma S.</First><Suffix></Suffix>
+    <FilingType>O</FilingType><StateDst>NC12</StateDst>
+    <Year>2024</Year><FilingDate>5/15/2024</FilingDate><DocID>1001</DocID>
+  </Member>
+  <Member>
+    <Last>Adams</Last><First>Alma Shealey</First><Suffix></Suffix>
+    <FilingType>P</FilingType><StateDst>NC12</StateDst>
+    <Year>2024</Year><FilingDate>1/08/2024</FilingDate><DocID>1002</DocID>
+  </Member>
+  <Member>
+    <Last>Adams</Last><First>Alma</First><Suffix></Suffix>
+    <FilingType>X</FilingType><StateDst>NC12</StateDst>
+    <Year>2024</Year><FilingDate>4/15/2024</FilingDate><DocID>1003</DocID>
+  </Member>
+  <!-- Same filer_id, two DIFFERENT districts: collision warning. -->
+  <Member>
+    <Last>Smith</Last><First>John</First><Suffix></Suffix>
+    <FilingType>O</FilingType><StateDst>TX05</StateDst>
+    <Year>2024</Year><FilingDate>5/15/2024</FilingDate><DocID>2001</DocID>
+  </Member>
+  <Member>
+    <Last>Smith</Last><First>John Q.</First><Suffix></Suffix>
+    <FilingType>O</FilingType><StateDst>TX09</StateDst>
+    <Year>2024</Year><FilingDate>5/15/2024</FilingDate><DocID>2002</DocID>
+  </Member>
+  <!-- Same filer_id (the "." suffix slugs to empty so it is NOT appended),
+       but the raw suffix differs from the empty one: collision warning. -->
+  <Member>
+    <Last>Jones</Last><First>Robert</First><Suffix></Suffix>
+    <FilingType>O</FilingType><StateDst>FL10</StateDst>
+    <Year>2024</Year><FilingDate>5/15/2024</FilingDate><DocID>3001</DocID>
+  </Member>
+  <Member>
+    <Last>Jones</Last><First>Robert</First><Suffix>.</Suffix>
+    <FilingType>O</FilingType><StateDst>FL10</StateDst>
+    <Year>2024</Year><FilingDate>5/15/2024</FilingDate><DocID>3002</DocID>
+  </Member>
+  <!-- A lone filing: no collision possible. -->
+  <Member>
+    <Last>Doe</Last><First>Maryam.</First><Suffix></Suffix>
+    <FilingType>W</FilingType><StateDst></StateDst>
+    <Year>2024</Year><FilingDate></FilingDate><DocID>4001</DocID>
+  </Member>
+</FinancialDisclosure>
