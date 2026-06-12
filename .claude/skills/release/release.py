@@ -260,8 +260,13 @@ def tag_fingerprint(last_tag: str | None) -> str | None:
     """
     if last_tag is None:
         return None
+    # Derive the in-repo path from FINGERPRINT_PATH rather than re-hardcoding the
+    # literal: if the file ever moves, a stale literal here would make every
+    # ``git show`` miss → silently return None forever → the guard goes inert
+    # again (the exact failure this fix exists to prevent).
+    rel = FINGERPRINT_PATH.relative_to(REPO_ROOT).as_posix()
     result = subprocess.run(
-        ["git", "show", f"{last_tag}:openhouse/schemas.fingerprint"],
+        ["git", "show", f"{last_tag}:{rel}"],
         cwd=REPO_ROOT, capture_output=True, text=True,
     )
     if result.returncode != 0:

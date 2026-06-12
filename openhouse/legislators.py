@@ -146,7 +146,8 @@ def load_legislator_index(data_dir: Path) -> LegislatorIndex:
             print(
                 f"warning: reference file {path} is present but unreadable "
                 f"({exc}); skipping it — bioguide identity will be incomplete. "
-                f"Re-fetch with `openhouse pull --force`.",
+                f"Delete the file and re-run `openhouse pull` to re-fetch just it "
+                f"(a bare `--force` would also recrawl every cached PDF).",
                 file=sys.stderr,
             )
             continue

@@ -361,7 +361,13 @@ bioguide on a `bioguide_id` field:
    synthesized. The two bulk files are fetched once by `pull` into
    `raw/reference/` — the **single declared exception** to "`pull` is the only
    network step" (CC0, so outside the Clerk use restriction) — and joined
-   **offline** by `parse`. `pull --no-reference` skips the fetch.
+   **offline** by `parse`. `pull --no-reference` skips the fetch. **Candidate
+   reports (FilingType `C`) are excluded from the seat join**: a candidate filing
+   is made by someone *running* for the seat (incumbent or challenger), and the
+   seat key alone can't tell a name-colliding challenger from the real member, so
+   candidates fall back to the `name:` key rather than risk a false-positive
+   bioguide (sound over complete; an incumbent stays bioguide-identified via their
+   non-candidate filings).
 2. **`name:<name_key>`** — the last resort when no seat matched. The key is the
    old normalized slug:
 
@@ -407,6 +413,14 @@ however many times it filed).
 }
 ```
 
+`amount_range` is normally a `{low, high, label}` bucket. A minority of real rows
+disclose a single **exact-dollar** value instead (e.g. `$894.97`); those serialize
+as `{ "exact": 894.97, "label": "$894.97" }` — a sound *point*, never coerced into
+a fake `low == high` range (#49). The two shapes are mutually exclusive; `read`'s
+amount filters treat an exact value `X` as the closed point `[X, X]`. A row that is
+neither a published bucket nor an exact value still fails loudly (`extract_failed`
+in the unparsed manifest) rather than fabricating a range.
+
 **Annual FD body** — schedules (line-item arrays; keys present only when the schedule
 has data). ✅ VERIFIED: live e-filed FDs carry these labels (A–F observed directly;
 empty schedules render `None disclosed.`):
@@ -425,9 +439,12 @@ empty schedules render `None disclosed.`):
 | J | Compensation in excess of $5,000 (new filers) |
 
 Each line item is a flat object with the schedule's columns plus a verbatim
-`raw_text` fallback so nothing extracted is lost to schema gaps. v1 depth-orders
-the work: **A–D fully structured first; E–J may ship as `raw_text`-only line items**
-without violating acceptance (§11).
+`raw_text` fallback so nothing extracted is lost to schema gaps. As of **v0.5.0**
+all schedules **A–J carry structured columns** (#17 added per-schedule E–J column
+extraction — E position/organization, F date, G source/value, H source/dates, I
+source/activity/amount, J source/description), each line item still carrying the
+verbatim `raw_text` so a low-confidence column split loses nothing. (Earlier the
+plan allowed E–J to ship as `raw_text`-only; that is now done.)
 
 ### 6.4 Directory layout
 
@@ -452,6 +469,12 @@ without violating acceptance (§11).
 > One file per filing body keeps `parse` incremental and diffs readable; `filings.json`
 > is the single roll-up index for the year. ✅ Sized: ~2,250 filings in 2024 —
 > thousands of small JSONs per year is fine.
+
+The data root (`<data-dir>`) resolves with a uniform precedence across all three
+commands (#50): the explicit `--data-dir` flag → the `OPENHOUSE_DATA_DIR`
+environment variable → the `./data` default. Setting `OPENHOUSE_DATA_DIR` gives an
+agent invoking openhouse from any working directory one stable store, instead of
+silently creating a separate empty `./data` island per cwd.
 
 ### 6.5 Manifests
 
@@ -478,10 +501,10 @@ pipeline.
 
 ---
 
-## 8. Deferred: agent skill + `openhouse ready` (post-v1 milestone)
+## 8. Agent skill + `openhouse ready` — ✅ DELIVERED v0.5.0 (#14)
 
-After v1 acceptance, openhouse gets a Claude Code skill, following the **bartleby
-pattern** (`~/Code/spot/bartleby`, `bartleby/commands/ready.py`):
+openhouse ships a Claude Code skill, following the **bartleby pattern**
+(`~/Code/spot/bartleby`, `bartleby/commands/ready.py`):
 
 - **Skill prose ships as package data** — `openhouse/skill/SKILL.md` (short: how to
   invoke the three commands, where the JSON lands, the §1 legal restriction) plus
@@ -561,8 +584,10 @@ e-filed FD, `8220122` paper FD, `30022163` extension, `7940` type-W):
 
 1. Full FilingType enumeration across 2008→present (cheap; during M2).
 2. Meanings of codes `D`, `W`, `H`, `B`, `G`, `E` — enumerate, spot-check PDFs.
-3. Extent of cross-year name variation → how well `filer_id` dedups in practice
-   (measure during M7; bioguide join is the post-v1 fix).
+3. Extent of cross-year name variation → how well `filer_id` dedups in practice.
+   ✅ The bioguide identity join (the durable fix) shipped in **v0.5.0** (#16);
+   `filer_id` is now `bioguide:`-keyed where a House seat matches, `name:` only as
+   a last resort.
 4. Older years (2008–2011) may diverge in PDF layout/URL details — verify when
    first pulled.
 
@@ -603,5 +628,5 @@ e-filed FD, `8220122` paper FD, `30022163` extension, `7940` type-W):
 
 | M | Scope |
 |---|---|
-| M8 | Skill prose + `openhouse ready` (§8) |
-| M9+ | OCR backlog (§7), bioguide identity join, deeper E–J structure, distribution (PyPI/plugin) if ever wanted |
+| M8 | Skill prose + `openhouse ready` (§8) — ✅ delivered v0.5.0 (#14) |
+| M9+ | OCR backlog (§7, still deferred). ✅ delivered v0.5.0: bioguide identity join (#16), structured E–J schedules (#17), `OPENHOUSE_DATA_DIR` (#50), release drift guard (#43), PTR exact-dollar amounts (#49). Remaining: OCR, distribution (PyPI/plugin) if ever wanted. |
