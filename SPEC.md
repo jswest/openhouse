@@ -143,6 +143,25 @@ respectively, tentatively); 7-digit prefixed `8`/`9` are paper. Use the prefix t
 
   **Match schedule letters by pattern (`S … <LETTER>:`), never by full heading
   text — and accept the NUL-run form (`S\x00+ <LETTER>:`) alongside it.**
+- The case-mangling hits **content tokens too** (GH-0070): owner columns render
+  `Sp`/`Jt`/`Dc`, asset-type tags `[oT]`, and the `None`/`Undetermined`/`Over`
+  value literals lowercase unpredictably. Matchers for those tokens must be
+  case-insensitive; captured owner tokens normalize to upper-case (the
+  `[TYPE]` tag value stays preserved raw, as ever).
+- **Candidate/New-Filer reports use a different Schedule A table** (GH-0070):
+  no "Tx. > $1,000?" checkbox column (no `gfedc` glyph anywhere, in any
+  rendering) and **three** amount columns — value, income *current year to
+  filing*, income *preceding year*. Anything keyed on the checkbox glyph as a
+  row gate matches zero rows on these forms.
+- **Row anchoring must be a disjunction of column signatures, never one
+  gate** (GH-0070): the `[TYPE]` tag and the checkbox glyph routinely land on
+  *different* physical lines (long names wrap either one off the row line); a
+  subholding arrow `⇒` can land on a *continuation* line among wrapped high
+  bounds (a bare arrow is NOT a row anchor — require the value/type column
+  right after it); Schedule B's Date column can hold a periodicity word
+  (`Semi-Annually`) instead of a date; D/F dates can be a **bare year**
+  (`2019`). Verified across 2020–2024: the pre-GH-0070 anchors silently merged whole
+  schedules on ~19% of parsed FDs and every post-2022-04 PTR.
 - Naive text mode runs columns together (`12/21/202301/08/2024$1,001 - …`) and
   wraps amount ranges across lines. **Row parsing must be layout-aware**
   (pdfplumber positional words/tables), not line-splitting.
@@ -529,6 +548,21 @@ extraction — E position/organization, F date, G source/value, H source/dates, 
 source/activity/amount, J source/description), each line item still carrying the
 verbatim `raw_text` so a low-confidence column split loses nothing. (Earlier the
 plan allowed E–J to ship as `raw_text`-only; that is now done.)
+
+Schedule A items carry `income_preceding` (GH-0070): the Candidate/New-Filer
+form variant's third amount column ("income preceding year"); `null` on member
+annual forms, which have no such column. A value column holding the literal
+`None`/`Undetermined` yields `value_of_asset: null` with the amount buckets
+shifted to the income columns — never a bucket misread as the asset value.
+
+Schedules A and B are **guarded for completeness** (GH-0070): each row carries
+one `[TYPE]` tag, so the segment's tag count approximates a row count
+independent of the row anchors. The invariant drifts by a row or two on ~30%
+of real documents (tag-less rows, brackets in filer text), so the guard fires
+only on a **total collapse** (one anchored item where the tags say ≥3 rows) or
+a **severe merge** (half or fewer of the ≥4 tag-counted rows anchored) — those become
+`extract_failed` in the unparsed manifest rather than a plausible-but-wrong
+body with `parse_status: "ok"`.
 
 ### 6.4 Directory layout
 

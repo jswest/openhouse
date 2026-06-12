@@ -36,7 +36,13 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 # verbatim ``raw_text``; and an ``exact`` point-value on ``AmountRange`` (#49)
 # so a single exact-dollar PTR amount (e.g. ``$894.97``) is represented soundly
 # rather than coerced into a fake low–high bucket. All of these ride generation 5.
-SCHEMA_VERSION = 5
+# Generation 6 (GH-0070): ``PtrTransaction.cap_gains_over_200`` becomes nullable
+# (None = unknown — the glyphs-lost rendering drops the checkbox from the text
+# layer entirely) and ``ScheduleAItem`` gains ``income_preceding`` (the
+# Candidate/New-Filer form variant's third income column). The same generation
+# re-anchors FD Schedule A/B/D/F row segmentation and adds the A/B completeness
+# guard, so a re-parse from ``raw/`` is required — which the bump forces.
+SCHEMA_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.

@@ -1592,7 +1592,7 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
         # filer text carrying brackets, header fragments), so the guard fires
         # only on the two unambiguous failure classes, never on small drift:
         # a TOTAL COLLAPSE (one item where the tags say several rows — the
-        # GH-0070 headline failure) and a SEVERE MERGE (fewer than half the
+        # GH-0070 headline failure) and a SEVERE MERGE (half or fewer of the
         # tag-counted rows anchored). Those become extract_failed — explicit
         # in the unparsed manifest — rather than a plausible-but-wrong body
         # with status ok. Only A and B carry per-row tags, so only they are
