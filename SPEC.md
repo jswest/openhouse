@@ -429,7 +429,8 @@ without violating acceptance (§11).
 - `pull-manifest.json` — per DocID: URL, HTTP status, byte size, sha256, fetched-at
   (timestamp injected by the tool, since scripts have no clock — see §9).
 - `parse-manifest.json` — counts by filing type, `efiled` vs `scanned` vs `missing`,
-  ok vs error, `identity_warnings` (§6.2), and the schema version used.
+  ok vs error, `identity_warnings` (§6.2), and the schema version used (the integer
+  parsed-schema generation — the minor of `v0.<gen>.<patch>`; see GH-0037).
 - `unparsed-manifest.json` — every filing not fully parsed, with `doc_id`,
   `filer_id` (so a no-DocID row stays joinable), and a `reason`
   (`scanned`, `missing`, `extract_failed`, `unknown_type`, `validation_error`) for a

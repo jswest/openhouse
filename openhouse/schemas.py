@@ -23,11 +23,13 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-# Schema version recorded in ``parse-manifest.json`` (SPEC §6.5). A schema change
-# means re-parse, not migrate (CLAUDE.md): bump this, delete old code, re-run
-# ``parse`` from ``raw/``. Read by ``parse`` (#6) and the per-PDF pass (#7).
-# 0.3.0 adds PTR body extraction (§6.3 transactions[]).
-SCHEMA_VERSION = "0.3.0"
+# Integer schema generation, stamped into ``parse-manifest.json`` (SPEC §6.5) and
+# *is* the minor of the release version ``v0.<SCHEMA_VERSION>.<patch>`` (GH-0037).
+# It moves iff the parsed-data schema changes — which forces a re-parse, not a
+# migrate (CLAUDE.md): bump this, delete old code, re-run ``parse`` from ``raw/``.
+# Read by ``parse`` (#6), the per-PDF pass (#7), and the release tool. Generation
+# 3 adds PTR body extraction (§6.3 transactions[]).
+SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.

@@ -1,8 +1,9 @@
 [project]
 name = "openhouse"
-# Kept 1:1 with openhouse.schemas.SCHEMA_VERSION — see docs/decisions/GH-0030.
-# tests/test_schemas.py::test_pyproject_version_matches_schema_version enforces it.
-version = "0.3.0"
+# Version is derived from the latest git tag by hatch-vcs (GH-0037), so the
+# release tool's only write is `git tag` — nothing to keep in sync here. Off a
+# tag, builds report a dev version (e.g. 0.3.0.devN+g<sha>).
+dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",
@@ -15,8 +16,11 @@ dependencies = [
 openhouse = "openhouse.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
