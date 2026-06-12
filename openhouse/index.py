@@ -18,7 +18,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import TYPE_CHECKING, Iterator, Optional
 from xml.etree import ElementTree as ET
 
 from .schemas import (
@@ -27,6 +27,9 @@ from .schemas import (
     FilingTypeInfo,
     StateDistrict,
 )
+
+if TYPE_CHECKING:
+    from .legislators import LegislatorIndex
 
 
 @dataclass(frozen=True)
@@ -115,10 +118,10 @@ def _first_token(s: str) -> str:
     return parts[0] if parts else ""
 
 
-def compute_filer_id(
+def compute_name_key(
     *, last: str, first: str, suffix: str, state: Optional[str]
 ) -> str:
-    """Compute the normalized ``filer_id`` (SPEC §6.2).
+    """Compute the normalized **name key** (SPEC §6.2) — the last-resort tier.
 
     ``lower(state) "." slug(Last) "." slug(first_token(First)) ["." slug(Suffix)]``.
     Only the first whitespace token of ``First`` participates (middle names /
@@ -126,8 +129,10 @@ def compute_filer_id(
     appended only when ``Suffix`` is present and non-empty. An empty/missing
     state → the ``unk`` state segment.
 
-    This is a *normalized key*, not a true member ID: it gets close to dedup
-    without pretending to be identity (bioguide join is post-v1).
+    This is a *normalized key*, not a true member ID. Since #16 it is the
+    **second** rung of the identity ladder: a filer that matches no CC0
+    congress-legislators House seat falls back to ``name:<this>`` — a bounded,
+    unverified name-string claim, never a synthesized bioguide.
     """
     state_seg = state.lower() if state else "unk"
     segments = [state_seg, slug(last), slug(_first_token(first))]
@@ -172,7 +177,11 @@ def _parse_filing_date(raw: str) -> Optional[date]:
         return None
 
 
-def build_filing_records(xml_path: Path, year: int) -> list[FilingMetadata]:
+def build_filing_records(
+    xml_path: Path,
+    year: int,
+    legislators: Optional["LegislatorIndex"] = None,
+) -> list[FilingMetadata]:
     """Parse every ``<Member>`` in ``<year>FD.xml`` into a :class:`FilingMetadata`.
 
     One record per filing, in XML order (deterministic). Every ``<Member>`` yields
@@ -180,6 +189,15 @@ def build_filing_records(xml_path: Path, year: int) -> list[FilingMetadata]:
     fetch) — so no filing is ever silently dropped (CLAUDE.md). Raw values are
     preserved: the FilingType letter on ``filing_type.code``, the original
     ``StateDst`` string on ``state_district.raw``.
+
+    **Identity ladder (#16).** ``filer_id`` is a two-tier key. When ``legislators``
+    is supplied and the filer's House seat (normalized last name + state +
+    district) matches a single CC0 congress-legislators bioguide, ``bioguide_id``
+    is that id and ``filer_id`` is ``bioguide:<id>`` — a stable identity, shared
+    across years and name spellings. Otherwise ``bioguide_id`` is ``None`` and
+    ``filer_id`` is the last-resort ``name:<normalized-slug>`` key (a bounded,
+    unverified name-string claim). With no ``legislators`` index every filer falls
+    back to ``name:`` — the enrichment is optional, never a gate.
 
     ``source_pdf`` is the relative path the body *would* live at —
     ``raw/<year>/<family>/<doc_id>.pdf`` (``ptr`` for FilingType ``P``, else
@@ -203,6 +221,25 @@ def build_filing_records(xml_path: Path, year: int) -> list[FilingMetadata]:
             f"raw/{year}/{family}/{doc_id}.pdf" if doc_id else None
         )
 
+        name_key = compute_name_key(
+            last=last,
+            first=first,
+            suffix=suffix,
+            state=state_district.state if state_district else None,
+        )
+        bioguide_id = (
+            legislators.match(
+                last=last,
+                state=state_district.state if state_district else None,
+                district=state_district.district if state_district else None,
+            )
+            if legislators is not None
+            else None
+        )
+        # Two-tier ladder: bioguide where it matched, else the name key. Where
+        # bioguide exists we do NOT mint a synthesized id alongside it (#16 scope).
+        filer_id = f"bioguide:{bioguide_id}" if bioguide_id else f"name:{name_key}"
+
         record = FilingMetadata(
             doc_id=doc_id,
             year=year,
@@ -212,12 +249,8 @@ def build_filing_records(xml_path: Path, year: int) -> list[FilingMetadata]:
                 last=last,
                 suffix=suffix or None,
             ),
-            filer_id=compute_filer_id(
-                last=last,
-                first=first,
-                suffix=suffix,
-                state=state_district.state if state_district else None,
-            ),
+            filer_id=filer_id,
+            bioguide_id=bioguide_id,
             state_district=state_district,
             filing_type=FilingTypeInfo.from_code(raw_type),
             filing_date=_parse_filing_date(_text(member, "FilingDate")),

@@ -349,11 +349,24 @@ and other territories; `district` is an int with `0` = at-large/n.a.
 ### 6.2 Member identity: `filer_id`
 
 The Clerk index has **no member ID** — only name strings, which vary across years
-("Alma Shealey Adams" vs "Alma S. Adams"). v1 mitigates with a normalized key that
-gets *close* to dedup without pretending to be identity:
+("Alma Shealey Adams" vs "Alma S. Adams"). `filer_id` is a **two-tier identity
+ladder** (#16); `parse` records which tier it used and exposes the matched
+bioguide on a `bioguide_id` field:
+
+1. **`bioguide:<id>`** — the filer's House seat (normalized last name + state +
+   district) matched a single record in the CC0
+   `@unitedstates/congress-legislators` bulk files. A stable identity across
+   years and name spellings. The match is conservative: a seat that resolves to
+   two legislators matches *nothing* (no false positive), and no bioguide is ever
+   synthesized. The two bulk files are fetched once by `pull` into
+   `raw/reference/` — the **single declared exception** to "`pull` is the only
+   network step" (CC0, so outside the Clerk use restriction) — and joined
+   **offline** by `parse`. `pull --no-reference` skips the fetch.
+2. **`name:<name_key>`** — the last resort when no seat matched. The key is the
+   old normalized slug:
 
 ```
-filer_id = lower(state) "." slug(Last) "." slug(first_token(First)) ["." slug(Suffix)]
+name_key = lower(state) "." slug(Last) "." slug(first_token(First)) ["." slug(Suffix)]
 ```
 
 - `slug()` lowercases, strips punctuation and diacritics, collapses whitespace to `-`.
@@ -363,18 +376,17 @@ filer_id = lower(state) "." slug(Last) "." slug(first_token(First)) ["." slug(Su
   father/son same-name case (Jr/Sr).
 - Empty `StateDst` → state segment `unk`.
 
-**Collision warning (in `parse`):** the same person filing many times per year is
-normal (PTRs + annual + extension all share a `filer_id` — that's the point). The
-signals that one `filer_id` may cover **two different people** are:
+A `name:` key is a **bounded, unverified name-string claim**, not an identity:
+two different people can share one. The middle `fec:` tier was considered and
+**rejected** as scope creep — the ladder is bioguide-or-name, nothing between.
 
-- the same `filer_id` appears with **different districts** within one year, or
-- raw names at the same `filer_id` differ by **suffix** or **last name** after
-  normalization (i.e. the slug collided rather than matched).
-
-`parse` emits each such case as a warning on stderr and records it under
-`identity_warnings` in `parse-manifest.json` (with the colliding raw names and
-DocIDs), so `read --member` users know when a name is ambiguous. True identity
-resolution (bioguide ID join) is a post-v1 enrichment.
+**Identity warning (in `parse`):** the actionable signal is *unmatched* identity.
+`parse` emits one `identity_warnings` entry (and a stderr line) per distinct
+`name:`-keyed `filer_id` — those that matched **no** bioguide — carrying its
+distinct raw names, DocIDs, and districts (`reason: "unmatched_no_bioguide"`), so
+`read --member` users know the match is an unverified name-string claim. A
+`bioguide:`-matched filer is never warned (it is pinned to a real member,
+however many times it filed).
 
 ### 6.3 Bodies
 
@@ -519,6 +531,7 @@ openhouse/
     parse.py         # transformation
     read.py          # query surface (§5)
     index.py         # XML index → filing-metadata records (incl. filer_id)
+    legislators.py   # offline CC0 congress-legislators seat→bioguide join (§6.2)
     pdf.py           # classify (efiled/scanned) + text extraction
     schemas.py       # pydantic models + filing-type code table
     skill/           # post-v1: SKILL.md + reference.md as package data (§8)

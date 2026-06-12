@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from openhouse.index import build_filing_records, compute_filer_id, slug
+from openhouse.index import build_filing_records, compute_name_key, slug
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TRIMMED_XML = FIXTURES / "2024FD-trimmed.xml"
@@ -36,7 +36,7 @@ def test_slug_strips_diacritics():
 
 def test_filer_id_basic_state_last_first():
     assert (
-        compute_filer_id(last="Allen", first="Richard", suffix="", state="GA")
+        compute_name_key(last="Allen", first="Richard", suffix="", state="GA")
         == "ga.allen.richard"
     )
 
@@ -44,29 +44,29 @@ def test_filer_id_basic_state_last_first():
 def test_filer_id_uses_only_first_token_of_first():
     # Middle names / initials are dropped (the main cross-year variation).
     assert (
-        compute_filer_id(last="Adams", first="Alma S.", suffix="", state="NC")
+        compute_name_key(last="Adams", first="Alma S.", suffix="", state="NC")
         == "nc.adams.alma"
     )
     assert (
-        compute_filer_id(last="Adams", first="Alma Shealey", suffix="", state="NC")
+        compute_name_key(last="Adams", first="Alma Shealey", suffix="", state="NC")
         == "nc.adams.alma"
     )
 
 
 def test_filer_id_appends_suffix_only_when_present():
     assert (
-        compute_filer_id(last="Smith", first="John", suffix="Jr.", state="TX")
+        compute_name_key(last="Smith", first="John", suffix="Jr.", state="TX")
         == "tx.smith.john.jr"
     )
     assert (
-        compute_filer_id(last="Smith", first="John", suffix="", state="TX")
+        compute_name_key(last="Smith", first="John", suffix="", state="TX")
         == "tx.smith.john"
     )
 
 
 def test_filer_id_empty_state_is_unk():
     assert (
-        compute_filer_id(last="Doe", first="Maryam.", suffix="", state=None)
+        compute_name_key(last="Doe", first="Maryam.", suffix="", state=None)
         == "unk.doe.maryam"
     )
 
@@ -90,7 +90,9 @@ def test_build_records_maps_all_fields_in_order():
     assert allen.filer.first == "Richard W."
     assert allen.filer.last == "Allen"
     assert allen.filer.suffix is None
-    assert allen.filer_id == "ga.allen.richard"
+    # No legislators index passed → last-resort name: tier, bioguide_id None.
+    assert allen.filer_id == "name:ga.allen.richard"
+    assert allen.bioguide_id is None
     assert allen.state_district.raw == "GA12"
     assert allen.state_district.state == "GA"
     assert allen.state_district.district == 12
@@ -114,7 +116,7 @@ def test_empty_statedst_yields_null_state_district():
     w = records["7940"]
     assert w.state_district is None
     assert w.filing_date is None
-    assert w.filer_id == "unk.doe.maryam"  # empty state → unk segment
+    assert w.filer_id == "name:unk.doe.maryam"  # empty state → unk segment
 
 
 def test_dc_and_pr_districts_are_zero():
@@ -139,7 +141,7 @@ def test_no_docid_member_still_yields_a_record(tmp_path):
     assert len(records) == 1
     assert records[0].doc_id == ""
     assert records[0].source_pdf is None
-    assert records[0].filer_id == "unk.roe.jane"
+    assert records[0].filer_id == "name:unk.roe.jane"
 
 
 def test_unknown_filing_type_preserves_raw_code(tmp_path):

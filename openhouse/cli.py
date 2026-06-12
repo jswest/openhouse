@@ -193,6 +193,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="re-download even if the index is already present (refreshed daily)",
     )
+    pull_p.add_argument(
+        "--no-reference",
+        dest="reference",
+        action="store_false",
+        help=(
+            "skip the one-time CC0 congress-legislators fetch (the offline "
+            "bioguide-identity join in `parse` then falls back to name-only keys)"
+        ),
+    )
 
     parse_p = subparsers.add_parser(
         "parse", help="transform raw artifacts into normalized JSON (offline)"
@@ -292,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
                 user_agent=args.user_agent,
                 force=args.force,
                 types=types,
+                reference=args.reference,
                 fetched_at=fetched_at,
             )
         except pull_mod.PullError as exc:

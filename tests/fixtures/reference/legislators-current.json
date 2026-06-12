@@ -1,0 +1,25 @@
+[
+  {
+    "id": { "bioguide": "A000372", "thomas": "02019" },
+    "name": { "first": "Richard", "last": "Allen", "official_full": "Rick W. Allen" },
+    "terms": [
+      { "type": "rep", "state": "GA", "district": 12, "start": "2015-01-06" },
+      { "type": "rep", "state": "GA", "district": 12, "start": "2023-01-03" }
+    ]
+  },
+  {
+    "id": { "bioguide": "A000370" },
+    "name": { "first": "Alma", "last": "Adams", "official_full": "Alma S. Adams" },
+    "terms": [
+      { "type": "rep", "state": "NC", "district": 12, "start": "2014-11-12" },
+      { "type": "rep", "state": "NC", "district": 12, "start": "2023-01-03" }
+    ]
+  },
+  {
+    "id": { "bioguide": "G000582" },
+    "name": { "first": "Jenniffer", "last": "González-Colón", "official_full": "Jenniffer González-Colón" },
+    "terms": [
+      { "type": "rep", "state": "PR", "district": 0, "start": "2017-01-03" }
+    ]
+  }
+]
