@@ -255,6 +255,11 @@ openhouse parse 2024 --types fd
 - **Validation.** Records validated against the schemas in §6 before write; a
   validation failure marks `parse_status: "error"` with the reason, never a crash that
   loses the year.
+- **Progress.** The per-PDF classification phase — the slow part, thousands of PDFs
+  in one loop — shows a `tqdm` progress bar on stderr per year (`2020 FD/PTR`) with
+  count / total / rate / ETA, so a long-but-healthy run is distinguishable from a
+  hang. Purely cosmetic: never enters a manifest or stdout, and auto-suppressed when
+  stderr is not a TTY (piped/logged).
 - **Flags:** `--types`, `--data-dir`, `--strict` (exit non-zero if any filing errors).
 
 ---
