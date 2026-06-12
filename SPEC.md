@@ -125,9 +125,23 @@ respectively, tentatively); 7-digit prefixed `8`/`9` are paper. Use the prefix t
 
 **Extraction caveats (from real e-filed PDFs):**
 
-- Headings lose their small-cap glyphs (`"S A: A "U " I"` is
-  `Schedule A: Assets and "Unearned" Income`). **Match schedule letters by
-  pattern (`S … <LETTER>:`), never by full heading text.**
+- Headings lose their small-cap glyphs — in **two distinct renderings**
+  (verified across all 2020–2022 e-filed annual FDs; every document is fully
+  one or the other, never mixed):
+  - **letters survive, case-mangled** (dominant through 2020): `ScheDule A:` /
+    `ScHeDule A:` / `SCheDuLe A:` — sequence intact, case unstable.
+  - **glyphs extract as U+0000 NULs** (dominant 2021 onward), one NUL per lost
+    glyph: `Schedule A:` extracts as `S\x00{7} A:`. NUL is not regex `\s`, not
+    removed by `str.strip()`, and invisible in viewers. The NUL form also hits
+    the other small-caps furniture: section titles (`E\x00…` = "Exclusions
+    of …"), the `LOCATION:`/`DESCRIPTION:` labels (`L\x00{7}:` / `D\x00{10}:`),
+    and the `gfedc`/`gfedcb` checkbox glyphs **vanish from the text layer
+    entirely**. Filer-entered content is a regular font and always extracts
+    intact — **NULs appear only in form furniture**, which makes a NUL run a
+    collision-proof anchor.
+
+  **Match schedule letters by pattern (`S … <LETTER>:`), never by full heading
+  text — and accept the NUL-run form (`S\x00+ <LETTER>:`) alongside it.**
 - Naive text mode runs columns together (`12/21/202301/08/2024$1,001 - …`) and
   wraps amount ranges across lines. **Row parsing must be layout-aware**
   (pdfplumber positional words/tables), not line-splitting.

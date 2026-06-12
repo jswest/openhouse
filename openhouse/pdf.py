@@ -354,8 +354,22 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
 #
 # An annual FD is a schedule-by-schedule document (A–J). The extraction segments
 # the body by **schedule letter** — never by full heading text, since the form's
-# small-cap glyphs are lost and render inconsistently (``ScHeDule`` / ``SCheDule``
-# / ``ScheDule``); only the ``S…edule <LETTER>:`` shape is stable (SPEC §2.2).
+# small-cap glyphs are lost and render inconsistently (SPEC §2.2). Two renderings
+# exist in the wild, depending on whether the small-caps font carried a
+# /ToUnicode map when the Clerk generated the PDF:
+#
+# - **letters survive, case-mangled** (dominant through 2020): ``ScheDule`` /
+#   ``ScHeDule`` / ``SCheDuLe`` — the letter sequence is intact, only case varies.
+# - **glyphs lost to NULs** (dominant 2021 on): every small-cap glyph extracts as
+#   U+0000, one NUL per glyph — ``S\x00{7} A: A\x00{5} …`` is ``Schedule A:
+#   Assets …``. NUL is not ``\s``, not stripped by ``str.strip``, and invisible
+#   in most viewers, so any matcher keyed on the letters alone goes blind.
+#
+# The stable structural invariant (verified across 2020–2022): **NULs appear
+# only in the form's own small-caps furniture** — headings, section titles, the
+# ``LOCATION:``/``DESCRIPTION:`` labels — never in filer-entered content, which
+# is set in a regular font. So each matcher below accepts, alongside its
+# letters-survive form, a NUL-run form that *cannot* collide with content.
 # An empty schedule prints the literal ``None disclosed.`` → recorded as **absent**
 # (its letter is simply omitted from the body). A–D are column-parsed; E–J ship as
 # raw_text-only line items; every line item carries verbatim ``raw_text``.
@@ -363,16 +377,24 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
 
 # A schedule heading: ``S…edule <LETTER>:`` with the small-cap glyphs lost. The
 # letter is captured (upper- or lower-case both occur) and the rest of the
-# heading text is deliberately ignored. Anchored at line start.
-_FD_HEADING_RE = re.compile(r"^Sc?h?e?d?ule\s+([A-Ja-j]):", re.IGNORECASE)
+# heading text is deliberately ignored. Anchored at line start. The ``\x00+``
+# branch is the glyphs-lost rendering (``S\x00\x00\x00\x00\x00\x00\x00 A:``);
+# requiring the NUL run keeps it collision-proof — content lines never carry
+# NULs, and the small-caps appendix titles that do start ``S\x00`` (``Schedules
+# A and B Asset Class Details``) carry no ``<LETTER>:`` so they never match.
+_FD_HEADING_RE = re.compile(r"^S(?:c?h?e?d?ule|\x00+)\s+([A-Ja-j]):", re.IGNORECASE)
 
 # The literal an empty schedule renders → schedule absent (SPEC §2.2).
 _NONE_DISCLOSED_RE = re.compile(r"^None disclosed\.?\s*$", re.IGNORECASE)
 
-# The trailing non-schedule sections that follow Schedule J (exclusions checkboxes
-# + the certification/signature block). They end the last schedule's content.
+# The trailing non-schedule sections that follow the last schedule (exclusions
+# checkboxes + the certification/signature block). They end the last schedule's
+# content. The ``[EC]\x00`` branch is the glyphs-lost rendering of the same two
+# section titles (``E\x00…`` = "Exclusions of Spouse, Dependent, or Trust
+# Information", ``C\x00…`` = "Certification and Signature" / the "Comments"
+# header between them) — safe because content lines never carry NULs.
 _FD_TRAILER_RE = re.compile(
-    r"^(exclusions of|certification and|digitally signed)", re.IGNORECASE
+    r"^(exclusions of|certification and|digitally signed|[EC]\x00)", re.IGNORECASE
 )
 
 # An A/B row's trailing "tx. over $1,000?" checkbox glyph (gfedc unchecked /
@@ -399,8 +421,13 @@ _FD_FURNITURE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Detail lines that belong to (not start) an A item.
-_FD_DETAIL_RE = re.compile(r"^(LOCATION:|DESCRIPTION:)")
+# Detail lines that belong to (not start) an A item. The labels are small-caps
+# form furniture, so the glyphs-lost rendering turns them into ``L\x00{7}:`` /
+# ``D\x00{10}:`` — matched by the NUL branches (the *values* after the colon are
+# filer content in a regular font and always survive intact).
+_FD_LOCATION_LABEL = r"L(?:OCATION|\x00+):"
+_FD_DESCRIPTION_LABEL = r"D(?:ESCRIPTION|\x00+):"
+_FD_DETAIL_RE = re.compile(rf"^({_FD_LOCATION_LABEL}|{_FD_DESCRIPTION_LABEL})")
 
 
 def _fd_amount_range(text: str) -> AmountRange | None:
@@ -582,25 +609,54 @@ def _schedule_a_amounts(
     return value, income_type, income
 
 
-def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
-    """Schedule A (assets & "unearned" income) → structured items + raw_text."""
+# A glyphs-lost A-row's value-column signature: right after the ``[TYPE]`` tag
+# (and the optional owner token) the value column begins — a ``$lo -`` range
+# start (the dash is load-bearing) or the literal ``None``/``Undetermined``.
+# A wrapped subholding tail (``Cash [BA] $5,000,000`` — the row's wrapped value
+# *high* bound) carries a bare amount with **no dash**, so it does not match and
+# stays a continuation, exactly as the glyph anchor would have treated it.
+_FD_A_ROW_AFTER_TYPE_RE = re.compile(
+    r"\]\s*(?:SP|DC|JT)?\s*(?:\$[\d,]+\s*-|None\b|Undetermined\b)"
+)
+
+
+def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAItem]:
+    """Schedule A (assets & "unearned" income) → structured items + raw_text.
+
+    ``glyphless`` marks the glyphs-lost rendering (SPEC §2.2 NUL form), in which
+    the trailing tx-over-$1,000 checkbox glyph (``gfedc``/``gfedcb``) is not in
+    the text layer at all — so the intact-form row anchor (``[TYPE]`` + glyph)
+    can never fire and every row would merge into one salvaged blob. For those
+    documents only, a row anchors on its own column signature instead; intact
+    documents keep the proven glyph anchor byte-for-byte.
+    """
 
     def starts(s: str) -> bool:
         # An asset row carries a [TYPE] tag and ends in the tx-over-$1,000 glyph;
         # LOCATION:/DESCRIPTION: detail and bare amount-wrap lines do not.
-        return bool(
-            _FD_TYPE_TAG_RE.search(s)
-            and _FD_GLYPH_RE.search(s)
-            and not _FD_DETAIL_RE.match(s)
-        )
+        if _FD_DETAIL_RE.match(s):
+            return False
+        if _FD_TYPE_TAG_RE.search(s) and _FD_GLYPH_RE.search(s):
+            return True
+        if not glyphless:
+            return False
+        # Glyphs-lost rendering: anchor on the row's column signature — the
+        # [TYPE] tag followed by the value column ($lo - / None / Undetermined),
+        # or a subholding row (owner arrow ⇒) whose [TYPE]-tagged subholding
+        # name wrapped onto the next line.
+        if _FD_TYPE_TAG_RE.search(s):
+            return bool(_FD_A_ROW_AFTER_TYPE_RE.search(s))
+        return "⇒" in s
 
     items: list[ScheduleAItem] = []
     for raw in _group_items(lines, starts_item=starts):
         location = description = None
-        loc_m = re.search(r"LOCATION:\s*(.*?)(?:\s+DESCRIPTION:|$)", raw)
+        loc_m = re.search(
+            rf"{_FD_LOCATION_LABEL}\s*(.*?)(?:\s+{_FD_DESCRIPTION_LABEL}|$)", raw
+        )
         if loc_m:
             location = loc_m.group(1).strip() or None
-        desc_m = re.search(r"DESCRIPTION:\s*(.*)$", raw)
+        desc_m = re.search(rf"{_FD_DESCRIPTION_LABEL}\s*(.*)$", raw)
         if desc_m:
             description = desc_m.group(1).strip() or None
         # The asset name is everything up to the [TYPE] tag.
@@ -773,8 +829,9 @@ def _parse_raw_schedule(lines: list[str]) -> list[RawLineItem]:
     ]
 
 
+# Schedule A dispatches separately in :func:`extract_fd_schedules` because it
+# threads the document-level ``glyphless`` flag (the NUL-rendering row anchor).
 _FD_STRUCTURED = {
-    "A": _parse_schedule_a,
     "B": _parse_schedule_b,
     "C": _parse_schedule_c,
     "D": _parse_schedule_d,
@@ -809,12 +866,22 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
             "(likely an extension/cover sheet)"
         )
 
+    # The glyphs-lost rendering (SPEC §2.2): small-caps furniture extracted as
+    # NUL runs. NULs never occur in an intact-rendering body, so this flag is a
+    # precise document-level marker — intact documents take exactly the same
+    # code paths as before.
+    glyphless = any("\x00" in ln for ln in lines)
+
     segments = _segment_schedules(lines)
     schedules: dict[str, list] = {}
     for letter in sorted(segments):
         content = segments[letter]
-        parser = _FD_STRUCTURED.get(letter)
-        items = parser(content) if parser else _parse_raw_schedule(content)
+        if letter == "A":
+            items = _parse_schedule_a(content, glyphless=glyphless)
+        elif parser := _FD_STRUCTURED.get(letter):
+            items = parser(content)
+        else:
+            items = _parse_raw_schedule(content)
         # An item-less segment (parser found no rows it could anchor) still carries
         # its lines as raw_text rather than vanishing — never silently drop.
         if not items:
