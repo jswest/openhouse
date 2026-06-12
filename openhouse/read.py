@@ -272,9 +272,11 @@ def _ci_contains(haystack: Optional[str], needle: str) -> bool:
 def _member_matches(filing: dict, needle: str) -> bool:
     """``--member`` match: case-insensitive substring over ``filer_id`` + raw names.
 
-    This is **name-string matching, not true identity** (SPEC §6.2): it tests the
-    normalized ``filer_id`` and every raw name part (prefix/first/last/suffix), so
-    a substring of either the slug or the printed name hits.
+    Tests the ``filer_id`` (the two-tier identity key — ``bioguide:<id>`` or
+    ``name:<slug>``, #16) and every raw name part (prefix/first/last/suffix), so a
+    substring of the key (incl. a ``bioguide`` id) or the printed name hits. A
+    ``name:``-keyed hit is **name-string matching, not verified identity** (SPEC
+    §6.2); a ``bioguide:`` hit is the pinned member.
     """
     if _ci_contains(filing.get("filer_id"), needle):
         return True

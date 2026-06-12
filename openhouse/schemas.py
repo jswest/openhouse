@@ -29,8 +29,10 @@ from pydantic import BaseModel, Field
 # migrate (CLAUDE.md): bump this, delete old code, re-run ``parse`` from ``raw/``.
 # Read by ``parse`` (#6), the per-PDF pass (#7), and the release tool. Generation
 # 3 adds PTR body extraction (§6.3 transactions[]); generation 4 adds e-filed FD
-# schedule bodies (§6.3 schedules A–D structured, E–J raw_text-only).
-SCHEMA_VERSION = 4
+# schedule bodies (§6.3 schedules A–D structured, E–J raw_text-only); generation 5
+# adds the CC0 ``congress-legislators`` identity join (#16): a ``bioguide_id`` and
+# a two-tier ``filer_id`` ladder (``bioguide:<id>`` / ``name:<slug>``).
+SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
@@ -111,7 +113,19 @@ class FilingMetadata(BaseModel):
     year: int = Field(..., description="Coverage year — never derived from filing_date")
     filer: Filer
     filer_id: str = Field(
-        ..., description="Normalized identity key (SPEC §6.2); not a true member ID"
+        ...,
+        description=(
+            "Identity key, two-tier ladder (#16): ``bioguide:<id>`` when the filer "
+            "matched a CC0 congress-legislators House seat, else the last-resort "
+            "``name:<normalized-slug>`` name key (a bounded, unverified claim)"
+        ),
+    )
+    bioguide_id: Optional[str] = Field(
+        None,
+        description=(
+            "The matched congress-legislators bioguide id, or ``None`` when the "
+            "filer matched no House-seat record (then filer_id is the ``name:`` key)"
+        ),
     )
     state_district: Optional[StateDistrict] = None
     filing_type: FilingTypeInfo
