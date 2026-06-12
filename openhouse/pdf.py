@@ -1200,18 +1200,43 @@ _FD_DATE_RE = re.compile(
 )
 
 
+# A bare-year ``Date incurred`` (``2019``) — filers enter these alongside the
+# fuller ``Month YYYY``/``MM/YYYY`` forms (GH-0070). The century prefix plus the
+# word boundaries keep it from matching inside a formatted amount (the comma
+# grouping breaks any 4-digit run) or a longer number.
+_FD_D_BARE_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
+# The amount column's *range start* (``$lo -`` or ``Over``) — the corroborating
+# signal a bare-year D anchor requires (below). The dash is load-bearing: a
+# wrapped continuation line can carry a bare year AND the row's wrapped high
+# bound (``Established 1999 Branch $500,000``), but only a real row carries the
+# range's own ``$lo -`` opening.
+_FD_RANGE_START_RE = re.compile(r"\$[\d,]+\s*-|Over\b")
+
+
 def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
     """Schedule D (liabilities) → structured items + raw_text.
 
     Columns are ``Owner | Creditor | Date incurred | Type | Amount``. The amount
     range wraps onto the next line, so item-start anchors on the row bearing a
-    month/year ``Date incurred`` and folds the wrapped amount in.
+    ``Date incurred`` and folds the wrapped amount in. A bare-year date
+    (``… Loan 2019 Personal Loan $15,001 - …`` — GH-0070) anchors only when the
+    line also carries the amount column's *range start*: a year alone (or a
+    year next to a wrapped bare high bound) can sit on a continuation line, but
+    only a real row opens its own range.
     """
+
+    def starts(s: str) -> bool:
+        if _FD_DATE_RE.search(s):
+            return True
+        return bool(_FD_D_BARE_YEAR_RE.search(s) and _FD_RANGE_START_RE.search(s))
+
     items: list[ScheduleDItem] = []
-    for raw in _group_items(lines, starts_item=lambda s: bool(_FD_DATE_RE.search(s))):
+    for raw in _group_items(lines, starts_item=starts):
         owner_m = re.match(r"(SP|DC|JT)\b", raw)
         owner = owner_m.group(1) if owner_m else None
-        date_m = _FD_DATE_RE.search(raw)
+        # The fuller date forms win; a bare year is the fallback (and is what
+        # anchored the row when no fuller form is present).
+        date_m = _FD_DATE_RE.search(raw) or _FD_D_BARE_YEAR_RE.search(raw)
         date_incurred = date_m.group(1) if date_m else None
         # Creditor = text between any owner token and the date.
         start = owner_m.end() if owner_m else 0
@@ -1259,7 +1284,10 @@ _FD_LEADING_DATE_RE = re.compile(
     r"^\s*("
     r"(?:January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+\d{4}"
-    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b",
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4}"
+    # A bare-year agreement date (``2014 GENERAL MOTORS LLC …`` — GH-0070);
+    # last so the fuller forms win at the same position.
+    r"|(?:19|20)\d{2})\b",
     re.IGNORECASE,
 )
 

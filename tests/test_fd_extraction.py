@@ -930,3 +930,73 @@ def test_subholding_b_rows_still_anchor_on_arrow():
     # must parse.
     assert len(b) == 165
     assert all(i["transaction_date"] for i in b)
+
+
+# --- GH-0070: bare-year Date anchors for Schedules D and F ---------------------
+
+
+def test_schedule_d_bare_year_date_anchors_and_extracts(monkeypatch):
+    # Real line shapes from filing 10035546: two rows with Month-YYYY dates
+    # (amount wrapped) and two with BARE-YEAR dates. The bare-year rows never
+    # anchored before GH-0070 and merged into the preceding liability.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            "liability",
+            "FedLoan servicing July 2009 College loans $50,001 -",
+            "$100,000",
+            "City Employees Credit Union Loan 2019 Personal Loan $15,001 - $50,000",
+            "City Employees Credit Union LoC 2018 Line of Credit $15,001 - $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 3
+    assert d[0]["date_incurred"] == "July 2009"
+    assert d[0]["amount_range"]["label"] == "$50,001 - $100,000"
+    assert d[1]["creditor"] == "City Employees Credit Union Loan"
+    assert d[1]["date_incurred"] == "2019"
+    assert d[1]["liability_type"] == "Personal Loan"
+    assert d[2]["date_incurred"] == "2018"
+    assert d[2]["amount_range"]["label"] == "$15,001 - $50,000"
+
+
+def test_schedule_d_bare_year_alone_does_not_anchor(monkeypatch):
+    # A bare year WITHOUT the amount column on the same line is no anchor —
+    # it could be a wrapped creditor-name fragment. The line folds into the
+    # preceding row rather than splitting it.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            "Wells Fargo Home Mortgage June 2018 Mortgage on residence $250,001 -",
+            "Established 1999 Branch $500,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 1
+    assert d[0]["date_incurred"] == "June 2018"
+    assert "Established 1999" in d[0]["raw_text"]
+
+
+def test_schedule_f_bare_year_leading_date(monkeypatch):
+    # Real line shape from filing 10039877: the agreement Date column is a
+    # bare year. Before GH-0070 no row anchored and date stayed None.
+    page = "\n".join(
+        [
+            "ScheDule f: agreementS",
+            "Date Parties to terms of agreement",
+            "2014 GENERAL MOTORS LLC Continued participation in qualified",
+            "retirement plan.",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    f = extract_fd_schedules(Path("synthetic.pdf")).schedules["F"]
+    assert len(f) == 1
+    assert f[0]["date"] == "2014"
+    assert "retirement plan." in f[0]["raw_text"]
