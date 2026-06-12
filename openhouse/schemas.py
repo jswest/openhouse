@@ -266,6 +266,11 @@ class ScheduleAItem(BaseModel):
     value_of_asset: Optional[AmountRange] = None
     income_type: Optional[str] = None
     income_amount: Optional[AmountRange] = None
+    # The Candidate/New-Filer form variant's third income column, "income
+    # preceding year" (GH-0070); the member annual form has no such column, so
+    # this is None there — None means "column not on this form / not parsed",
+    # never a zero.
+    income_preceding: Optional[AmountRange] = None
     location: Optional[str] = None
     description: Optional[str] = None
     raw_text: str

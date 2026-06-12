@@ -658,6 +658,10 @@ _FD_FURNITURE_RE = re.compile(
 _FD_LOCATION_LABEL = r"L(?:OCATION|\x00+):"
 _FD_DESCRIPTION_LABEL = r"D(?:ESCRIPTION|\x00+):"
 _FD_DETAIL_RE = re.compile(rf"^({_FD_LOCATION_LABEL}|{_FD_DESCRIPTION_LABEL})")
+# The same two labels matched mid-string — where a row's detail lines have
+# already been folded into its assembled raw blob and mark the end of the
+# row's *columns* (everything after them is detail text, not column data).
+_FD_DETAIL_ANYWHERE_RE = re.compile(rf"{_FD_LOCATION_LABEL}|{_FD_DESCRIPTION_LABEL}")
 
 
 def _fd_amount_range(text: str) -> AmountRange | None:
@@ -805,9 +809,6 @@ def _group_items(lines: list[str], *, starts_item) -> list[str]:
 # complete ``$lo - $hi`` bucket: the latter's dash is followed by whitespace then
 # ``$``, never a word, so it must not be mistaken for a dangling low.
 _FD_DANGLING_LOW_RE = re.compile(r"\$([\d,]+)\s+-\s+(?=[A-Za-z])")
-# A standalone amount at the very end of the (de-wrapped) row — the wrapped high
-# bound when the value range was split by the income column.
-_FD_TRAILING_AMOUNT_RE = re.compile(r"\$([\d,]+)\s*$")
 
 
 def _income_type_between(raw: str, start: int, end: int) -> str | None:
@@ -828,96 +829,184 @@ def _income_type_between(raw: str, start: int, end: int) -> str | None:
     return cleaned or None
 
 
+# An open-ended ``Over $X`` value — a real column entry that cannot be
+# represented as a ``{low, high}`` bucket. It occupies its column *slot* (so the
+# buckets after it are not mis-assigned one column left) but parses to ``None``;
+# the verbatim ``raw_text`` keeps the wording.
+_FD_A_OVER_RE = re.compile(r"Over\s+\$[\d,]+")
+# Any bare money token — the candidate pool for wrapped high bounds, filtered in
+# ``_fd_amount_entries`` down to tokens claimed by no bucket/Over/dangling span.
+_FD_BARE_AMOUNT_RE = re.compile(r"\$[\d,]+")
+
+
+def _fd_amount_entries(
+    cols: str, start: int = 0
+) -> list[tuple[int, int, AmountRange | None]]:
+    """The row's column-amount *entries*, in column order: ``(start, end, range)``.
+
+    An entry is anything that occupies an amount column in the de-wrapped row
+    text (SPEC §2.2 wraps put every wrapped piece back on one line, in column
+    order, because pdfplumber emits left-to-right):
+
+    - a complete ``$lo - $hi`` bucket → its parsed range;
+    - an open-ended ``Over $X`` → ``None`` (unrepresentable as a bucket, but it
+      holds its column slot);
+    - a **dangling low** (``$lo -`` with a word right after — the high bound
+      wrapped off the column) → resolved by pairing, in order, with the row's
+      **bare** money tokens (a ``$N`` that is part of no bucket/dangling/``Over``
+      and is not a cents-bearing exact value): each wrapped high lands as a bare
+      token after its dangling low, in the same column order. The pairing is
+      attempted only when the counts match exactly — any surplus or deficit
+      (say, a dollar figure inside an asset name) makes the wrap ambiguous, and
+      every dangling resolves to ``None`` instead (degrade, never fabricate —
+      #12). An unresolved dangling still holds its column slot.
+    """
+    buckets = list(_FD_AMOUNT_RE.finditer(cols, start))
+    spans = [m.span() for m in buckets]
+
+    def unclaimed(m: re.Match) -> bool:
+        # No overlap with any span already claimed by an earlier entry kind
+        # (reads ``spans`` at call time, so each ``spans +=`` below narrows it).
+        return not any(b0 < m.end() and m.start() < b1 for b0, b1 in spans)
+
+    overs = [m for m in _FD_A_OVER_RE.finditer(cols, start) if unclaimed(m)]
+    spans += [m.span() for m in overs]
+    danglings = [m for m in _FD_DANGLING_LOW_RE.finditer(cols, start) if unclaimed(m)]
+    spans += [m.span() for m in danglings]
+    bares = [
+        m
+        for m in _FD_BARE_AMOUNT_RE.finditer(cols, start)
+        if unclaimed(m)
+        and not cols[m.end() :].lstrip().startswith("-")  # a range's own low
+        and not cols[m.end() :].startswith(".")  # an exact value's dollars
+    ]
+
+    entries: list[tuple[int, int, AmountRange | None]] = [
+        (m.start(), m.end(), _bucket(m.group(0))) for m in buckets
+    ]
+    entries += [(m.start(), m.end(), None) for m in overs]
+    if danglings and len(danglings) == len(bares):
+        entries += [
+            (d.start(), d.end(), _parse_amount_range(f"${d.group(1)} - {b.group(0)}"))
+            for d, b in zip(danglings, bares)
+        ]
+    else:
+        entries += [(d.start(), d.end(), None) for d in danglings]
+    return sorted(entries)
+
+
 def _schedule_a_amounts(
     raw: str,
-) -> tuple[AmountRange | None, str | None, AmountRange | None]:
-    """Untangle Schedule A's ``value_of_asset``, ``income_type``, ``income_amount``.
+) -> tuple[AmountRange | None, str | None, AmountRange | None, AmountRange | None]:
+    """Untangle Schedule A's ``value_of_asset``, ``income_type``, ``income_amount``,
+    and (Candidate/New-Filer forms only) ``income_preceding``.
 
-    Normal case: the two complete ``$lo - $hi`` buckets in order, with the income
-    *type* word(s) (``Rent``/``Dividends``/…) sitting between them. Interleave case
-    (SPEC §2.2): the value range's low bound is dangling (``$100,001 -`` with the
-    income column right after) and its high bound wrapped to the row's end
-    (``… gfedc $250,000``); we pair them, and the income type sits between the
-    dangling ``-`` and the income bucket. A failure to untangle leaves the field
-    ``None`` — the verbatim ``raw_text`` still carries the row in full.
+    The row's amount columns print in a fixed order — value, income current
+    year, and (C/H forms only — GH-0070) income preceding year — so the parse is
+    positional over the row's :func:`_fd_amount_entries`: first entry → value,
+    second → income, third → preceding. The member form never prints three
+    amount columns, so a third entry only ever means a C/H row. Two twists:
+
+    - **None-value rows**: a value column opening with the literal ``None``/
+      ``Undetermined`` (``_FD_A_NONE_VALUE_RE``) holds the value slot, shifting
+      every amount entry one column right — assigning the first bucket to value
+      would fabricate one.
+    - **Column wraps** (SPEC §2.2): a wrapped high bound leaves a dangling low;
+      :func:`_fd_amount_entries` re-pairs them (or degrades that entry to
+      ``None``) while preserving the column order.
+
+    The income *type* word(s) (``Rent``/``Dividends``/…) sit between the value
+    and income columns. Only the text before the first folded ``LOCATION:``/
+    ``DESCRIPTION:`` label is column data — a wrapped high bound can sit right
+    before a detail label, and detail text must never be read as columns. A
+    field that cannot be untangled is ``None`` — the verbatim ``raw_text``
+    still carries the row in full.
     """
-    dangling = _FD_DANGLING_LOW_RE.search(raw)
-    if dangling:
-        # Interleave case: the value low bound dangled. Its high bound is the
-        # trailing wrapped amount if one materialized — otherwise the wrap is
-        # unresolved and value stays None rather than mis-assigning the income
-        # bucket to it (#12's "degrade to None rather than a wrong value"). The
-        # income range and its type come from the first complete bucket after the
-        # dangling ``-``, with the gap before that bucket holding the type word.
-        trailing = _FD_TRAILING_AMOUNT_RE.search(raw)
-        value = (
-            _parse_amount_range(f"${dangling.group(1)} - ${trailing.group(1)}")
-            if trailing
-            else None
-        )
-        income_match = _FD_AMOUNT_RE.search(raw, dangling.end())
-        if income_match:
-            income = _bucket(income_match.group(0))
-            income_type = _income_type_between(
-                raw, dangling.end(), income_match.start()
-            )
-            return value, income_type, income
-        if value is not None:
-            return value, None, None
-        # value None and no bucket after the dangling — fall through to the
-        # generic two-bucket scan over the whole row (unchanged from #12).
-    matches = list(_FD_AMOUNT_RE.finditer(raw))
-    value = _bucket(matches[0].group(0)) if matches else None
-    income = _bucket(matches[1].group(0)) if len(matches) > 1 else None
+    columns_end = _FD_DETAIL_ANYWHERE_RE.search(raw)
+    cols = raw[: columns_end.start()] if columns_end else raw
+
+    none_value = _FD_A_NONE_VALUE_RE.search(cols)
+    entries: list[tuple[int, int, AmountRange | None]]
+    if none_value:
+        # The literal None occupies the value slot; amounts shift right.
+        entries = [(none_value.start(), none_value.end(), None)]
+        entries += _fd_amount_entries(cols, none_value.end())
+    else:
+        entries = _fd_amount_entries(cols)
+
+    value = entries[0][2] if entries else None
+    income = entries[1][2] if len(entries) > 1 else None
+    preceding = entries[2][2] if len(entries) > 2 else None
     income_type = (
-        _income_type_between(raw, matches[0].end(), matches[1].start())
-        if len(matches) > 1
+        _income_type_between(cols, entries[0][1], entries[1][0])
+        if len(entries) > 1
         else None
     )
-    return value, income_type, income
+    return value, income_type, income, preceding
 
 
-# A glyphs-lost A-row's value-column signature: right after the ``[TYPE]`` tag
-# (and the optional owner token) the value column begins — a ``$lo -`` range
-# start (the dash is load-bearing), the open-ended ``Over $X`` bucket, an exact
-# dollar value (``$96,550.00`` — note the required ``.dd`` cents), or the literal
+# An A-row's value-column signature: right after the ``[TYPE]`` tag (and the
+# optional owner token) the value column begins — a ``$lo -`` range start (the
+# dash is load-bearing), the open-ended ``Over $X`` bucket, an exact dollar
+# value (``$96,550.00`` — note the required ``.dd`` cents), or the literal
 # ``None``/``Undetermined``.
 # A wrapped subholding tail (``Cash [BA] $5,000,000`` — the row's wrapped value
 # *high* bound) carries a bare amount with **no dash, no cents, no ``Over``**, so
 # it does not match and stays a continuation, exactly as the glyph anchor would
 # have treated it (verified collision-free against continuation lines).
+#
+# Until GH-0070 this signature anchored only glyphs-lost (NUL) documents, with
+# intact documents gated on the trailing checkbox glyph. That gate was the bug:
+# Candidate/New-Filer report forms have **no checkbox column at all** (no glyph
+# in any rendering), and even on the member form a row whose ``[TYPE]``-tagged
+# name wraps off the glyph-bearing line never carries tag+glyph together. The
+# signature anchors in **every** rendering now; the glyph remains an additional
+# anchor signal, never a gate.
 _FD_A_ROW_AFTER_TYPE_RE = re.compile(
     r"\]\s*(?:SP|DC|JT)?\s*(?:\$[\d,]+\s*-|Over\b|\$[\d,]+\.\d{2}|None\b|Undetermined\b)"
 )
 
+# A value column that *opens* with the literal ``None``/``Undetermined`` —
+# immediately after the ``[TYPE]`` tag or the subholding arrow (plus the
+# optional owner token). On such a row every ``$lo - $hi`` bucket belongs to
+# the **income** columns, not the value column; assigning the first bucket to
+# ``value_of_asset`` (the positional default) would fabricate a value the
+# filer explicitly declared None. The ``]``/``⇒`` anchor is what keeps this
+# sound: a ``None`` in the *income* columns sits after the value bucket, never
+# in this position.
+_FD_A_NONE_VALUE_RE = re.compile(r"[\]⇒]\s*(?:SP|DC|JT)?\s*(?:None|Undetermined)\b")
 
-def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAItem]:
+
+def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
     """Schedule A (assets & "unearned" income) → structured items + raw_text.
 
-    ``glyphless`` marks the glyphs-lost rendering (SPEC §2.2 NUL form), in which
-    the trailing tx-over-$1,000 checkbox glyph (``gfedc``/``gfedcb``) is not in
-    the text layer at all — so the intact-form row anchor (``[TYPE]`` + glyph)
-    can never fire and every row would merge into one salvaged blob. For those
-    documents only, a row anchors on its own column signature instead; intact
-    documents keep the proven glyph anchor byte-for-byte.
+    A row anchors on any of three rendering-independent signals (GH-0070): the
+    ``[TYPE]`` tag + trailing tx-over-$1,000 checkbox glyph (member forms, intact
+    rendering), the ``[TYPE]`` tag + value-column signature (all renderings —
+    the only anchor available on Candidate/New-Filer forms, which have no
+    checkbox column, and on glyphs-lost NUL documents, which lose the glyph),
+    or the subholding owner arrow ``⇒`` (the row's ``[TYPE]``-tagged name often
+    wraps onto the next line, leaving only the arrow on the anchor line). A
+    fourth, narrow signal — a dangling value low bound on a tag-less line —
+    catches the C/H row whose ``[TYPE]`` wrapped off the line entirely.
     """
 
     def starts(s: str) -> bool:
-        # An asset row carries a [TYPE] tag and ends in the tx-over-$1,000 glyph;
-        # LOCATION:/DESCRIPTION: detail and bare amount-wrap lines do not.
+        # LOCATION:/DESCRIPTION: detail and bare amount-wrap lines never start
+        # a row; everything else is judged by the column signatures above.
         if _FD_DETAIL_RE.match(s):
             return False
-        if _FD_TYPE_TAG_RE.search(s) and _FD_GLYPH_RE.search(s):
-            return True
-        if not glyphless:
-            return False
-        # Glyphs-lost rendering: anchor on the row's column signature — the
-        # [TYPE] tag followed by the value column ($lo - / None / Undetermined),
-        # or a subholding row (owner arrow ⇒) whose [TYPE]-tagged subholding
-        # name wrapped onto the next line.
         if _FD_TYPE_TAG_RE.search(s):
-            return bool(_FD_A_ROW_AFTER_TYPE_RE.search(s))
-        return "⇒" in s
+            return bool(_FD_GLYPH_RE.search(s) or _FD_A_ROW_AFTER_TYPE_RE.search(s))
+        if "⇒" in s:
+            return True
+        # Tag-less line carrying a dangling value low bound (``Hackett &
+        # Associates, PC …, 100% $250,001 - None``): the asset name ran long
+        # enough to push the [TYPE] tag onto the next line, so the value
+        # column's range start is the only anchor signal left. Wrap
+        # continuation lines carry bare amounts or name text — never a
+        # ``$lo - <word>`` dangling start — so this cannot split a row.
+        return bool(_FD_DANGLING_LOW_RE.search(s))
 
     items: list[ScheduleAItem] = []
     for raw in _group_items(lines, starts_item=starts):
@@ -936,13 +1025,11 @@ def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAIte
         asset = _scrub_field(raw[: type_m.start()].strip() if type_m else raw.strip())
         owner_m = _FD_OWNER_AFTER_TYPE_RE.search(raw)
         owner = owner_m.group(1) if owner_m else None
-        # The first amount bucket is the asset value; a second (if any) is income.
-        # SPEC §2.2: a value range's high bound can wrap to the line *end*, with
-        # the income column interleaved between low and high (``$100,001 -
-        # Interest $201 - $1,000 gfedc $250,000``). _schedule_a_amounts untangles
-        # that common interleave; otherwise the two complete buckets are taken in
-        # order. raw_text always carries the verbatim row regardless.
-        value_of_asset, income_type, income_amount = _schedule_a_amounts(raw)
+        # Column amounts are positional — see _schedule_a_amounts for the
+        # None-value shift and the SPEC §2.2 wrap repair.
+        value_of_asset, income_type, income_amount, income_preceding = (
+            _schedule_a_amounts(raw)
+        )
         income_type = _scrub_field(income_type)
         items.append(
             ScheduleAItem(
@@ -952,6 +1039,7 @@ def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAIte
                 value_of_asset=value_of_asset,
                 income_type=income_type,
                 income_amount=income_amount,
+                income_preceding=income_preceding,
                 location=location,
                 description=description,
                 raw_text=_scrub_raw_text(raw),
@@ -1256,13 +1344,12 @@ def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
     return items
 
 
-# Schedule A dispatches separately in :func:`extract_fd_schedules` because it
-# threads the document-level ``glyphless`` flag (the NUL-rendering row anchor).
 # H (travel) and J (new-filer comp) have no entry: their columns merge with no
 # stable delimiter and no committed fixture has a filled form to anchor a split,
 # so they fall through to ``_salvage_raw`` — one raw_text-only item per row, all
 # structured columns ``None``. Adding a column parser later is a one-line entry.
 _FD_STRUCTURED = {
+    "A": _parse_schedule_a,
     "B": _parse_schedule_b,
     "C": _parse_schedule_c,
     "D": _parse_schedule_d,
@@ -1344,19 +1431,11 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
             "(likely an extension/cover sheet)"
         )
 
-    # The glyphs-lost rendering (SPEC §2.2): small-caps furniture extracted as
-    # NUL runs. NULs never occur in an intact-rendering body, so this flag is a
-    # precise document-level marker — intact documents take exactly the same
-    # code paths as before.
-    glyphless = any("\x00" in ln for ln in lines)
-
     segments = _segment_schedules(lines)
     schedules: dict[str, list] = {}
     for letter in sorted(segments):
         content = segments[letter]
-        if letter == "A":
-            items = _parse_schedule_a(content, glyphless=glyphless)
-        elif parser := _FD_STRUCTURED.get(letter):
+        if parser := _FD_STRUCTURED.get(letter):
             items = parser(content)
         else:
             items = []

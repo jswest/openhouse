@@ -803,3 +803,88 @@ def test_parse_annual_fd_with_lost_headings_is_extract_failed(tmp_path, monkeypa
     assert records[0].pdf_class is None
     assert not (parsed_dir / "fd" / "10042852.json").exists()
     assert [u["reason"] for u in unparsed] == ["extract_failed"]
+
+
+# --- GH-0070: rendering-independent Schedule A row anchors ---------------------
+#
+# Two real fixtures cover the two intact-rendering failure modes the
+# glyph-gated anchor had (ground truth in tests/fixtures/pdf/README.md):
+# the Candidate-form variant with NO checkbox column (no glyph anywhere), and
+# a member form whose every row is a subholding with the [TYPE]-tagged name
+# wrapped off the glyph-bearing line. Before GH-0070 both collapsed into a
+# single merged Schedule A item with parse_status "ok".
+
+HACKETT_CANDIDATE = PDF_FIXTURES / "efiled_fd_candidate_10035478.pdf"
+WELCH_SUBWRAP = PDF_FIXTURES / "efiled_fd_subwrap_10039965.pdf"
+
+
+def test_candidate_form_schedule_a_anchors_without_glyph():
+    a = extract_fd_schedules(HACKETT_CANDIDATE).schedules["A"]
+    # 20 asset rows (counted by hand from the PDF text: 2 direct [BA] accounts,
+    # 12 retirement-plan subholdings, the [OL] S-corp, the [IP] royalties row,
+    # 3 John Hancock subholdings, 1 Trust subholding). Pre-GH-0070: 1.
+    assert len(a) == 20
+    assert all(item["raw_text"] for item in a)
+    # The C-form prints THREE amount columns (value, income current year,
+    # income preceding year) — the third lands in income_preceding.
+    first = a[0]
+    assert first["asset"] == "1st Source Bank Portfolio Account"
+    assert first["asset_type"] == "BA"
+    assert first["value_of_asset"]["label"] == "$1,001 - $15,000"
+    assert first["income_type"] == "Interest"
+    assert first["income_amount"]["label"] == "$1 - $200"
+    assert first["income_preceding"]["label"] == "$1 - $200"
+
+
+def test_candidate_form_none_value_row_shifts_columns():
+    a = extract_fd_schedules(HACKETT_CANDIDATE).schedules["A"]
+    # "Harpercollins … [IP] None Royalties $1 - $200 $201 - $1,000": the value
+    # column is the literal None, so the buckets are the two income columns —
+    # assigning the first to value would fabricate an asset value.
+    royalties = next(i for i in a if i["asset"].startswith("Harpercollins"))
+    assert royalties["value_of_asset"] is None
+    assert royalties["income_type"] == "Royalties"
+    assert royalties["income_amount"]["label"] == "$1 - $200"
+    assert royalties["income_preceding"]["label"] == "$201 - $1,000"
+    assert royalties["description"] == "Royalties from theological book"
+
+
+def test_candidate_form_tagless_dangling_row_anchors():
+    a = extract_fd_schedules(HACKETT_CANDIDATE).schedules["A"]
+    # "Hackett & Associates, PC (S corporation), 100% $250,001 - None" — the
+    # [TYPE] tag wrapped off the anchor line entirely; the dangling value low
+    # is the only signal left, and its high bound ($500,000) sits right before
+    # the folded LOCATION: label.
+    scorp = next(i for i in a if i["asset"].startswith("Hackett & Associates"))
+    assert scorp["asset_type"] == "OL"
+    assert scorp["value_of_asset"]["label"] == "$250,001 - $500,000"
+    assert scorp["income_amount"] is None  # income column is the literal None
+    assert scorp["location"] == "South Bend, IN, US"
+
+
+def test_member_form_subholding_rows_anchor_on_arrow():
+    a = extract_fd_schedules(WELCH_SUBWRAP).schedules["A"]
+    # Every asset row is "Welch account ⇒ …" with the [TYPE]-tagged subholding
+    # name wrapped onto the next line — tag+glyph never share a line, so the
+    # old anchor matched zero rows. 152 = the segment's ⇒-line count.
+    assert len(a) == 152
+    assert all(item["raw_text"] for item in a)
+    # Single-wrap row: the income high bound wrapped into the row's
+    # continuation ("… Dividends $201 - gfedcb <name> $1,000 <name> [EF]").
+    first = a[0]
+    assert first["asset_type"] == "EF"
+    assert first["value_of_asset"]["label"] == "$15,001 - $50,000"
+    assert first["income_type"] == "Dividends"
+    assert first["income_amount"]["label"] == "$201 - $1,000"
+    assert first["income_preceding"] is None  # member form: no third column
+
+
+def test_member_form_double_wrap_row_repairs_both_bounds():
+    a = extract_fd_schedules(WELCH_SUBWRAP).schedules["A"]
+    # "Welch account ⇒ $100,001 - Capital Gains, $5,001 - gfedc / American
+    # Century International Growth Fund (TWIEX) $250,000 Dividends $15,000 /
+    # [MF]" — BOTH the value and income high bounds wrapped. The two dangling
+    # lows re-pair with the two bare wrapped highs in column order.
+    twiex = next(i for i in a if "TWIEX" in i["raw_text"])
+    assert twiex["value_of_asset"]["label"] == "$100,001 - $250,000"
+    assert twiex["income_amount"]["label"] == "$5,001 - $15,000"
