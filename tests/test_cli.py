@@ -74,3 +74,22 @@ def test_pre_2012_emits_ptr_warning(capsys):
 def test_post_2012_no_ptr_warning(capsys):
     parse_year_range("2013-2014", CURRENT_YEAR)
     assert capsys.readouterr().err == ""
+
+
+# --- `inspect` dispatch (#56) ------------------------------------------------
+from openhouse.cli import main  # noqa: E402
+
+
+def test_inspect_rejects_year_range():
+    assert main(["inspect", "2021-2022", "--sample", "0.5"]) == 2
+
+
+def test_inspect_rejects_out_of_range_sample():
+    assert main(["inspect", "2022", "--sample", "1.5"]) == 2
+    assert main(["inspect", "2022", "--sample", "0"]) == 2
+
+
+def test_inspect_unparsed_year_exits_1(tmp_path, capsys):
+    rc = main(["inspect", "2022", "--sample", "0.5", "--data-dir", str(tmp_path)])
+    assert rc == 1
+    assert "not parsed" in capsys.readouterr().err
