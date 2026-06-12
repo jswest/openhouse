@@ -30,7 +30,12 @@ The DocID prefix matches SPEC §2.2: 8-digit `1`/`2` → e-filed (text-extractab
   font and extracts intact. Ground truth: schedules **A, C, E, F** populated
   (A: 2 assets incl. a value range wrapped via the dangling-low interleave;
   C: 2 earned-income rows; E: 1 position; F: 2 agreements), B/D/G/H/I `None
-  disclosed.` → absent, no Schedule J on this form.
+  disclosed.` → absent, no Schedule J on this form. The NUL furniture folded into
+  a recovered row is scrubbed out of the emitted `raw_text` (each NUL run → one
+  space, whitespace collapsed, ends stripped — issue #52), so no item's
+  `raw_text` contains `U+0000`; the content (asset names, amounts, dates) is
+  unchanged. The scrub is a no-op on NUL-free text, so intact-rendering bodies
+  (all of 2020) are byte-identical to before.
 
 ## PTR body-extraction ground truth (issue #9, SPEC §6.3)
 

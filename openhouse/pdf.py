@@ -491,6 +491,26 @@ def _segment_schedules(lines: list[str]) -> dict[str, list[str]]:
     return schedules
 
 
+def _scrub_raw_text(s: str) -> str:
+    """Scrub the small-caps NUL furniture out of a line item's ``raw_text``.
+
+    In the glyphs-lost rendering (SPEC §2.2) the form's small-caps furniture
+    extracts as runs of ``U+0000`` folded into the row text — invisible in most
+    viewers but literal NUL bytes in the JSON. Replace each NUL run with a single
+    space, collapse the resulting runs of whitespace to one space, and strip the
+    ends; every other character is left verbatim, so the asset names, amounts,
+    dates and ``None disclosed.`` content survive intact (NULs only ever occur in
+    the furniture, never in filer content).
+
+    This is a strict no-op on any NUL-free string — collapsing already-single
+    whitespace and stripping a ``_group_items``-joined row (its parts joined by a
+    single space, ends already trimmed) leaves it byte-identical — so every
+    intact-rendering body (all of 2020) extracts exactly as before. The trade is
+    deliberately, mildly lossy: the exact furniture rendering is dropped.
+    """
+    return re.sub(r"\s+", " ", s.replace("\x00", " ")).strip()
+
+
 def _group_items(lines: list[str], *, starts_item) -> list[str]:
     """Fold ``lines`` into per-item verbatim ``raw_text`` blocks.
 
@@ -682,7 +702,7 @@ def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAIte
                 income_amount=income_amount,
                 location=location,
                 description=description,
-                raw_text=raw,
+                raw_text=_scrub_raw_text(raw),
             )
         )
     return items
@@ -734,7 +754,7 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
                 transaction_type=ttype,
                 amount_range=_fd_amount_range(raw),
                 cap_gains_over_200=cap_gains,
-                raw_text=raw,
+                raw_text=_scrub_raw_text(raw),
             )
         )
     return items
@@ -768,7 +788,7 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
                 source=source or raw,
                 income_type=income_type,
                 amount=amount,
-                raw_text=raw,
+                raw_text=_scrub_raw_text(raw),
             )
         )
     return items
@@ -815,7 +835,7 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
                 date_incurred=date_incurred,
                 liability_type=ltype,
                 amount_range=_fd_amount_range(raw),
-                raw_text=raw,
+                raw_text=_scrub_raw_text(raw),
             )
         )
     return items
@@ -825,7 +845,7 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
 def _parse_raw_schedule(lines: list[str]) -> list[RawLineItem]:
     """Schedules E–J → raw_text-only line items (one per physical row)."""
     return [
-        RawLineItem(raw_text=ln.strip()) for ln in lines if ln.strip()
+        RawLineItem(raw_text=_scrub_raw_text(ln)) for ln in lines if ln.strip()
     ]
 
 

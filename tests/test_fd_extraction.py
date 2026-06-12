@@ -20,6 +20,7 @@ from openhouse.parse import _classify_records
 from openhouse.pdf import (
     NotAnFdBody,
     PdfExtractError,
+    _scrub_raw_text,
     extract_fd_schedules,
 )
 
@@ -416,6 +417,39 @@ def test_nul_extension_cover_sheet_still_not_an_fd_body(monkeypatch):
     _fake_pdfplumber(monkeypatch, [page])
     with pytest.raises(NotAnFdBody):
         extract_fd_schedules(Path("synthetic.pdf"))
+
+
+def test_nulglyph_raw_text_is_scrubbed_of_nul_bytes():
+    # The glyphs-lost rendering folds NUL furniture into recovered rows; #52
+    # scrubs it so no emitted raw_text carries a literal U+0000 — content stays.
+    body = extract_fd_schedules(ADAMS_NUL)
+    assert body.schedules  # recovered a body at all
+    for letter, items in body.schedules.items():
+        for item in items:
+            assert "\x00" not in item["raw_text"], f"NUL leaked into schedule {letter}"
+            assert item["raw_text"].strip(), "row content must still survive"
+
+
+def test_scrub_raw_text_is_noop_on_nul_free_text():
+    # The scrub MUST leave any NUL-free string byte-identical (this is what keeps
+    # every intact-rendering 2020 body unchanged). _group_items joins parts with a
+    # single space and the inputs are pre-stripped, so such strings are unchanged.
+    for s in [
+        "0.5 acre unimproved property [RP] $1,001 - $15,000 Rent $201 - $1,000",
+        "State of Mississippi Member Retirement [PE] None",
+        "None disclosed.",
+        "BLB Properties, LLC ⇒ JT",
+        "",
+    ]:
+        assert _scrub_raw_text(s) == s
+
+
+def test_scrub_raw_text_collapses_nul_runs_and_whitespace():
+    nul = "\x00"
+    assert _scrub_raw_text(f"S{nul * 7} A: Assets") == "S A: Assets"
+    assert _scrub_raw_text(f"L{nul * 7}: Bolton/Hinds, MS") == "L : Bolton/Hinds, MS"
+    # Trailing/leading NUL runs strip; interior collapses to one space.
+    assert _scrub_raw_text(f"{nul * 3} Cash [BA] {nul * 2} ") == "Cash [BA]"
 
 
 # --- failure paths -------------------------------------------------------------
