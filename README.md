@@ -13,13 +13,15 @@ can actually ask questions of.
 
 ## What it will do
 
-Three commands, one data directory:
+A three-command pipeline plus an accuracy-review tool, over one data directory:
 
 ```sh
 openhouse pull 2024          # fetch the year's filing index + every PDF (resumable, polite)
 openhouse parse 2024         # offline: PDFs + index → normalized JSON, nothing dropped
 openhouse read trades 2024 --ticker NVDA --table
                              # offline: ask the parsed data a question
+openhouse inspect 2024 --sample 0.05
+                             # offline: review a sample beside the PDFs, score accuracy
 ```
 
 - **`pull`** is the only network step. Idempotent and Ctrl-C-safe — re-runs
@@ -35,6 +37,12 @@ openhouse read trades 2024 --ticker NVDA --table
   whether its results are exhaustive (an upper bound — "at most these") or a
   floor (a lower bound — "at least these"), so a zero-result answer is never
   ambiguous. JSON to stdout for machines and `jq`; `--table` for humans.
+- **`inspect`** measures whether the parse is *right*, not just whether it ran.
+  It samples a reproducible, stratified slice of the `ok` filings, opens a small
+  local web app showing each one beside its source PDF, and records a
+  precision/recall verdict per filing — surfacing silent recall failures (e.g.
+  scanned PTRs that extract zero trades) and emitting an accuracy scorecard.
+  Offline; the browser is the only socket. JSON scorecard to stdout.
 
 ## What's in the data
 

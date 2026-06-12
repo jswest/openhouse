@@ -320,6 +320,83 @@ openhouse read summary 2024                                 # counts: types, efi
 
 ---
 
+## 5.5 Command: `openhouse inspect`
+
+The accuracy-review surface. `pull`/`parse`/`read` move filings *through* the
+pipeline; `inspect` asks whether the filings that came out are **right**. It
+samples `parse_status: ok` filings, opens a small local web app, and shows each
+filing beside its source PDF so a human can record a precision/recall verdict.
+Offline and deterministic like `parse`/`read` — the only socket is the operator's
+browser hitting `127.0.0.1`; no new Python deps (stdlib `http.server` +
+`pdfplumber`).
+
+```
+openhouse inspect 2022 --sample 0.05                 # review a stratified ~5% of 2022
+openhouse inspect 2022 --sample 0.1 --seed 7         # a different reproducible draw
+```
+
+**Why it exists:** a `parse_status: ok` filing can still be wrong — most visibly
+the scanned PTRs that extract **zero** trades while the PDF plainly has them.
+Those are silent recall failures (the "never silently drop a filing" hazard) and
+nothing else surfaces them.
+
+**Sampling** (in `inspect/core.py`, pure):
+
+- `--sample` is a fraction `(0, 1]` of the year's **reviewable** filings
+  (`parse_status: ok`; error/unparsed are already manifest residual).
+- A seeded `hash(seed, doc_id)` rank makes selection **reproducible** (same
+  args → same set; no wall-clock) and **monotonic** (`0.2 ⊃ 0.1`, so a sample can
+  be widened later without re-reviewing).
+- **Stratified** by `pdf_class` × is-PTR: within each stratum the smallest
+  `ceil(sample · n)` by rank are taken, so every non-empty cell (notably scanned
+  PTRs) is represented for any `sample > 0`.
+
+**Verdict** (filing mode — the only mode this milestone; trade mode is deferred):
+a 2×2 over the sound/complete duality, applied to **entries** (PTR trades / FD
+line items) and **metadata** (the index-derived scalars), plus optional entry
+magnitudes and a note, snapshot-pinned:
+
+| Field | Meaning |
+|---|---|
+| `is_fully_precise` | entries sound — nothing hallucinated/wrong |
+| `is_fully_recalled` | entries complete — nothing in the PDF missed |
+| `n_incorrect_entries` / `n_missing_entries` | optional magnitude; `null` = untallied |
+| `is_metadata_accurate` / `is_metadata_fully_complete` | the same pair for metadata |
+| `snapshot` | `sha256:…` of the parsed record at review time |
+| `note` | ground truth for scanned cases + correction-agent handoff hint |
+
+Invariant (enforced server-side): a tallied count agrees with its boolean —
+`count > 0 ⟺ boolean false`; `null` always allowed ("wrong, didn't tally").
+Entries carry counts (unbounded list — *how many* missed is signal); metadata
+does not (a fixed handful of scalars).
+
+**Output & storage:**
+
+- Verdicts persist to a gitignored, `doc_id`-keyed
+  `data/inspect/<year>/labels.json`, **resumable** across restarts. Its
+  `LABELS_SCHEMA_VERSION` is independent of the parsed-data `SCHEMA_VERSION`: a
+  verdict-schema change must not force a re-parse. The `snapshot` survives a
+  re-parse — a filing whose parse later changes has its label flagged **stale**
+  (caught on reload, never silently blessing changed output).
+- The **scorecard** is emitted as JSON to **stdout** when the operator stops the
+  server (Ctrl-C): per-stratum **doc-level** precision/recall rates *and* an
+  **entry-level** rollup (`Σ n_missing` / `Σ n_incorrect`) — the number that says
+  *where* the parser leaks. The reviewable/not-reviewable residual goes to stderr.
+
+**The web surface:** a stdlib `http.server` serves the committed static bundle, a
+small JSON API (`GET /api/queue`, `GET /api/filing/<doc_id>`,
+`POST /api/verdict/<doc_id>`), and sandboxed PDF bytes (`GET /api/pdf/<doc_id>`,
+derived from the record's `source_pdf`, confirmed inside `data/`). The frontend is
+**Svelte compiled to a static SPA via Vite (not SvelteKit)**; its built bundle is
+committed under `openhouse/inspect/static/`, so `inspect` runs with **zero Node**.
+`web/inspect/` holds the contributor-only source (`npm run build` regenerates the
+bundle).
+
+**Flags:** `--sample` (required), `--mode` (`filing`), `--seed` (default `0`),
+`--data-dir`.
+
+---
+
 ## 6. Data model & on-disk layout
 
 ### 6.1 Record shapes (normalized JSON)
