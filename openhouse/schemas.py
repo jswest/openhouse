@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
 # Integer schema generation, stamped into ``parse-manifest.json`` (SPEC §6.5) and
 # *is* the minor of the release version ``v0.<SCHEMA_VERSION>.<patch>`` (GH-0037).
@@ -29,8 +29,14 @@ from pydantic import BaseModel, Field
 # migrate (CLAUDE.md): bump this, delete old code, re-run ``parse`` from ``raw/``.
 # Read by ``parse`` (#6), the per-PDF pass (#7), and the release tool. Generation
 # 3 adds PTR body extraction (§6.3 transactions[]); generation 4 adds e-filed FD
-# schedule bodies (§6.3 schedules A–D structured, E–J raw_text-only).
-SCHEMA_VERSION = 4
+# schedule bodies (§6.3 schedules A–D structured, E–J raw_text-only); generation 5
+# adds the CC0 ``congress-legislators`` identity join (#16) — a ``bioguide_id`` and
+# a two-tier ``filer_id`` ladder (``bioguide:<id>`` / ``name:<slug>``) — and
+# structured columns for FD schedules E–J (#17), each item still carrying
+# verbatim ``raw_text``; and an ``exact`` point-value on ``AmountRange`` (#49)
+# so a single exact-dollar PTR amount (e.g. ``$894.97``) is represented soundly
+# rather than coerced into a fake low–high bucket. All of these ride generation 5.
+SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
@@ -111,7 +117,19 @@ class FilingMetadata(BaseModel):
     year: int = Field(..., description="Coverage year — never derived from filing_date")
     filer: Filer
     filer_id: str = Field(
-        ..., description="Normalized identity key (SPEC §6.2); not a true member ID"
+        ...,
+        description=(
+            "Identity key, two-tier ladder (#16): ``bioguide:<id>`` when the filer "
+            "matched a CC0 congress-legislators House seat, else the last-resort "
+            "``name:<normalized-slug>`` name key (a bounded, unverified claim)"
+        ),
+    )
+    bioguide_id: Optional[str] = Field(
+        None,
+        description=(
+            "The matched congress-legislators bioguide id, or ``None`` when the "
+            "filer matched no House-seat record (then filer_id is the ``name:`` key)"
+        ),
     )
     state_district: Optional[StateDistrict] = None
     filing_type: FilingTypeInfo
@@ -122,16 +140,57 @@ class FilingMetadata(BaseModel):
 
 
 class AmountRange(BaseModel):
-    """A transaction's disclosed dollar range (SPEC §6.3).
+    """A transaction's disclosed dollar amount (SPEC §6.3).
 
-    ``low``/``high`` are the parsed integer bounds; ``label`` is the verbatim
-    range string from the form (e.g. ``"$1,001 - $15,000"``) so the original
-    bucketed wording is never lost.
+    Two mutually-exclusive shapes, distinguished on the wire so a consumer can
+    tell a *bucket* from a *point* without guessing:
+
+    - **Range** (the usual form): ``low``/``high`` are the parsed integer bounds
+      of a ``$LOW - $HIGH`` bucket; ``exact`` is ``None``.
+    - **Exact value** (GH-0049): some PTR rows disclose a single exact dollar
+      figure (e.g. ``$894.97``) in place of a bucket. That value lands in
+      ``exact`` (a float — exact figures carry cents); ``low``/``high`` are
+      ``None``. It is **not** coerced into a ``{low: 894.97, high: 894.97}``
+      fake range — a point is not a bucket. For comparisons (``read``'s
+      ``--min-amount`` filter) an exact value ``X`` is treated as the closed
+      point ``[X, X]`` — see ``read._amount_low``.
+
+    ``label`` is the verbatim amount string from the form (``"$1,001 - $15,000"``
+    or ``"$894.97"``) so the original wording is never lost. Exactly one of
+    {``low``+``high``} / {``exact``} is set — enforced by the validator below;
+    a row that is genuinely neither still fails extraction loudly upstream
+    (never a fabricated range — CLAUDE.md).
     """
 
-    low: int
-    high: int
+    low: Optional[int] = None
+    high: Optional[int] = None
+    exact: Optional[float] = None
     label: str
+
+    @model_validator(mode="after")
+    def _exactly_one_shape(self) -> "AmountRange":
+        is_range = self.low is not None and self.high is not None
+        is_exact = self.exact is not None
+        if is_exact and (self.low is not None or self.high is not None):
+            raise ValueError(
+                "AmountRange.exact is mutually exclusive with low/high"
+            )
+        if not is_exact and not is_range:
+            raise ValueError(
+                "AmountRange needs either both low and high, or exact"
+            )
+        return self
+
+    @model_serializer
+    def _serialize(self) -> dict:
+        """Emit only the shape that applies: a range omits ``exact``, an exact
+        value omits ``low``/``high``. This keeps a range's on-wire JSON
+        byte-identical to before #49 (no ``"exact": null`` noise on the common
+        case) while an exact-dollar row carries a single ``exact`` field — the
+        two shapes stay visibly distinct (GH-0049)."""
+        if self.exact is not None:
+            return {"exact": self.exact, "label": self.label}
+        return {"low": self.low, "high": self.high, "label": self.label}
 
 
 class PtrTransaction(BaseModel):
@@ -153,7 +212,9 @@ class PtrTransaction(BaseModel):
     - ``transaction_type`` — ``P`` | ``S`` | ``S(partial)`` | ``E`` (the form
       prints ``S (partial)``; normalized to ``S(partial)``).
     - ``transaction_date`` / ``notification_date`` — ISO ``YYYY-MM-DD``.
-    - ``amount_range`` — the parsed ``{low, high, label}`` bucket.
+    - ``amount_range`` — the parsed amount: a ``{low, high, label}`` bucket, or
+      an ``{exact, label}`` point when the row discloses a single exact dollar
+      value instead of a range (GH-0049).
     - ``cap_gains_over_200`` — the cap-gains checkbox (the form renders
       ``gfedc`` unchecked vs ``gfedcb`` checked at the row's end).
     - ``description`` — the ``DESCRIPTION:`` line text if present, else ``None``.
@@ -174,9 +235,9 @@ class PtrTransaction(BaseModel):
 # ---------------------------------------------------------------------------
 # E-filed annual-FD schedule bodies (SPEC §6.3).
 #
-# An annual FD is a schedule-by-schedule document (A–J). SPEC §6.3 depth-orders
-# the work: schedules A–D are **fully structured**; E–J ship as raw_text-only
-# line items. *Every* line item — structured or not — carries a verbatim
+# An annual FD is a schedule-by-schedule document (A–J), every schedule now
+# column-parsed into structured fields (A–D since #12, E–J since #17). *Every*
+# line item — structured or not — carries a verbatim
 # ``raw_text`` so nothing extracted is lost to a schema gap, and an empty
 # schedule (the literal ``None disclosed.``) is recorded as **absent** (its key
 # is simply omitted from the body's ``schedules`` map). Headings are matched by
@@ -238,15 +299,88 @@ class ScheduleDItem(BaseModel):
     raw_text: str
 
 
-class RawLineItem(BaseModel):
-    """A raw_text-only line item for schedules E–J (SPEC §6.3 depth-ordering).
+class ScheduleEItem(BaseModel):
+    """Schedule E line item — positions (SPEC §6.3).
 
-    Schedules E (positions), F (agreements), G (gifts), H (travel), I (charity
-    in lieu of honoraria), and J (excess compensation) are *not* column-parsed in
-    this generation — each item ships as the verbatim joined text of its row so
-    nothing is lost (deeper structure is a tracked post-v1 issue).
+    Form columns: ``Position | Name of Organization``. ``position`` is the
+    leading role title; ``organization`` the named body. Both ``Optional`` — a
+    row the splitter can't cleanly bisect leaves them ``None`` and the verbatim
+    ``raw_text`` still carries the whole line.
     """
 
+    position: Optional[str] = None
+    organization: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleFItem(BaseModel):
+    """Schedule F line item — agreements (SPEC §6.3).
+
+    Form columns: ``Date | Parties | Terms of Agreement``. ``date`` is the
+    agreement date as printed (``Month YYYY``); ``parties`` the named parties;
+    ``terms`` the (often multi-line) description folded into one string. All
+    ``Optional``; ``raw_text`` carries the verbatim, wrap-joined row.
+    """
+
+    date: Optional[str] = None
+    parties: Optional[str] = None
+    terms: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleGItem(BaseModel):
+    """Schedule G line item — gifts (SPEC §6.3).
+
+    Form columns: ``Source | Description | Value``. ``value`` is the dollar
+    figure as printed (gifts carry an exact value, not an A-style range). The
+    fixtures' G is ``None disclosed.`` (absent), so the split is header-driven and
+    conservative — anything not cleanly columnar stays in ``raw_text``.
+    """
+
+    source: Optional[str] = None
+    description: Optional[str] = None
+    value: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleHItem(BaseModel):
+    """Schedule H line item — travel payments & reimbursements (SPEC §6.3).
+
+    Form columns: ``Source | Dates | Location | Items Provided``. ``dates`` is
+    the printed travel date(s); ``location`` the destination; ``items`` what was
+    provided. All ``Optional``; ``raw_text`` carries the verbatim row.
+    """
+
+    source: Optional[str] = None
+    dates: Optional[str] = None
+    location: Optional[str] = None
+    items: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleIItem(BaseModel):
+    """Schedule I line item — payments to charity in lieu of honoraria (§6.3).
+
+    Form columns: ``Source | Activity | Date | Amount``. ``amount`` is the dollar
+    figure as printed. All ``Optional``; ``raw_text`` carries the verbatim row.
+    """
+
+    source: Optional[str] = None
+    activity: Optional[str] = None
+    date: Optional[str] = None
+    amount: Optional[str] = None
+    raw_text: str
+
+
+class ScheduleJItem(BaseModel):
+    """Schedule J line item — compensation in excess of $5,000 (new filers, §6.3).
+
+    Form columns: ``Source | Brief Description of Duties``. Both ``Optional``;
+    ``raw_text`` carries the verbatim row.
+    """
+
+    source: Optional[str] = None
+    description: Optional[str] = None
     raw_text: str
 
 
@@ -255,9 +389,9 @@ class FdBody(BaseModel):
 
     ``schedules`` holds only the letters that have data: a schedule rendered
     ``None disclosed.`` is **absent** (omitted), never an empty array, so a
-    consumer can tell "disclosed nothing" from "we failed to read it". A–D carry
-    structured items; E–J carry ``raw_text``-only items. Written one-per-body to
-    ``parsed/<year>/fd/<DocID>.json``.
+    consumer can tell "disclosed nothing" from "we failed to read it". Every
+    schedule (A–J) carries structured items, each retaining a verbatim
+    ``raw_text``. Written one-per-body to ``parsed/<year>/fd/<DocID>.json``.
     """
 
     schedules: dict[str, list] = Field(default_factory=dict)

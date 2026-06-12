@@ -93,3 +93,109 @@ def test_inspect_unparsed_year_exits_1(tmp_path, capsys):
     rc = main(["inspect", "2022", "--sample", "0.5", "--data-dir", str(tmp_path)])
     assert rc == 1
     assert "not parsed" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Data-dir resolution (#50): flag → OPENHOUSE_DATA_DIR env → ./data, applied
+# uniformly across pull / parse / read via one shared resolver.
+# ---------------------------------------------------------------------------
+
+from pathlib import Path
+
+from openhouse import cli as cli_mod
+from openhouse import parse as parse_mod
+from openhouse import pull as pull_mod
+from openhouse.cli import DATA_DIR_ENV, resolve_data_dir
+
+
+def test_resolve_flag_beats_env(monkeypatch):
+    monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
+    assert resolve_data_dir("/flag/store") == Path("/flag/store")
+
+
+def test_resolve_env_when_no_flag(monkeypatch):
+    monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
+    assert resolve_data_dir(None) == Path("/env/store")
+
+
+def test_resolve_default_when_neither(monkeypatch):
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    assert resolve_data_dir(None) == Path("./data")
+
+
+def test_resolve_empty_env_falls_through_to_default(monkeypatch):
+    # An empty env var is treated as unset, not as a data root named "".
+    monkeypatch.setenv(DATA_DIR_ENV, "")
+    assert resolve_data_dir(None) == Path("./data")
+
+
+def _capture_pull_data_dir(monkeypatch):
+    captured = {}
+
+    def fake_pull(years, *, data_dir, **kwargs):
+        captured["data_dir"] = data_dir
+        return 0
+
+    monkeypatch.setattr(pull_mod, "pull", fake_pull)
+    return captured
+
+
+def _capture_parse_data_dir(monkeypatch):
+    captured = {}
+
+    def fake_parse(years, *, data_dir, **kwargs):
+        captured["data_dir"] = data_dir
+        return 0
+
+    monkeypatch.setattr(parse_mod, "parse", fake_parse)
+    return captured
+
+
+def _capture_read_data_dir(monkeypatch):
+    captured = {}
+    real_resolve = cli_mod.resolve_data_dir
+
+    def spy_resolve(flag_value):
+        result = real_resolve(flag_value)
+        captured["data_dir"] = result
+        return result
+
+    # read.py calls cli_mod.resolve_data_dir at run time; spy on it and let the
+    # real run path execute (scanning an absent data dir returns 0 cleanly — no
+    # fixtures needed), so the production resolution line is exercised.
+    monkeypatch.setattr(cli_mod, "resolve_data_dir", spy_resolve)
+    return captured
+
+
+@pytest.mark.parametrize("verb", ["pull", "parse", "read"])
+def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch):
+    if verb == "pull":
+        cap = _capture_pull_data_dir(monkeypatch)
+        argv_flag = ["pull", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["pull", "2024"]
+        argv_default = ["pull", "2024"]
+    elif verb == "parse":
+        cap = _capture_parse_data_dir(monkeypatch)
+        argv_flag = ["parse", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["parse", "2024"]
+        argv_default = ["parse", "2024"]
+    else:
+        cap = _capture_read_data_dir(monkeypatch)
+        argv_flag = ["read", "filings", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["read", "filings", "2024"]
+        argv_default = ["read", "filings", "2024"]
+
+    # flag wins even with env set
+    monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
+    assert cli_mod.main(argv_flag) == 0
+    assert cap["data_dir"] == Path("/flag/store")
+
+    # env used when no flag
+    monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
+    assert cli_mod.main(argv_env) == 0
+    assert cap["data_dir"] == Path("/env/store")
+
+    # default when neither
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    assert cli_mod.main(argv_default) == 0
+    assert cap["data_dir"] == Path("./data")

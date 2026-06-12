@@ -16,10 +16,13 @@ import pytest
 
 from openhouse.parse import _detect_identity_warnings, parse, parse_year
 from openhouse.index import build_filing_records
+from openhouse.legislators import load_legislator_index
 from openhouse.schemas import SCHEMA_VERSION
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PARSE_XML = FIXTURES / "parse" / "2024FD.xml"
+TRIMMED_XML = FIXTURES / "2024FD-trimmed.xml"
+REFERENCE_DIR = FIXTURES / "reference"
 PDF_FIXTURES = FIXTURES / "pdf"
 
 FETCHED_AT = "2026-06-11T12:00:00"
@@ -85,37 +88,117 @@ def _seed_year(data_dir: Path, year: int, xml_src: Path) -> None:
     shutil.copy(xml_src, raw / f"{year}FD.xml")
 
 
-# --- identity warnings (SPEC §6.2) ----------------------------------------
+def _seed_reference(data_dir: Path) -> None:
+    """Copy the CC0 legislators fixture into raw/reference/ for the offline join."""
+    ref = data_dir / "raw" / "reference"
+    ref.mkdir(parents=True, exist_ok=True)
+    for path in REFERENCE_DIR.glob("*.json"):
+        shutil.copy(path, ref / path.name)
 
 
-def test_identity_warning_on_different_districts():
-    records = build_filing_records(PARSE_XML, 2024)
+def _fixture_legislators(tmp_path):
+    """The fixture legislator index, loaded through the public offline loader."""
+    _seed_reference(tmp_path)
+    return load_legislator_index(tmp_path)
+
+
+# --- bioguide identity join + warnings (#16) ------------------------------
+
+
+def test_bioguide_attaches_on_matched_house_seat(tmp_path):
+    # The trimmed fixture's real members match the CC0 legislators fixture by
+    # (last, state, district): Allen GA12, Adams NC12, González PR — all
+    # non-candidate filings, so the seat join pins each to its bioguide. (Norton's
+    # 2024 filing is a candidate report and is covered separately — see
+    # test_candidate_report_never_bioguide_matched; the historical-file match path
+    # itself is exercised in test_legislators.py.)
+    records = build_filing_records(
+        TRIMMED_XML, 2024, _fixture_legislators(tmp_path)
+    )
+    by_doc = {r.doc_id: r for r in records}
+    assert by_doc["10066961"].bioguide_id == "A000372"  # Allen GA12
+    assert by_doc["10066961"].filer_id == "bioguide:A000372"
+    assert by_doc["20024277"].bioguide_id == "A000370"  # Adams NC12
+    # González-Colón spelled with diacritics in the reference, plain in the FD.
+    assert by_doc["30022163"].bioguide_id == "G000582"
+    # Norton's 2024 filing is a candidate report → name-keyed, not bioguide.
+    assert by_doc["10067000"].bioguide_id is None
+    assert by_doc["10067000"].filer_id.startswith("name:")
+
+
+def test_unmatched_filer_falls_back_to_name_key_and_warns(tmp_path):
+    records = build_filing_records(
+        TRIMMED_XML, 2024, _fixture_legislators(tmp_path)
+    )
+    doe = next(r for r in records if r.doc_id == "7940")
+    # No StateDst → no seat → no bioguide; last-resort name: key + a warning.
+    assert doe.bioguide_id is None
+    assert doe.filer_id == "name:unk.doe.maryam"
     warnings = {w["filer_id"]: w for w in _detect_identity_warnings(records)}
-    smith = warnings["tx.smith.john"]
-    assert sorted(smith["doc_ids"]) == ["2001", "2002"]
-    assert smith["districts"] == [5, 9]  # two districts → two people
+    assert "name:unk.doe.maryam" in warnings
+    assert warnings["name:unk.doe.maryam"]["reason"] == "unmatched_no_bioguide"
 
 
-def test_identity_warning_on_suffix_slug_collision():
+def test_matched_filer_never_warns(tmp_path):
+    records = build_filing_records(
+        TRIMMED_XML, 2024, _fixture_legislators(tmp_path)
+    )
+    warned = {w["filer_id"] for w in _detect_identity_warnings(records)}
+    # Allen matched a bioguide — pinned identity, never a name-keyed warning.
+    assert "bioguide:A000372" not in warned
+
+
+def test_ambiguous_seat_does_not_false_match(tmp_path):
+    # Two distinct John Smiths share TX-5 in the fixture → the seat key is
+    # ambiguous → no bioguide (completeness over a false positive).
+    xml = (
+        "<FinancialDisclosure><Member>"
+        "<Last>Smith</Last><First>John</First><Suffix></Suffix>"
+        "<FilingType>O</FilingType><StateDst>TX05</StateDst>"
+        "<DocID>5001</DocID></Member></FinancialDisclosure>"
+    )
+    path = tmp_path / "x.xml"
+    path.write_text(xml)
+    records = build_filing_records(path, 2024, _fixture_legislators(tmp_path))
+    assert records[0].bioguide_id is None
+    assert records[0].filer_id == "name:tx.smith.john"
+
+
+def test_candidate_report_never_bioguide_matched(tmp_path):
+    # A candidate report (FilingType "C") is filed by someone RUNNING for a seat,
+    # not its holder — a surname+seat collision with the real rep must NOT pin the
+    # candidate to that member's bioguide. It would be a *silent* false positive,
+    # since _detect_identity_warnings only flags UNmatched filers. A member filing
+    # on the same seat key still matches; the candidate falls back to name:.
+    member = (
+        "<Member><Last>Allen</Last><First>Rick</First><Suffix></Suffix>"
+        "<FilingType>{t}</FilingType><StateDst>GA12</StateDst>"
+        "<DocID>{d}</DocID></Member>"
+    )
+    xml = (
+        "<FinancialDisclosure>"
+        + member.format(t="O", d="9001")  # member filing → matches the seat
+        + member.format(t="C", d="9002")  # candidate report → must NOT match
+        + "</FinancialDisclosure>"
+    )
+    path = tmp_path / "cand.xml"
+    path.write_text(xml)
+    records = build_filing_records(path, 2024, _fixture_legislators(tmp_path))
+    by_doc = {r.doc_id: r for r in records}
+    assert by_doc["9001"].bioguide_id == "A000372"  # member: pinned
+    assert by_doc["9002"].bioguide_id is None  # candidate: not pinned
+    assert by_doc["9002"].filer_id.startswith("name:")
+
+
+def test_no_reference_index_keeps_everyone_name_keyed():
+    # With no legislators index every filer is name-keyed and warned.
     records = build_filing_records(PARSE_XML, 2024)
-    warnings = {w["filer_id"]: w for w in _detect_identity_warnings(records)}
-    # The "." suffix slugs to empty, so both share fl.jones.robert, but the raw
-    # suffix differs → the slug collided rather than matched.
-    assert "fl.jones.robert" in warnings
-    assert sorted(warnings["fl.jones.robert"]["doc_ids"]) == ["3001", "3002"]
-
-
-def test_same_person_many_filings_same_district_is_not_a_warning():
-    records = build_filing_records(PARSE_XML, 2024)
-    warnings = {w["filer_id"] for w in _detect_identity_warnings(records)}
-    # Adams files three times (O, P, X) in NC12 — normal, not a collision.
-    assert "nc.adams.alma" not in warnings
-
-
-def test_lone_filing_never_warns():
-    records = build_filing_records(PARSE_XML, 2024)
-    warnings = {w["filer_id"] for w in _detect_identity_warnings(records)}
-    assert "unk.doe.maryam" not in warnings
+    assert all(r.bioguide_id is None for r in records)
+    assert all(r.filer_id.startswith("name:") for r in records)
+    warned = {w["filer_id"] for w in _detect_identity_warnings(records)}
+    # Distinct name keys, each warned once (no bioguide to pin any of them).
+    assert "name:tx.smith.john" in warned
+    assert "name:nc.adams.alma" in warned
 
 
 # --- parse_year / parse end-to-end ----------------------------------------
@@ -144,9 +227,19 @@ def test_parse_year_writes_filings_and_manifest(tmp_path):
     assert manifest["counts"]["by_filing_type"]["P"] == 1
     assert manifest["counts"]["by_filing_type"]["X"] == 1
     assert manifest["counts"]["by_filing_type"]["W"] == 1
-    # Two collisions: Smith (districts) and Jones (suffix slug).
+    # No legislators reference seeded in this tmp data_dir → every filer is
+    # name-keyed and warned as "matched no bioguide". The distinct name keys are
+    # the four people in the fixture (Adams files 3x but shares one key).
     warned = {w["filer_id"] for w in manifest["identity_warnings"]}
-    assert warned == {"tx.smith.john", "fl.jones.robert"}
+    assert warned == {
+        "name:nc.adams.alma",
+        "name:tx.smith.john",
+        "name:fl.jones.robert",
+        "name:unk.doe.maryam",
+    }
+    assert all(
+        w["reason"] == "unmatched_no_bioguide" for w in manifest["identity_warnings"]
+    )
 
 
 def test_parse_year_is_deterministic(tmp_path):

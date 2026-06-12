@@ -272,9 +272,11 @@ def _ci_contains(haystack: Optional[str], needle: str) -> bool:
 def _member_matches(filing: dict, needle: str) -> bool:
     """``--member`` match: case-insensitive substring over ``filer_id`` + raw names.
 
-    This is **name-string matching, not true identity** (SPEC §6.2): it tests the
-    normalized ``filer_id`` and every raw name part (prefix/first/last/suffix), so
-    a substring of either the slug or the printed name hits.
+    Tests the ``filer_id`` (the two-tier identity key — ``bioguide:<id>`` or
+    ``name:<slug>``, #16) and every raw name part (prefix/first/last/suffix), so a
+    substring of the key (incl. a ``bioguide`` id) or the printed name hits. A
+    ``name:``-keyed hit is **name-string matching, not verified identity** (SPEC
+    §6.2); a ``bioguide:`` hit is the pinned member.
     """
     if _ci_contains(filing.get("filer_id"), needle):
         return True
@@ -522,9 +524,18 @@ def cmd_filing(args, data_dir: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _amount_low(txn: dict) -> Optional[int]:
-    """The low end of a transaction's amount range, or ``None`` if absent."""
+def _amount_low(txn: dict) -> Optional[float]:
+    """The low comparison bound of a transaction's amount, or ``None`` if absent.
+
+    For a ``$LOW - $HIGH`` bucket this is ``low``; for an exact-dollar value
+    (GH-0049) the amount is the closed point ``[X, X]``, so the low bound is the
+    exact value ``X`` itself. Treating the point this way keeps ``--min-amount``
+    sound over exact values — an exact ``$894.97`` correctly clears
+    ``--min-amount 500`` and is correctly excluded by ``--min-amount 1000``.
+    """
     amt = txn.get("amount_range") or {}
+    if amt.get("exact") is not None:
+        return amt["exact"]
     return amt.get("low")
 
 
@@ -769,7 +780,7 @@ def build_read_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--data-dir",
         default=argparse.SUPPRESS,
-        help="root data directory (default: ./data)",
+        help=cli_mod._DATA_DIR_HELP,
     )
     common.add_argument(
         "--table",
@@ -853,7 +864,10 @@ def build_read_parser() -> argparse.ArgumentParser:
         "--min-amount",
         type=int,
         dest="min_amount",
-        help="minimum amount_range low end (dollars); excludes trades with no range",
+        help=(
+            "minimum amount (dollars): a bucket's low end, or an exact-dollar "
+            "value treated as its own point; excludes trades with no amount"
+        ),
     )
 
     # summary <range>
@@ -875,12 +889,12 @@ def run(remainder: list[str], *, current_year: int) -> int:
     """
     parser = build_read_parser()
     args = parser.parse_args(remainder)
-    # The shared flags use SUPPRESS defaults (accepted in either position); apply
-    # the real defaults once, so a value passed before the subcommand is kept and
-    # downstream code can read args.data_dir / args.table unconditionally.
-    args.data_dir = getattr(args, "data_dir", "./data")
+    # The shared flags use SUPPRESS defaults (accepted in either position); resolve
+    # the data root once through the shared resolver (flag → OPENHOUSE_DATA_DIR env
+    # → ./data), so a value passed before the subcommand is honored. args.table is
+    # likewise normalized once so downstream code can read it unconditionally.
+    data_dir = cli_mod.resolve_data_dir(getattr(args, "data_dir", None))
     args.table = getattr(args, "table", False)
-    data_dir = Path(args.data_dir)
 
     try:
         if args.subcommand == "filing":

@@ -1,0 +1,24 @@
+[
+  {
+    "id": { "bioguide": "N000147" },
+    "name": { "first": "Eleanor", "middle": "Holmes", "last": "Norton", "official_full": "Eleanor Holmes Norton" },
+    "terms": [
+      { "type": "rep", "state": "DC", "district": 0, "start": "1991-01-03" },
+      { "type": "rep", "state": "DC", "district": 0, "start": "2023-01-03" }
+    ]
+  },
+  {
+    "id": { "bioguide": "S000001" },
+    "name": { "first": "John", "last": "Smith", "official_full": "John A. Smith" },
+    "terms": [
+      { "type": "rep", "state": "TX", "district": 5, "start": "2001-01-03" }
+    ]
+  },
+  {
+    "id": { "bioguide": "S000002" },
+    "name": { "first": "John", "last": "Smith", "official_full": "John B. Smith" },
+    "terms": [
+      { "type": "rep", "state": "TX", "district": 5, "start": "2011-01-03" }
+    ]
+  }
+]

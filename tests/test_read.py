@@ -257,6 +257,36 @@ def test_trades_min_amount_filter(capsys):
     assert len(out) == 2
 
 
+def test_min_amount_treats_exact_value_as_its_own_point():
+    # #49: an exact-dollar amount {exact: X, label} has no `low`; --min-amount must
+    # treat it as the point [X, X], so X clears a threshold <= X and is excluded by
+    # one > X. A range {low, high} keeps using `low`. Sound, no fabricated range.
+    from argparse import Namespace
+
+    from openhouse.read import _amount_low, _trade_matches
+
+    exact_txn = {
+        "amount_range": {"exact": 894.97, "label": "$894.97"},
+        "transaction_date": "2021-03-01",
+    }
+    range_txn = {
+        "amount_range": {"low": 1001, "high": 15000, "label": "$1,001 - $15,000"},
+        "transaction_date": "2021-03-01",
+    }
+    assert _amount_low(exact_txn) == 894.97
+    assert _amount_low(range_txn) == 1001
+
+    def _args(min_amount):
+        return Namespace(
+            ticker=None, asset=None, owner=None, type=None,
+            since=None, until=None, member=None, min_amount=min_amount,
+        )
+
+    # The exact $894.97 clears 500 but not 1000 (point, not a half-open range).
+    assert _trade_matches(exact_txn, {}, _args(500)) is True
+    assert _trade_matches(exact_txn, {}, _args(1000)) is False
+
+
 def test_trades_date_filter(capsys):
     run(["trades", "2021", "--since", "2021-06-01"])
     out = json.loads(capsys.readouterr().out)

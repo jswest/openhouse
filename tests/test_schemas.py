@@ -5,9 +5,13 @@ Each test maps to a *verified* 2024 edge case the schema must handle.
 
 from datetime import date
 
+import pytest
+from pydantic import ValidationError
+
 from openhouse.schemas import (
     FILING_TYPE_LABELS,
     UNKNOWN_FILING_LABEL,
+    AmountRange,
     Filer,
     FilingMetadata,
     FilingTypeInfo,
@@ -117,3 +121,38 @@ def test_all_twelve_verified_codes_map():
         assert info.code == code
         assert info.label != UNKNOWN_FILING_LABEL
         assert FILING_TYPE_LABELS[code] == info.label
+
+
+# --- AmountRange: range vs. exact-dollar point (#49) ------------------------
+
+
+def test_amount_range_bucket_serializes_without_exact():
+    """The common $LOW-$HIGH bucket has no `exact` and serializes byte-identically
+    to before #49 (no `"exact": null` noise)."""
+    amt = AmountRange(low=1001, high=15000, label="$1,001 - $15,000")
+    assert amt.exact is None
+    assert amt.model_dump(mode="json") == {
+        "low": 1001, "high": 15000, "label": "$1,001 - $15,000",
+    }
+
+
+def test_amount_range_exact_value_is_a_point_not_a_bucket():
+    """An exact-dollar value lands in `exact`; low/high stay None and are omitted
+    on serialization (the point form, not a fabricated bucket)."""
+    amt = AmountRange(exact=894.97, label="$894.97")
+    assert amt.low is None and amt.high is None
+    assert amt.model_dump(mode="json") == {"exact": 894.97, "label": "$894.97"}
+
+
+def test_amount_range_rejects_exact_mixed_with_bounds():
+    """`exact` is mutually exclusive with low/high — a value masquerading as a fake
+    {low: X, high: X} range is rejected, never silently accepted."""
+    with pytest.raises(ValidationError):
+        AmountRange(exact=894.97, low=894, high=895, label="$894.97")
+
+
+def test_amount_range_rejects_neither_shape():
+    """A row that is neither a range nor an exact value is invalid (the loud
+    extract_failed path is upstream; the model itself never fabricates)."""
+    with pytest.raises(ValidationError):
+        AmountRange(label="???")

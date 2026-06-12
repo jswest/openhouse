@@ -29,6 +29,7 @@ from typing import Optional
 from tqdm import tqdm
 
 from .index import build_filing_records
+from .legislators import load_legislator_index
 from .pdf import (
     NotAnFdBody,
     PdfExtractError,
@@ -68,23 +69,25 @@ class ParseError(Exception):
 
 
 def _detect_identity_warnings(records: list[FilingMetadata]) -> list[dict]:
-    """Find ``filer_id`` collisions that look like *two different people* (§6.2).
+    """Surface filers that matched **no** congress-legislators bioguide (#16).
 
-    The same person filing many times per year is normal — PTRs, the annual
-    report, and an extension all share one ``filer_id`` by design, and that is
-    NOT a warning. The signals that one ``filer_id`` may cover two people are:
+    The actionable identity signal since #16 is *unmatched* identity: a filer
+    whose ``bioguide_id`` is ``None`` is keyed only by name (``name:<slug>``) — a
+    bounded, unverified claim. The old "two-people share a slug" collision check is
+    retired in favor of this honest "we could not pin this filer to a real member
+    record" signal, which is what a ``read --member`` user actually needs to know.
 
-    - the same ``filer_id`` appears with **different districts** in the year, or
-    - the raw **last name** or **suffix** differs among records sharing a
-      ``filer_id`` (the slug collided rather than matched).
-
-    Returns one dict per colliding ``filer_id`` — its distinct raw names, the
-    involved ``doc_ids``, and the distinct districts — in first-appearance order
-    (deterministic).
+    One warning per *distinct* unmatched ``filer_id`` (the ``name:`` key), in
+    first-appearance order (deterministic), carrying its distinct raw names, the
+    involved ``doc_ids``, and the distinct districts seen. A bioguide-matched
+    filer is never warned — it is pinned to a stable identity, however many times
+    it filed.
     """
     by_filer: dict[str, list[FilingMetadata]] = defaultdict(list)
     order: list[str] = []
     for rec in records:
+        if rec.bioguide_id is not None:
+            continue  # pinned to a real member — not an identity warning.
         if rec.filer_id not in by_filer:
             order.append(rec.filer_id)
         by_filer[rec.filer_id].append(rec)
@@ -92,23 +95,10 @@ def _detect_identity_warnings(records: list[FilingMetadata]) -> list[dict]:
     warnings: list[dict] = []
     for filer_id in order:
         group = by_filer[filer_id]
-        if len(group) < 2:
-            continue
 
-        # Distinct districts (None — no StateDst — is its own bucket). A single
-        # person never spans two districts in one year; two districts → two people.
         districts = {
             r.state_district.district if r.state_district else None for r in group
         }
-        # The slug can collide two different raw names: differing last name or
-        # suffix at the same filer_id means the key matched names it shouldn't.
-        last_names = {r.filer.last for r in group}
-        suffixes = {(r.filer.suffix or "") for r in group}
-
-        collides = len(districts) > 1 or len(last_names) > 1 or len(suffixes) > 1
-        if not collides:
-            continue
-
         # Distinct raw names, first-appearance order (a set would be nondeterministic).
         seen_names: list[str] = []
         for r in group:
@@ -121,6 +111,7 @@ def _detect_identity_warnings(records: list[FilingMetadata]) -> list[dict]:
         warnings.append(
             {
                 "filer_id": filer_id,
+                "reason": "unmatched_no_bioguide",
                 "raw_names": seen_names,
                 "doc_ids": [r.doc_id for r in group],
                 "districts": sorted(d for d in districts if d is not None),
@@ -319,7 +310,10 @@ def parse_year(
         )
         return None
 
-    records = build_filing_records(xml_path, year)
+    # Offline CC0 congress-legislators join (#16): attach bioguide where the
+    # House seat matches; a missing reference cache simply matches nothing.
+    legislators = load_legislator_index(data_dir)
+    records = build_filing_records(xml_path, year, legislators)
 
     by_filing_type: dict[str, int] = defaultdict(int)
     for rec in records:
@@ -357,11 +351,11 @@ def parse_year(
     identity_warnings = _detect_identity_warnings(records)
     for warning in identity_warnings:
         print(
-            f"{year}: identity warning — filer_id {warning['filer_id']!r} covers "
-            f"{len(warning['raw_names'])} distinct name(s) "
-            f"{warning['raw_names']} across docs {warning['doc_ids']} "
-            f"(districts {warning['districts']}); `read --member` on this name is "
-            f"ambiguous.",
+            f"{year}: identity warning — filer_id {warning['filer_id']!r} matched "
+            f"no congress-legislators bioguide; it is name-keyed only "
+            f"(names {warning['raw_names']}, docs {warning['doc_ids']}, "
+            f"districts {warning['districts']}) — `read --member` on it is an "
+            f"unverified name-string claim.",
             file=sys.stderr,
         )
 

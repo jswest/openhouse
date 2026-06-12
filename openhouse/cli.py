@@ -23,6 +23,7 @@ from pathlib import Path
 from . import parse as parse_mod
 from . import pull as pull_mod
 from . import read as read_mod
+from . import ready as ready_mod
 
 # SPEC §2.1: the bulk index covers 2008 → present; PTRs (STOCK Act) appear only
 # from 2012 onward.
@@ -100,6 +101,32 @@ def _parse_one(token: str, arg: str) -> int:
     return int(token)
 
 
+DATA_DIR_ENV = "OPENHOUSE_DATA_DIR"
+DEFAULT_DATA_DIR = "./data"
+
+_DATA_DIR_HELP = (
+    f"root data directory (precedence: this flag, then ${DATA_DIR_ENV}, then "
+    f"the {DEFAULT_DATA_DIR} default)"
+)
+
+
+def resolve_data_dir(flag_value: str | None) -> Path:
+    """Resolve the data root, precedence: ``--data-dir`` flag → ``OPENHOUSE_DATA_DIR``
+    env → ``./data`` default.
+
+    ``flag_value`` is the explicitly-passed ``--data-dir`` (or ``None`` if the flag
+    was omitted — the flag's argparse default must be ``None`` for this to be
+    distinguishable). The environment is read here, not at import time, so a single
+    resolver governs all three verbs and tests can drive it with ``monkeypatch``.
+    """
+    if flag_value is not None:
+        return Path(flag_value)
+    env_value = os.environ.get(DATA_DIR_ENV)
+    if env_value:
+        return Path(env_value)
+    return Path(DEFAULT_DATA_DIR)
+
+
 VALID_PDF_TYPES = ("ptr", "fd")
 
 
@@ -151,8 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pull_p.add_argument(
         "--data-dir",
-        default="./data",
-        help="root data directory (default: ./data)",
+        default=None,
+        help=_DATA_DIR_HELP,
     )
     pull_p.add_argument(
         "--delay",
@@ -193,6 +220,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="re-download even if the index is already present (refreshed daily)",
     )
+    pull_p.add_argument(
+        "--no-reference",
+        dest="reference",
+        action="store_false",
+        help=(
+            "skip the one-time CC0 congress-legislators fetch (the offline "
+            "bioguide-identity join in `parse` then falls back to name-only keys)"
+        ),
+    )
 
     parse_p = subparsers.add_parser(
         "parse", help="transform raw artifacts into normalized JSON (offline)"
@@ -200,8 +236,8 @@ def build_parser() -> argparse.ArgumentParser:
     parse_p.add_argument("years", help="YYYY or YYYY-YYYY")
     parse_p.add_argument(
         "--data-dir",
-        default="./data",
-        help="root data directory (default: ./data)",
+        default=None,
+        help=_DATA_DIR_HELP,
     )
     parse_p.add_argument(
         "--types",
@@ -242,8 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inspect_p.add_argument(
         "--data-dir",
-        default="./data",
-        help="root data directory (default: ./data)",
+        default=None,
+        help=_DATA_DIR_HELP,
     )
 
     # `read` is intercepted in main() before argparse runs (its REMAINDER-style
@@ -254,6 +290,16 @@ def build_parser() -> argparse.ArgumentParser:
         "read",
         help="query the normalized JSON (offline, read-only)",
         add_help=False,
+    )
+
+    ready_p = subparsers.add_parser(
+        "ready",
+        help="install the agent skill into ~/.claude/skills/openhouse (offline)",
+    )
+    ready_p.add_argument(
+        "--check",
+        action="store_true",
+        help="report up-to-date / stale / hand-edited instead of installing",
     )
 
     return parser
@@ -278,6 +324,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(raw_argv)
 
+    if args.command == "ready":
+        # Offline, no year range: stamp the packaged skill into ~/.claude/skills.
+        return ready_mod.run(["--check"] if args.check else [])
+
     if args.command in ("pull", "parse"):
         # Validate the range now so a bad argument fails fast and uniformly.
         try:
@@ -295,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 return parse_mod.parse(
                     years,
-                    data_dir=Path(args.data_dir),
+                    data_dir=resolve_data_dir(args.data_dir),
                     types=types,
                     strict=args.strict,
                     fetched_at=fetched_at,
@@ -313,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return pull_mod.pull(
                 years,
-                data_dir=Path(args.data_dir),
+                data_dir=resolve_data_dir(args.data_dir),
                 index_only=args.index_only,
                 delay=args.delay,
                 concurrency=args.concurrency,
@@ -321,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
                 user_agent=args.user_agent,
                 force=args.force,
                 types=types,
+                reference=args.reference,
                 fetched_at=fetched_at,
             )
         except pull_mod.PullError as exc:
@@ -346,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return inspect_run(
             years[0],
-            data_dir=Path(args.data_dir),
+            data_dir=resolve_data_dir(args.data_dir),
             sample=args.sample,
             seed=args.seed,
             started_at=fetched_at,
