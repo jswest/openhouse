@@ -20,10 +20,22 @@ from openhouse.parse import _classify_records
 from openhouse.pdf import (
     NotAnFdBody,
     PdfExtractError,
+    _parse_schedule_e,
     _scrub_field,
     _scrub_raw_text,
     extract_fd_schedules,
 )
+
+
+def test_schedule_parser_skips_nul_only_furniture_line():
+    # A NUL-only line (glyphless furniture — NUL isn't stripped by str.strip) must
+    # not become an empty-raw_text item; it carries no filer content, so _group_items
+    # skips it (matching _salvage_raw). Critic 🟢 finding.
+    assert _parse_schedule_e(["\x00\x00\x00"]) == []
+    # A real row beside furniture still yields exactly one item.
+    items = _parse_schedule_e(["\x00\x00", "Board Member  Acme Corp"])
+    assert len(items) == 1
+    assert items[0].raw_text == "Board Member Acme Corp"
 
 PDF_FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
 THOMPSON = PDF_FIXTURES / "efiled_fd_10042852.pdf"
@@ -163,26 +175,96 @@ def test_schedule_c_items():
     assert miss["raw_text"].startswith("State of Mississippi Member Retirement")
 
 
-# --- Schedules E–J: raw_text-only line items ----------------------------------
+# --- Schedules E–J: structured columns, every item keeps verbatim raw_text ----
 
 
-def test_schedule_e_is_raw_text_only():
+def test_schedule_e_positions_structured():
     body = extract_fd_schedules(THOMPSON)
     e = body.schedules["E"]
     assert e, "Schedule E (positions) has data on this form"
-    # Each E item is raw_text-only — exactly one key.
+    # Columns are position/organization; every item still carries raw_text.
     for item in e:
-        assert list(item.keys()) == ["raw_text"]
+        assert set(item.keys()) == {"position", "organization", "raw_text"}
         assert item["raw_text"].strip()
-    assert any("BLB Properties" in i["raw_text"] for i in e)
+    blb = next(i for i in e if "BLB Properties" in i["raw_text"])
+    assert blb["position"] == "President"
+    assert blb["organization"] == "BLB Properties"
+    # A multi-word title splits too.
+    board = next(i for i in e if "Housing Assistance Council" in i["raw_text"])
+    assert board["position"] == "Board Member"
+    assert board["organization"] == "Housing Assistance Council"
 
 
-def test_schedule_f_is_raw_text_only():
+def test_schedule_f_agreements_structured():
     body = extract_fd_schedules(THOMPSON)
     f = body.schedules["F"]
     assert f
     for item in f:
-        assert list(item.keys()) == ["raw_text"]
+        assert set(item.keys()) == {"date", "parties", "terms", "raw_text"}
+        assert item["raw_text"].strip()
+    # The agreement date splits off the leading "Month YYYY"; the wrapped terms
+    # fold into one verbatim raw_text.
+    first = f[0]
+    assert first["date"] == "February 2008"
+    assert "State of Mississippi" in first["raw_text"]
+    assert "payable to beneficiaries." in first["raw_text"]
+
+
+def test_every_ej_item_keeps_raw_text():
+    # The binding invariant: every E–J line item carries verbatim raw_text, so a
+    # column the parser cannot read loses nothing (CLAUDE.md).
+    body = extract_fd_schedules(THOMPSON)
+    for letter in ("E", "F"):
+        for item in body.schedules.get(letter, []):
+            assert item["raw_text"].strip()
+
+
+def test_schedule_g_h_i_j_structured_synthetic(monkeypatch):
+    # A synthetic FD exercising the G/H/I/J parsers, whose populated forms the
+    # committed fixtures lack (G–I render "None disclosed."; J is absent).
+    page = "\n".join(
+        [
+            "ScheDule g: giftS",
+            "Source Description Value",
+            "Acme Foundation Crystal vase $450.00",
+            "ScheDule H: travel PaymentS anD reimburSementS",
+            "Source Dates Location Items",
+            "Policy Institute 06/01/2020 - 06/03/2020 Aspen, CO Lodging, airfare",
+            "ScheDule i: PaymentS maDe to cHarity in lieu of Honoraria",
+            "Source Activity Date Amount",
+            "State University Lecture 03/15/2020 $2,000.00",
+            "ScheDule J: comPenSation in exceSS of $5,000 PaiD bY one Source",
+            "Source Brief Description of Duties",
+            "Old Employer LLC Senior advisory and consulting duties",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    assert sorted(body.schedules) == ["G", "H", "I", "J"]
+
+    g = body.schedules["G"]
+    assert len(g) == 1
+    assert set(g[0].keys()) == {"source", "description", "value", "raw_text"}
+    assert g[0]["value"] == "$450.00"
+    assert g[0]["source"] == "Acme Foundation Crystal vase"
+    assert g[0]["raw_text"].strip()
+
+    h = body.schedules["H"]
+    assert len(h) == 1
+    assert set(h[0].keys()) == {"source", "dates", "location", "items", "raw_text"}
+    assert "Aspen, CO" in h[0]["raw_text"]
+
+    i = body.schedules["I"]
+    assert len(i) == 1
+    assert set(i[0].keys()) == {"source", "activity", "date", "amount", "raw_text"}
+    assert i[0]["amount"] == "$2,000.00"
+    assert i[0]["source"].startswith("State University")
+
+    j = body.schedules["J"]
+    assert len(j) == 1
+    assert set(j[0].keys()) == {"source", "description", "raw_text"}
+    assert "advisory and consulting" in j[0]["raw_text"]
 
 
 # --- D structured (synthetic, since the fixture's D is "None disclosed.") ------

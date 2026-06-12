@@ -21,11 +21,30 @@ from pathlib import Path
 
 import pytest
 
-from openhouse.pdf import PdfExtractError, extract_ptr_transactions
+from openhouse.pdf import (
+    PdfExtractError,
+    _wrapped_range_tail_follows,
+    extract_ptr_transactions,
+)
 from openhouse.parse import _classify_records
 from openhouse.index import build_filing_records
 
 PDF_FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
+
+
+def test_wrapped_range_tail_guard_distinguishes_exact_from_wrapped_range():
+    # GH-0049 soundness guard (critic): a range whose " - $HIGH" tail wrapped off
+    # the header looks like an exact row. The guard peeks the next content line —
+    # a leading dash means a wrapped range, so the exact reading is refused (the
+    # row falls to extract_failed rather than fabricating a point).
+    assert _wrapped_range_tail_follows(["- $15,000"], 0, 1) is True
+    # Furniture / glyph / blank lines are skipped before the dash is found.
+    assert _wrapped_range_tail_follows(["", "gfedc", "- $15,000"], 0, 3) is True
+    # A genuine exact value: the next content line is a detail/description or the
+    # next row — never a dash tail.
+    assert _wrapped_range_tail_follows(["DESCRIPTION: a thing"], 0, 1) is False
+    # Nothing follows → not a wrapped range.
+    assert _wrapped_range_tail_follows([], 0, 0) is False
 
 LEE = PDF_FIXTURES / "efiled_ptr_20017980.pdf"
 LOWENTHAL = PDF_FIXTURES / "efiled_ptr_20016766.pdf"
@@ -400,6 +419,68 @@ def test_truncated_wrapped_high_still_raises(monkeypatch):
     page = "\n".join(
         [
             "Apple Inc. (AAPL) [ST] S 12/30/2019 01/10/2020 $15,001 - gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    with pytest.raises(PdfExtractError):
+        extract_ptr_transactions(Path("synthetic.pdf"))
+
+
+# --- #49: exact-dollar amount form ----------------------------------------
+
+
+def test_exact_dollar_amount_extracts_soundly(monkeypatch):
+    # A row whose amount column is a single EXACT dollar value ($894.97), not a
+    # $LOW - $HIGH bucket (#49). It must extract — represented as an exact point,
+    # NOT coerced into a fake {low: 894.97, high: 894.97} range — with low/high
+    # left None and the verbatim "$894.97" preserved as the label.
+    page = "\n".join(
+        [
+            "JT Apple Inc. (AAPL) [ST] S 12/16/2020 01/01/2021 $894.97 gfedcb",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert len(txns) == 1
+    amt = txns[0].amount_range
+    assert amt.exact == 894.97
+    assert amt.low is None and amt.high is None
+    assert amt.label == "$894.97"
+    # Serialized JSON carries `exact`, never a fabricated low/high pair.
+    dumped = amt.model_dump(mode="json")
+    assert dumped == {"exact": 894.97, "label": "$894.97"}
+
+
+def test_exact_and_range_rows_coexist_in_one_pdf(monkeypatch):
+    # A range row and an exact-dollar row in the same body both parse, and each
+    # bounds the other (an exact row is a row boundary too, like a range row).
+    page = "\n".join(
+        [
+            "Apple Inc. (AAPL) [ST] P 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+            "Ford Motor Co (F) [ST] S 02/02/2020 02/13/2020 $500 gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert len(txns) == 2
+    assert (txns[0].amount_range.low, txns[0].amount_range.high) == (1001, 15000)
+    assert txns[0].amount_range.exact is None
+    # A whole-dollar exact value (no cents) is accepted too.
+    assert txns[1].amount_range.exact == 500.0
+    assert txns[1].amount_range.low is None
+
+
+def test_one_sided_amount_still_fails_loudly(monkeypatch):
+    # A genuinely-malformed amount that is NEITHER a bucket NOR a bare exact dollar
+    # value ("Over $1,000,000") must still surface as extract_failed — never coerced
+    # into an exact value or a fabricated range (#49 keeps the loud residual).
+    page = "\n".join(
+        [
+            "Tesla Inc. (TSLA) [ST] S 12/17/2020 01/01/2021 Over $1,000,000 gfedc",
             "FILINg STATUS: New",
         ]
     )

@@ -47,6 +47,7 @@ from tqdm import tqdm
 
 from . import __version__
 from .index import IndexTarget, enumerate_targets
+from .legislators import LEGISLATORS_FILES, REFERENCE_SUBDIR
 
 # SPEC §2.1: one ZIP per year, refreshed daily.
 INDEX_URL_TEMPLATE = (
@@ -75,6 +76,19 @@ MAX_RETRIES = 5
 BACKOFF_BASE_SECONDS = 1.0
 
 REPO_URL = "https://github.com/jswest/openhouse"
+
+# The CC0 ``@unitedstates/congress-legislators`` bulk files (#16). Public domain
+# (CC0) — no conflict with the Clerk FD use restriction, which governs disclosure
+# data, not this reference set. Fetched once into ``raw/reference/`` and joined
+# OFFLINE in ``parse`` to attach ``bioguide:<id>`` to member filings. This is the
+# single declared exception to "``pull`` is the only network step": still inside
+# ``pull``, just a different (public-domain) source. The on-disk layout
+# (``REFERENCE_SUBDIR`` + the file names) is owned by ``legislators.py`` — the
+# join's consumer — so producer and consumer can never drift.
+LEGISLATORS_URL_TEMPLATE = (
+    "https://raw.githubusercontent.com/unitedstates/congress-legislators/main/"
+    "{name}"
+)
 
 # A loose email matcher for the required contact — enough to insist a real
 # address is present (not RFC-perfect validation, which would reject valid
@@ -269,6 +283,65 @@ def pull_index_year(
         file=sys.stderr,
     )
     return {"year": year, "status": "fetched", "files": written}
+
+
+# ---------------------------------------------------------------------------
+# CC0 congress-legislators reference fetch (#16) — the one declared exception
+# to "pull is the only network step": still in pull, a public-domain source.
+# ---------------------------------------------------------------------------
+def pull_legislators(
+    client: httpx.Client,
+    data_dir: Path,
+    *,
+    force: bool = False,
+    delay: float = DEFAULT_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict:
+    """Fetch the two CC0 ``congress-legislators`` bulk files into ``raw/reference/``.
+
+    ``legislators-current.json`` + ``legislators-historical.json`` are public
+    domain (CC0) and carry a stable ``id.bioguide`` per legislator, which ``parse``
+    joins **offline** to attach ``bioguide:<id>`` to member filings (#16). Same
+    polite floor as every other fetch (paced, backoff, 403-is-fatal via
+    :func:`polite_get`).
+
+    Idempotent: a file already present is not re-fetched unless ``force`` — the
+    reference set changes slowly, so a re-pull is a deliberate ``--force`` choice.
+    Returns a small status dict for logging.
+    """
+    ref_dir = data_dir / REFERENCE_SUBDIR
+    written: list[str] = []
+    skipped: list[str] = []
+    for i, name in enumerate(LEGISLATORS_FILES):
+        dest = ref_dir / name
+        if dest.exists() and not force:
+            print(
+                f"reference: {name} present ({dest}); skipping (re-fetch with "
+                f"--force).",
+                file=sys.stderr,
+            )
+            skipped.append(name)
+            continue
+        if i > 0:
+            sleep(delay)  # pace before every fetch but the first (polite floor)
+        url = LEGISLATORS_URL_TEMPLATE.format(name=name)
+        print(f"reference: fetching {url}", file=sys.stderr)
+        response = polite_get(client, url, sleep=sleep)
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        # Atomic write (critic): an interrupted fetch must never leave a truncated
+        # file behind — the skip-if-present check above would then permanently
+        # serve the partial file, silently disabling the bioguide join. Write to a
+        # .part sidecar and rename into place (rename is atomic on POSIX).
+        tmp = dest.with_name(dest.name + ".part")
+        tmp.write_bytes(response.content)
+        tmp.replace(dest)
+        written.append(name)
+    print(
+        f"reference: {len(written)} fetched, {len(skipped)} present/skipped "
+        f"(CC0 congress-legislators → {ref_dir}).",
+        file=sys.stderr,
+    )
+    return {"fetched": written, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +620,7 @@ def pull(
     user_agent: Optional[str] = None,
     force: bool = False,
     types: Iterable[str] = PDF_FAMILIES,
+    reference: bool = True,
     fetched_at: Optional[str] = None,
     client: Optional[httpx.Client] = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -591,10 +665,16 @@ def pull(
         client = httpx.Client(headers={"User-Agent": ua}, follow_redirects=True)
 
     try:
+        # The CC0 congress-legislators reference fetch (#16) — once, up front, so
+        # the offline join in `parse` has it. Disabled with --no-reference.
+        if reference:
+            pull_legislators(
+                client, data_dir, force=force, delay=delay, sleep=sleep
+            )
         for i, year in enumerate(years):
             # Pace before every request except the very first (polite floor,
             # SPEC §3).
-            if i > 0:
+            if i > 0 or reference:
                 sleep(delay)
             pull_index_year(client, year, data_dir, force=force, sleep=sleep)
             # --- issue #4 PDF-download path, gated on not index_only ---

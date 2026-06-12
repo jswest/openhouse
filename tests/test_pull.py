@@ -248,6 +248,7 @@ def test_pull_index_only_multiyear_paces_between_years(tmp_path):
         data_dir=tmp_path,
         index_only=True,
         contact=CONTACT,
+        reference=False,  # focus on year-pacing; the #16 fetch has its own test
         client=client,
         sleep=sleeps.append,
         delay=2.5,
@@ -275,6 +276,7 @@ def test_pull_without_index_only_fetches_index_then_pdfs(tmp_path, capsys):
         data_dir=tmp_path,
         index_only=False,
         contact=CONTACT,
+        reference=False,
         fetched_at="2026-06-11T00:00:00",
         client=client,
         sleep=no_sleep,
@@ -298,6 +300,7 @@ def test_pull_logs_user_agent(tmp_path, capsys):
         data_dir=tmp_path,
         index_only=True,
         contact="John West <john@example.com>",
+        reference=False,
         client=client,
         sleep=no_sleep,
     )
@@ -317,9 +320,48 @@ def test_pull_403_propagates_as_error(tmp_path):
             data_dir=tmp_path,
             index_only=True,
             contact=CONTACT,
+            reference=False,
             client=client,
             sleep=no_sleep,
         )
+
+
+# ---------------------------------------------------------------------------
+# CC0 congress-legislators reference fetch (#16) — offline via MockTransport.
+# ---------------------------------------------------------------------------
+def test_pull_legislators_fetches_both_files(tmp_path):
+    from openhouse.pull import pull_legislators
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = request.url.path.split("/")[-1]
+        return httpx.Response(200, content=f'[{{"file":"{name}"}}]'.encode())
+
+    client = make_client(handler)
+    result = pull_legislators(client, tmp_path, sleep=no_sleep)
+    ref = tmp_path / "raw" / "reference"
+    assert (ref / "legislators-current.json").exists()
+    assert (ref / "legislators-historical.json").exists()
+    assert result["fetched"] == [
+        "legislators-current.json",
+        "legislators-historical.json",
+    ]
+
+
+def test_pull_legislators_idempotent_skip(tmp_path):
+    from openhouse.pull import pull_legislators
+
+    ref = tmp_path / "raw" / "reference"
+    ref.mkdir(parents=True)
+    (ref / "legislators-current.json").write_text("[]")
+    (ref / "legislators-historical.json").write_text("[]")
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("no network call expected when files are present")
+
+    client = make_client(handler)
+    result = pull_legislators(client, tmp_path, sleep=no_sleep)
+    assert result["fetched"] == []
+    assert len(result["skipped"]) == 2
 
 
 # ---------------------------------------------------------------------------
