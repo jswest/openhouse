@@ -517,14 +517,9 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
         # Transaction type: the P/S/E letter sitting after the date.
         ttype = None
         if date_m:
-            after = raw[date_m.end() :].lstrip()
-            tt_m = re.match(r"(S \(partial\)|[PSE])\b", after)
+            tt_m = re.match(r"(S \(partial\)|[PSE])\b", raw[date_m.end() :].lstrip())
             if tt_m:
-                ttype = (
-                    "S(partial)"
-                    if tt_m.group(1) == "S (partial)"
-                    else tt_m.group(1)
-                )
+                ttype = "S(partial)" if tt_m.group(1) == "S (partial)" else tt_m.group(1)
         type_m = _FD_TYPE_TAG_RE.search(raw)
         asset_type = type_m.group(1) if type_m else None
         # Asset name = everything before the ⇒ arrow, plus any wrapped tail with
@@ -581,6 +576,17 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
     return items
 
 
+# A Schedule D ``Date incurred`` — ``Month YYYY``, ``MM/DD/YYYY``, or ``MM/YYYY``
+# (longer date forms first so the most specific match wins). Used both to anchor a
+# liability row's item-start and to extract the date, so the two always agree.
+_FD_DATE_RE = re.compile(
+    r"\b("
+    r"(?:January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)\s+\d{4}"
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b"
+)
+
+
 def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
     """Schedule D (liabilities) → structured items + raw_text.
 
@@ -588,32 +594,11 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
     range wraps onto the next line, so item-start anchors on the row bearing a
     month/year ``Date incurred`` and folds the wrapped amount in.
     """
-
-    def starts(s: str) -> bool:
-        # A liability row carries a "Month YYYY" or "MM/YYYY"/"MM/DD/YYYY" date.
-        return bool(
-            re.search(
-                r"\b("
-                r"January|February|March|April|May|June|July|August|"
-                r"September|October|November|December"
-                r")\s+\d{4}\b",
-                s,
-            )
-            or re.search(r"\b\d{1,2}/\d{4}\b", s)
-            or re.search(r"\b\d{1,2}/\d{1,2}/\d{4}\b", s)
-        )
-
     items: list[ScheduleDItem] = []
-    for raw in _group_items(lines, starts_item=starts):
+    for raw in _group_items(lines, starts_item=lambda s: bool(_FD_DATE_RE.search(s))):
         owner_m = re.match(r"(SP|DC|JT)\b", raw)
         owner = owner_m.group(1) if owner_m else None
-        date_m = re.search(
-            r"\b("
-            r"(?:January|February|March|April|May|June|July|August|"
-            r"September|October|November|December)\s+\d{4}"
-            r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b",
-            raw,
-        )
+        date_m = _FD_DATE_RE.search(raw)
         date_incurred = date_m.group(1) if date_m else None
         # Creditor = text between any owner token and the date.
         start = owner_m.end() if owner_m else 0
