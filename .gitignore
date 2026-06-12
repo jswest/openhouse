@@ -29,4 +29,11 @@ node_modules/
 !.claude/hooks/
 !.claude/settings.json
 !.claude/skills/
+# Per-repo config for the vendored ship/ultraship skills (authored here, never
+# pressed). The skills read these; everything repo-specific lives in them.
+!.claude/ship.toml
+!.claude/ultraship.toml
+# Provenance stamp left by the press: machine-local (drawer path + file hashes),
+# so a clone with no drawer self-skips its drift check. Never committed.
+.claude/skills/*/.stamp
 .claude/scratch
