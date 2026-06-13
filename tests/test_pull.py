@@ -364,6 +364,62 @@ def test_pull_legislators_idempotent_skip(tmp_path):
     assert len(result["skipped"]) == 2
 
 
+def test_pull_legislators_uses_gh_pages_mirror(tmp_path):
+    """#75: the reference fetch targets the live gh-pages JSON mirror, not the
+    dead raw.githubusercontent.com path."""
+    from openhouse.pull import pull_legislators
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"[]")
+
+    client = make_client(handler)
+    pull_legislators(client, tmp_path, sleep=no_sleep)
+    assert seen == [
+        "https://unitedstates.github.io/congress-legislators/"
+        "legislators-current.json",
+        "https://unitedstates.github.io/congress-legislators/"
+        "legislators-historical.json",
+    ]
+
+
+def test_pull_reference_fetch_failure_is_non_fatal(tmp_path, capsys):
+    """#75: a reference fetch failure (e.g. upstream 404) must NOT abort the pull
+    — it warns and proceeds without bioguide enrichment, exactly like
+    --no-reference, so disclosure PDFs still download."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "legislators-" in path:
+            return httpx.Response(404)  # reference source moved/gone
+        if path.endswith("2024FD.zip"):
+            return httpx.Response(200, content=make_index_zip(2024))
+        return httpx.Response(200, content=b"%PDF-fake")
+
+    client = make_client(handler)
+    rc = pull(
+        [2024],
+        data_dir=tmp_path,
+        index_only=False,
+        contact=CONTACT,
+        reference=True,  # reference ON, but the fetch will fail
+        fetched_at="2026-06-11T00:00:00",
+        client=client,
+        sleep=no_sleep,
+    )
+    assert rc == 0  # the pull as a whole succeeds despite the reference failure
+    year_dir = tmp_path / "raw" / "2024"
+    assert (year_dir / "2024FD.xml").exists()
+    # PDFs still downloaded — the abort happened before this in the old code.
+    assert (year_dir / "ptr" / "20024277.pdf").exists()
+    # No reference files were written (the join falls back to name: keys).
+    assert not (tmp_path / "raw" / "reference" / "legislators-current.json").exists()
+    err = capsys.readouterr().err
+    assert "without bioguide identity" in err.lower()
+
+
 # ---------------------------------------------------------------------------
 # Bad year range is rejected (reusing the #2 parser, via the CLI)
 # ---------------------------------------------------------------------------
