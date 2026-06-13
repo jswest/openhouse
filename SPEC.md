@@ -465,6 +465,22 @@ bioguide on a `bioguide_id` field:
    candidates fall back to the `name:` key rather than risk a false-positive
    bioguide (sound over complete; an incumbent stays bioguide-identified via their
    non-candidate filings).
+
+   **Reference source URL — ✅ VERIFIED 2026-06-13 (#75).** The two CC0 JSON bulk
+   files live at the project's gh-pages mirror (HTTP 200):
+
+   - `https://unitedstates.github.io/congress-legislators/legislators-current.json`
+   - `https://unitedstates.github.io/congress-legislators/legislators-historical.json`
+
+   The former `raw.githubusercontent.com/unitedstates/congress-legislators/main/`
+   path now **404s** and the legacy `theunitedstates.io` distribution is **410
+   Gone**; the gh-pages mirror is the live successor. The files are still JSON
+   (the existing parser is unchanged — **no YAML dependency**). The fetch is
+   **non-fatal**: if it fails after the normal retry/backoff, `pull` warns to
+   stderr and continues with **no** bioguide enrichment (identical to
+   `--no-reference`), rather than aborting before any disclosure PDFs download —
+   identity is optional enrichment, never a gate. If upstream moves again, update
+   `LEGISLATORS_URL_TEMPLATE` in `pull.py` and this note together.
 2. **`name:<name_key>`** — the last resort when no seat matched. The key is the
    old normalized slug:
 

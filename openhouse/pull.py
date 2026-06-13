@@ -85,9 +85,13 @@ REPO_URL = "https://github.com/jswest/openhouse"
 # ``pull``, just a different (public-domain) source. The on-disk layout
 # (``REFERENCE_SUBDIR`` + the file names) is owned by ``legislators.py`` — the
 # join's consumer — so producer and consumer can never drift.
+#
+# Source URL (verified 2026-06-13): the project's gh-pages mirror at
+# ``unitedstates.github.io`` is the live home of these JSON files (HTTP 200). The
+# former ``raw.githubusercontent.com/.../main/`` path is 404 and the legacy
+# ``theunitedstates.io`` distribution is 410 Gone — see SPEC.md "verified facts".
 LEGISLATORS_URL_TEMPLATE = (
-    "https://raw.githubusercontent.com/unitedstates/congress-legislators/main/"
-    "{name}"
+    "https://unitedstates.github.io/congress-legislators/{name}"
 )
 
 # A loose email matcher for the required contact — enough to insist a real
@@ -667,10 +671,26 @@ def pull(
     try:
         # The CC0 congress-legislators reference fetch (#16) — once, up front, so
         # the offline join in `parse` has it. Disabled with --no-reference.
+        #
+        # Identity enrichment is OPTIONAL, never a gate (#75): if the reference
+        # files can't be fetched (upstream moved/404/410, network error — even
+        # after retry/backoff), warn and proceed WITHOUT bioguide data, exactly as
+        # --no-reference does, rather than abort before any disclosure PDF
+        # downloads. `parse` then falls back to the last-resort name: key for
+        # every filer. A real disclosure-side failure below still aborts.
         if reference:
-            pull_legislators(
-                client, data_dir, force=force, delay=delay, sleep=sleep
-            )
+            try:
+                pull_legislators(
+                    client, data_dir, force=force, delay=delay, sleep=sleep
+                )
+            except PullError as exc:
+                print(
+                    f"warning: could not fetch the CC0 congress-legislators "
+                    f"reference set ({exc}); continuing WITHOUT bioguide identity "
+                    f"enrichment (as with --no-reference). Filers will be "
+                    f"name-keyed only; re-run `openhouse pull` to retry the fetch.",
+                    file=sys.stderr,
+                )
         for i, year in enumerate(years):
             # Pace before every request except the very first (polite floor,
             # SPEC §3).
