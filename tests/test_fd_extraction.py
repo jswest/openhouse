@@ -11,6 +11,7 @@ page text — no Clerk, no extra binary fixtures.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -960,6 +961,53 @@ def test_member_form_double_wrap_row_repairs_both_bounds():
     twiex = next(i for i in a if "TWIEX" in i["raw_text"])
     assert twiex["value_of_asset"]["label"] == "$100,001 - $250,000"
     assert twiex["income_amount"]["label"] == "$5,001 - $15,000"
+
+
+def test_member_form_subholding_asset_name_has_no_bled_column_text():
+    # GH-0099: on a ⇒-subholding row the value / income-type / income / glyph
+    # column text renders physically *between* the wrapped name fragments, so
+    # ``raw[:type_tag]`` swallowed it into the asset string (asset unusable as a
+    # grouping key, owner often dropped). The already-parsed column spans must be
+    # lifted back out, leaving the clean subholding name — while the structured
+    # value/income fields (verified by the sibling wrap tests) stay intact.
+    a = extract_fd_schedules(WELCH_SUBWRAP).schedules["A"]
+
+    # Single-wrap row: "Welch account ⇒ $15,001 - $50,000 Dividends $201 -
+    # gfedcb aberdeen … Strategy $1,000 K-1 Free ETF (BCI) [EF]". Pre-fix the
+    # asset carried "$15,001 - $50,000 Dividends $201 - gfedcb … $1,000".
+    first = a[0]
+    assert first["asset"] == (
+        "Welch account ⇒ aberdeen Standard Bloomberg all Commodity "
+        "Strategy K-1 Free ETF (BCI)"
+    )
+    # Structured columns the bled text was lifted into (GH-0099 must not regress
+    # the GH-0098 wrap repair the names were entangled with).
+    assert first["value_of_asset"]["label"] == "$15,001 - $50,000"
+    assert first["income_type"] == "Dividends"
+    assert first["income_amount"]["label"] == "$201 - $1,000"
+
+    # Double-wrap row: both bounds wrapped; the two bare highs ($250,000 /
+    # $15,000) sat inside the name. They land in their structured fields and the
+    # asset name keeps only the (TWIEX) holding (plus a residual wrapped income
+    # word the sub-pattern leaves — the name no longer carries any $ or owner).
+    twiex = next(i for i in a if "TWIEX" in i["raw_text"])
+    assert "$" not in twiex["asset"]
+    assert twiex["value_of_asset"]["label"] == "$100,001 - $250,000"
+    assert twiex["income_amount"]["label"] == "$5,001 - $15,000"
+
+    # None/None row: "Welch account ⇒ None None gfedc Charles Schwab
+    # Corporation (SCHW) [ST]". The value-None / income-None literals and glyph
+    # are column furniture — strip them, keep the ⇒ subholding marker.
+    schwab = next(
+        i for i in a if i["raw_text"].startswith("Welch account ⇒ None None")
+    )
+    assert schwab["asset"] == "Welch account ⇒ Charles Schwab Corporation (SCHW)"
+
+    # No surviving row carries an owner code, dollar range, or glyph in its name.
+    for item in a:
+        assert not re.search(r"\bgfedcb?\b", item["asset"])
+        assert "$" not in item["asset"]
+        assert not re.search(r"⇒\s*(?:SP|DC|JT)\b", item["asset"])
 
 
 def test_schedule_a_wrapped_value_high_does_not_cross_pair_income(monkeypatch):
