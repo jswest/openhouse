@@ -236,6 +236,9 @@ def test_trades_table(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "ticker" in out and "asset" in out
+    # The readable filer name renders alongside the opaque filer_id column.
+    assert "filer" in out  # the new name column header
+    assert "Anders" in out  # the 2021 fixture filer's name
 
 
 def test_ticker_is_sound_exact_match(capsys):
