@@ -911,39 +911,85 @@ def _fd_amount_entries(
       (say, a dollar figure inside an asset name) makes the wrap ambiguous, and
       every dangling resolves to ``None`` instead (degrade, never fabricate —
       #12). An unresolved dangling still holds its column slot.
+
+    **Cross-column contamination** (GH-0098): when *every* column's high bound
+    wraps, an earlier column's wrapped high can land in the de-wrapped text right
+    in front of a later column's ``$lo -`` start — so ``_FD_AMOUNT_RE`` greedily
+    glues ``$laterLow - $earlierHigh`` into a spurious complete bucket, crossing
+    the columns and leaving the row's first low dangling against the *wrong* high
+    (``value $250,001 - $50,000`` — ``high < low`` — with income overstated). The
+    tell is an **inverted** result: a bucket whose ``low > high`` cannot be a real
+    Clerk range, so the left-to-right pairing must have crossed columns. We first
+    build the entries reading buckets as written; if any range inverts, we re-read
+    treating each contaminating bucket (one preceded by a dangling low) as a split
+    ``$laterLow -`` start + a wrapped ``$earlierHigh`` bare, which restores column
+    order. A genuine inline bucket (``$201 - $1,000``) never inverts, so the
+    no-split reading already stands — the retry only fires on real contamination.
+    Any range still inverted after the retry degrades to ``None`` (slot held,
+    ``raw_text`` intact): an impossible bucket is never emitted (degrade, never
+    fabricate — #12).
     """
-    buckets = list(_FD_AMOUNT_RE.finditer(cols, start))
-    spans = [m.span() for m in buckets]
 
-    def unclaimed(m: re.Match) -> bool:
-        # No overlap with any span already claimed by an earlier entry kind
-        # (reads ``spans`` at call time, so each ``spans +=`` below narrows it).
-        return not any(b0 < m.end() and m.start() < b1 for b0, b1 in spans)
+    def build(split_contaminated: bool) -> list[tuple[int, int, AmountRange | None]]:
+        letter_lows = list(_FD_DANGLING_LOW_RE.finditer(cols, start))
+        buckets: list[re.Match] = []
+        # (start, end, low) for lows split out of cross-column buckets.
+        split_lows: list[tuple[int, int, str]] = []
+        for m in _FD_AMOUNT_RE.finditer(cols, start):
+            if split_contaminated and any(d.start() < m.start() for d in letter_lows):
+                low = re.match(r"\$([\d,]+)\s*-\s*", m.group(0))
+                split_lows.append((m.start(), m.start() + low.end(), low.group(1)))
+            else:
+                buckets.append(m)
+        spans = [m.span() for m in buckets]
 
-    overs = [m for m in _FD_A_OVER_RE.finditer(cols, start) if unclaimed(m)]
-    spans += [m.span() for m in overs]
-    danglings = [m for m in _FD_DANGLING_LOW_RE.finditer(cols, start) if unclaimed(m)]
-    spans += [m.span() for m in danglings]
-    bares = [
-        m
-        for m in _FD_BARE_AMOUNT_RE.finditer(cols, start)
-        if unclaimed(m)
-        and not cols[m.end() :].lstrip().startswith("-")  # a range's own low
-        and not cols[m.end() :].startswith(".")  # an exact value's dollars
-    ]
+        def unclaimed(m: re.Match) -> bool:
+            # No overlap with any span already claimed by an earlier entry kind
+            # (reads ``spans`` at call time, so each ``spans +=`` below narrows it).
+            return not any(b0 < m.end() and m.start() < b1 for b0, b1 in spans)
 
-    entries: list[tuple[int, int, AmountRange | None]] = [
-        (m.start(), m.end(), _bucket(m.group(0))) for m in buckets
-    ]
-    entries += [(m.start(), m.end(), None) for m in overs]
-    if danglings and len(danglings) == len(bares):
-        entries += [
-            (d.start(), d.end(), _parse_amount_range(f"${d.group(1)} - {b.group(0)}"))
-            for d, b in zip(danglings, bares)
+        overs = [m for m in _FD_A_OVER_RE.finditer(cols, start) if unclaimed(m)]
+        spans += [m.span() for m in overs]
+        # Column lows in column order: letter-followed danglings + split-out lows.
+        danglings = [(d.start(), d.end(), d.group(1)) for d in letter_lows]
+        danglings += split_lows
+        danglings.sort()
+        spans += [(s, e) for s, e, _ in danglings]
+        bares = [
+            m
+            for m in _FD_BARE_AMOUNT_RE.finditer(cols, start)
+            if unclaimed(m)
+            and not cols[m.end() :].lstrip().startswith("-")  # a range's own low
+            and not cols[m.end() :].startswith(".")  # an exact value's dollars
         ]
-    else:
-        entries += [(d.start(), d.end(), None) for d in danglings]
-    return sorted(entries)
+
+        entries: list[tuple[int, int, AmountRange | None]] = [
+            (m.start(), m.end(), _bucket(m.group(0))) for m in buckets
+        ]
+        entries += [(m.start(), m.end(), None) for m in overs]
+        if danglings and len(danglings) == len(bares):
+            entries += [
+                (s, e, _parse_amount_range(f"${low} - {b.group(0)}"))
+                for (s, e, low), b in zip(danglings, bares)
+            ]
+        else:
+            entries += [(s, e, None) for s, e, _ in danglings]
+        entries.sort()
+        return entries
+
+    def is_inverted(r: AmountRange | None) -> bool:
+        return bool(r and r.low is not None and r.high is not None and r.low > r.high)
+
+    def inverted(es: list[tuple[int, int, AmountRange | None]]) -> bool:
+        return any(is_inverted(r) for _, _, r in es)
+
+    entries = build(split_contaminated=False)
+    if inverted(entries):
+        retry = build(split_contaminated=True)
+        if not inverted(retry):
+            entries = retry
+    # Never emit a range that is still inverted — degrade it to None.
+    return [(s, e, None if is_inverted(r) else r) for s, e, r in entries]
 
 
 def _schedule_a_amounts(
