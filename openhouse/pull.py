@@ -46,7 +46,7 @@ import httpx
 from tqdm import tqdm
 
 from . import __version__
-from .index import IndexTarget, enumerate_targets
+from .index import IndexTarget, build_filing_records, enumerate_targets
 from .legislators import LEGISLATORS_FILES, REFERENCE_SUBDIR
 
 # SPEC §2.1: one ZIP per year, refreshed daily.
@@ -369,6 +369,7 @@ def pull_pdfs_year(
     fetched_at: str,
     *,
     types: Iterable[str] = PDF_FAMILIES,
+    doc_ids: Optional[set[str]] = None,
     force: bool = False,
     delay: float = DEFAULT_DELAY_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
@@ -380,6 +381,14 @@ def pull_pdfs_year(
     already present and size-consistent. Writes ``raw/<year>/pull-manifest.json``
     (SPEC §6.5) with one entry per DocID: URL, HTTP status, byte size, sha256,
     and the single entry-time ``fetched_at`` threaded in from the caller.
+
+    ``doc_ids`` (issue #78: targeted pull) narrows the download to just those
+    DocIDs — the rest of the year's PDFs are NOT fetched. It is the only
+    behavioural change of ``--doc-id`` / ``--member``: the index is still read in
+    full (so routing/metadata is intact), the manifest still records every
+    fetched/skipped target, and the polite floor is unchanged — targeted pull
+    fetches FEWER bodies, never faster or less politely. ``None`` (the default)
+    means the whole year, exactly as before.
 
     Resumability: a target whose file is already present and whose size matches
     the recorded manifest entry is **skipped** with no network request. A present
@@ -413,6 +422,11 @@ def pull_pdfs_year(
     by_family: dict[str, list[IndexTarget]] = {fam: [] for fam in PDF_FAMILIES}
     filtered = 0
     for target in enumerate_targets(xml_path, year):
+        # Targeted pull (#78): a DocID outside the requested set is not fetched.
+        # It is not "filtered" (that count is for --types exclusions, a different
+        # axis) — it simply isn't in scope for this targeted run.
+        if doc_ids is not None and target.doc_id not in doc_ids:
+            continue
         if target.family in selected and target.family in by_family:
             by_family[target.family].append(target)
         else:
@@ -464,6 +478,29 @@ def pull_pdfs_year(
         "skipped": counts["skipped"],
         "not_found": counts["not_found"],
         "filtered": filtered,
+    }
+
+
+def doc_ids_for_member(xml_path: Path, year: int, member: str) -> set[str]:
+    """The DocIDs in ``<year>FD.xml`` whose filer matches ``member`` (issue #78).
+
+    Reuses the *same* name-matching the read surface uses (``read._member_matches``,
+    a case-insensitive substring over ``filer_id`` + the raw name parts), fed from
+    the same offline index parse ``parse`` uses (``build_filing_records``). No
+    legislators index is supplied, so the match is on the raw name (and the
+    last-resort ``name:`` key) regardless of whether the CC0 reference fetch ran —
+    a ``--member`` pull is deterministic against the index alone. A row with no
+    DocID yields no body to fetch and is skipped (it never matches a download).
+    """
+    # Imported here, not at module top, to avoid a pull↔read import cycle (read
+    # imports nothing from pull, but keeping the dependency lazy is the smaller
+    # footprint and matches the rest of the tool reusing read's matcher).
+    from .read import _member_matches
+
+    return {
+        record.doc_id
+        for record in build_filing_records(xml_path, year)
+        if record.doc_id and _member_matches(record.model_dump(), member)
     }
 
 
@@ -625,6 +662,9 @@ def pull(
     force: bool = False,
     types: Iterable[str] = PDF_FAMILIES,
     reference: bool = True,
+    member: Optional[str] = None,
+    doc_id: Optional[str] = None,
+    newest_first: bool = False,
     fetched_at: Optional[str] = None,
     client: Optional[httpx.Client] = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -637,6 +677,22 @@ def pull(
     write ``raw/<year>/pull-manifest.json`` (SPEC §6.5). ``types`` filters which
     PDF families to fetch (default both).
 
+    Targeted pull (issue #78) narrows WHICH PDFs download, never how politely:
+
+    - ``doc_id`` — fetch only that single filing's body. The year index is still
+      fetched (it carries the filing's family/metadata), but no other PDF is
+      downloaded. The CLI requires ``doc_id`` to be paired with exactly one year.
+    - ``member`` — fetch only the bodies of filings whose filer matches the name,
+      using the same matcher as ``read --member`` (see :func:`doc_ids_for_member`).
+      The full year index is fetched; only matching DocIDs' PDFs download.
+    - ``newest_first`` — process ``years`` in descending order instead of the
+      default ascending. Purely an ordering choice; it changes nothing about
+      what is fetched, only the sequence (and so which year a Ctrl-C lands in).
+
+    ``doc_id`` and ``member`` are mutually exclusive (the CLI rejects both); a bare
+    ``pull`` (neither) keeps the whole-year behaviour. All three preserve the
+    polite floor, idempotence, and the per-year manifest exactly as before.
+
     ``fetched_at`` is the single entry-time timestamp threaded into every
     manifest entry (SPEC §9: no wall-clock in core logic). The caller (the CLI)
     captures it once; it defaults here to one ``datetime.now()`` read only so an
@@ -647,6 +703,20 @@ def pull(
     """
     if fetched_at is None:
         fetched_at = datetime.now().isoformat()
+    if doc_id and member:
+        raise PullError(
+            "--doc-id and --member are mutually exclusive: --doc-id fetches one "
+            "filing by id, --member fetches a filer's filings. Pick one."
+        )
+    if doc_id and len(years) != 1:
+        raise PullError(
+            "--doc-id needs exactly one year (the per-document URL is "
+            "ptr-pdfs/<year>/<doc_id>.pdf): pass a single YYYY, not a range."
+        )
+    # --newest-first: process the requested years descending instead of the
+    # default ascending. Pure ordering — what is fetched is unchanged.
+    if newest_first:
+        years = sorted(years, reverse=True)
     ua = build_user_agent(contact=contact, user_agent=user_agent)
     print(f"pull: User-Agent: {ua}", file=sys.stderr)
     if delay != DEFAULT_DELAY_SECONDS:
@@ -699,12 +769,36 @@ def pull(
             pull_index_year(client, year, data_dir, force=force, sleep=sleep)
             # --- issue #4 PDF-download path, gated on not index_only ---
             if not index_only:
+                # Targeted pull (#78): narrow to the requested DocID(s) for this
+                # year, computed AFTER the index is on disk (it is what we read).
+                # ``None`` = the whole year (the default, unchanged).
+                xml_path = data_dir / "raw" / str(year) / f"{year}FD.xml"
+                selected_doc_ids: Optional[set[str]] = None
+                if doc_id:
+                    selected_doc_ids = {doc_id}
+                    # A --doc-id absent from the index would otherwise fetch
+                    # nothing with no signal; warn so it is never silent.
+                    known = {t.doc_id for t in enumerate_targets(xml_path, year)}
+                    if doc_id not in known:
+                        print(
+                            f"{year}: --doc-id {doc_id!r} is not in the index; "
+                            f"nothing to fetch (check the id and year).",
+                            file=sys.stderr,
+                        )
+                elif member:
+                    selected_doc_ids = doc_ids_for_member(xml_path, year, member)
+                    print(
+                        f"{year}: --member {member!r} matched "
+                        f"{len(selected_doc_ids)} filing(s).",
+                        file=sys.stderr,
+                    )
                 pull_pdfs_year(
                     client,
                     year,
                     data_dir,
                     fetched_at,
                     types=types,
+                    doc_ids=selected_doc_ids,
                     force=force,
                     delay=delay,
                     sleep=sleep,

@@ -239,7 +239,10 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             '  openhouse pull 2024 --contact "Jane Doe <jane@example.com>"\n'
             "  openhouse pull 2020-2024 --types ptr     # only PTRs, five years\n"
-            "  openhouse pull 2024 --index-only         # index metadata, no PDFs"
+            "  openhouse pull 2024 --index-only         # index metadata, no PDFs\n"
+            "  openhouse pull 2024 --member Pelosi      # only that filer's PDFs\n"
+            "  openhouse pull 2024 --doc-id 20024277    # one filing's PDF\n"
+            "  openhouse pull 2020-2024 --newest-first  # 2024 first, 2020 last"
         ),
     )
     pull_p.add_argument("years", help="YYYY or YYYY-YYYY")
@@ -308,6 +311,32 @@ def build_parser() -> argparse.ArgumentParser:
             "skip the one-time CC0 congress-legislators fetch (the offline "
             "bioguide-identity join in `parse` then falls back to name-only keys)"
         ),
+    )
+    # Targeted pull (#78): narrow WHICH PDFs download — never faster, just fewer.
+    pull_p.add_argument(
+        "--doc-id",
+        default=None,
+        help=(
+            "fetch only this single filing's PDF (by its DocID). Still fetches "
+            "the year index for the filing's type/metadata, but no other PDF. "
+            "REQUIRES exactly one year (the URL is keyed on year). Mutually "
+            "exclusive with --member."
+        ),
+    )
+    pull_p.add_argument(
+        "--member",
+        default=None,
+        help=(
+            "fetch only the PDFs of filings whose filer matches this name "
+            "(case-insensitive substring, the same matcher as `read --member`). "
+            "Fetches the full year index, then narrows the downloads. Mutually "
+            "exclusive with --doc-id."
+        ),
+    )
+    pull_p.add_argument(
+        "--newest-first",
+        action="store_true",
+        help="process the requested years newest-first (descending) instead of oldest-first",
     )
 
     parse_p = subparsers.add_parser(
@@ -493,6 +522,9 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 types=types,
                 reference=args.reference,
+                member=args.member,
+                doc_id=args.doc_id,
+                newest_first=args.newest_first,
                 fetched_at=fetched_at,
             )
         except pull_mod.PullError as exc:
