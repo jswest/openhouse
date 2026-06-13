@@ -248,7 +248,7 @@ openhouse pull 2024 --index-only
   file chatter is folded into the bar plus an end-of-year summary. Auto-suppressed
   when stderr is not a TTY (piped/logged).
 - **Flags:** `--types ptr,fd` (default both), `--index-only`, `--data-dir PATH`
-  (default `./data`), `--delay SECONDS` (default 2.5), `--concurrency N`
+  (default `~/.openhouse`), `--delay SECONDS` (default 2.5), `--concurrency N`
   (default 1 — exceeding the defaults is a deliberate, documented user choice),
   `--contact "NAME <EMAIL>"` (required unless `--user-agent`), `--user-agent
   STRING`, `--force` (re-download).
@@ -465,6 +465,22 @@ bioguide on a `bioguide_id` field:
    candidates fall back to the `name:` key rather than risk a false-positive
    bioguide (sound over complete; an incumbent stays bioguide-identified via their
    non-candidate filings).
+
+   **Reference source URL — ✅ VERIFIED 2026-06-13 (#75).** The two CC0 JSON bulk
+   files live at the project's gh-pages mirror (HTTP 200):
+
+   - `https://unitedstates.github.io/congress-legislators/legislators-current.json`
+   - `https://unitedstates.github.io/congress-legislators/legislators-historical.json`
+
+   The former `raw.githubusercontent.com/unitedstates/congress-legislators/main/`
+   path now **404s** and the legacy `theunitedstates.io` distribution is **410
+   Gone**; the gh-pages mirror is the live successor. The files are still JSON
+   (the existing parser is unchanged — **no YAML dependency**). The fetch is
+   **non-fatal**: if it fails after the normal retry/backoff, `pull` warns to
+   stderr and continues with **no** bioguide enrichment (identical to
+   `--no-reference`), rather than aborting before any disclosure PDFs download —
+   identity is optional enrichment, never a gate. If upstream moves again, update
+   `LEGISLATORS_URL_TEMPLATE` in `pull.py` and this note together.
 2. **`name:<name_key>`** — the last resort when no seat matched. The key is the
    old normalized slug:
 
@@ -590,9 +606,13 @@ body with `parse_status: "ok"`.
 
 The data root (`<data-dir>`) resolves with a uniform precedence across all three
 commands (#50): the explicit `--data-dir` flag → the `OPENHOUSE_DATA_DIR`
-environment variable → the `./data` default. Setting `OPENHOUSE_DATA_DIR` gives an
-agent invoking openhouse from any working directory one stable store, instead of
-silently creating a separate empty `./data` island per cwd.
+environment variable → the `~/.openhouse` default (#80, a single per-user
+dotfolder in `$HOME`, expanded via `Path.home()`). Because the default is
+home-relative rather than cwd-relative, an agent invoking openhouse from any
+working directory lands in one stable store — no separate empty `./data` island
+per cwd. When the default is in use and a non-empty `./data` exists in the cwd
+(a leftover from before #80), openhouse prints a one-time stderr note that it is
+being shadowed; it does not auto-migrate or read from `./data`.
 
 ### 6.5 Manifests
 

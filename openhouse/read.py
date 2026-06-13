@@ -257,6 +257,28 @@ def _print_skipped(skipped: list[int]) -> None:
         )
 
 
+def _require_present(data_dir: Path, present: list[int], years: list[int]) -> None:
+    """Fail LOUDLY when NONE of the requested ``years`` are parsed on disk (#79).
+
+    A range query over a data dir with no parsed years for the range bounds
+    nothing: "complete over 0 filings, residual 0" reads like a trustworthy zero
+    but is really "I looked here and found no parsed data at all" — the
+    sound/complete contract (CLAUDE.md) is violated by reporting it as an empty
+    match. This is the wrong-``--data-dir`` / unparsed-corpus case, distinct from
+    a real query that scanned parsed data and matched nothing (which stays exit
+    0). Raises :class:`ReadError` (→ non-zero exit, message on stderr) naming the
+    resolved data dir so the operator can see where ``read`` actually looked.
+    """
+    if present:
+        return
+    raise ReadError(
+        f"no parsed data for {years} under {data_dir} (looked in "
+        f"{data_dir / 'parsed'}/<year>/). This is NOT an empty match — there is "
+        f"nothing parsed here to query. Check --data-dir / OPENHOUSE_DATA_DIR "
+        f"points at a parsed corpus, then run `openhouse parse` if needed."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Filters (shared predicates over filing-metadata dicts).
 # ---------------------------------------------------------------------------
@@ -285,6 +307,19 @@ def _member_matches(filing: dict, needle: str) -> bool:
         _ci_contains(filer.get(part), needle)
         for part in ("prefix", "first", "last", "suffix")
     )
+
+
+def _bioguide_matches(filing: dict, needle: str) -> bool:
+    """``--bioguide`` match: exact (case-insensitive) on the ``bioguide_id`` field.
+
+    The PRECISE counterpart to the fuzzy ``--member`` substring: it tests *only*
+    the verified ``bioguide_id`` (the CC0 congress-legislators identity join, #16,
+    populated when reference enrichment runs), with no substring fuzzing. A SOUND
+    filter — no false positives: every hit is the pinned member. A record whose
+    ``bioguide_id`` is ``None`` (name-keyed, unpinned) never matches.
+    """
+    bid = filing.get("bioguide_id")
+    return bool(bid) and bid.upper() == needle.upper()
 
 
 def _state_matches(filing: dict, needle: str) -> bool:
@@ -350,6 +385,8 @@ def _filter_filings(filings: list[dict], args) -> list[dict]:
         if args.type and not _type_matches(f, args.type):
             continue
         if args.member and not _member_matches(f, args.member):
+            continue
+        if args.bioguide and not _bioguide_matches(f, args.bioguide):
             continue
         if args.state and not _state_matches(f, args.state):
             continue
@@ -420,6 +457,7 @@ def _filings_table(filings: list[dict]):
 def cmd_filings(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _require_present(data_dir, present, years)
     _warn_schema_drift(data_dir, present)
 
     matched: list[dict] = []
@@ -572,6 +610,8 @@ def _trade_matches(txn: dict, filing: dict, args) -> bool:
             return False
     if args.member and not _member_matches(filing, args.member):
         return False
+    if args.bioguide and not _bioguide_matches(filing, args.bioguide):
+        return False
     return True
 
 
@@ -668,6 +708,7 @@ def _trades_table(trades: list[dict]):
 def cmd_trades(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _require_present(data_dir, present, years)
     _warn_schema_drift(data_dir, present)
 
     trades = _collect_trades(data_dir, present, args)
@@ -739,6 +780,7 @@ def _summary_table(payload: dict):
 def cmd_summary(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _require_present(data_dir, present, years)
     _warn_schema_drift(data_dir, present)
 
     year_summaries = []
@@ -822,6 +864,13 @@ def build_read_parser() -> argparse.ArgumentParser:
         help="case-insensitive substring over filer_id AND raw names "
         "(name-string matching, NOT true identity — SPEC §6.2)",
     )
+    p_filings.add_argument(
+        "--bioguide",
+        help="SOUND query: exact (case-insensitive) match on the verified "
+        "bioguide_id. The PRECISE alternative to --member's fuzzy substring — "
+        "no false positives, every hit is the pinned member (SPEC §6.2). "
+        "Independent of --member; passing both ANDs them.",
+    )
     p_filings.add_argument("--state", help="2-letter postal code (exact, e.g. NY)")
     p_filings.add_argument(
         "--since", help="earliest filing_date (YYYY-MM-DD, inclusive)"
@@ -867,6 +916,13 @@ def build_read_parser() -> argparse.ArgumentParser:
         "--member",
         help="case-insensitive substring over filer_id AND raw names "
         "(name-string matching, NOT true identity — SPEC §6.2)",
+    )
+    p_trades.add_argument(
+        "--bioguide",
+        help="SOUND query: exact (case-insensitive) match on the verified "
+        "bioguide_id of the filer. The PRECISE alternative to --member's fuzzy "
+        "substring — no false positives, every hit is the pinned member "
+        "(SPEC §6.2). Independent of --member; passing both ANDs them.",
     )
     p_trades.add_argument("--owner", help="owner code: SP | DC | JT | self (exact)")
     p_trades.add_argument(

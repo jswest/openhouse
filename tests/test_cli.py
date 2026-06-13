@@ -96,8 +96,8 @@ def test_inspect_unparsed_year_exits_1(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Data-dir resolution (#50): flag → OPENHOUSE_DATA_DIR env → ./data, applied
-# uniformly across pull / parse / read via one shared resolver.
+# Data-dir resolution (#50, #80): flag → OPENHOUSE_DATA_DIR env → ~/.openhouse,
+# applied uniformly across pull / parse / read via one shared resolver.
 # ---------------------------------------------------------------------------
 
 from pathlib import Path
@@ -118,15 +118,72 @@ def test_resolve_env_when_no_flag(monkeypatch):
     assert resolve_data_dir(None) == Path("/env/store")
 
 
-def test_resolve_default_when_neither(monkeypatch):
+def test_resolve_default_when_neither(monkeypatch, tmp_path):
     monkeypatch.delenv(DATA_DIR_ENV, raising=False)
-    assert resolve_data_dir(None) == Path("./data")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert resolve_data_dir(None) == tmp_path / ".openhouse"
 
 
-def test_resolve_empty_env_falls_through_to_default(monkeypatch):
+def test_resolve_empty_env_falls_through_to_default(monkeypatch, tmp_path):
     # An empty env var is treated as unset, not as a data root named "".
     monkeypatch.setenv(DATA_DIR_ENV, "")
-    assert resolve_data_dir(None) == Path("./data")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert resolve_data_dir(None) == tmp_path / ".openhouse"
+
+
+def test_resolve_default_is_home_relative_not_cwd(monkeypatch, tmp_path):
+    # #80: the default is a per-user dotfolder in $HOME, independent of cwd.
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    resolved = resolve_data_dir(None)
+    assert resolved.is_absolute()
+    assert resolved == tmp_path / ".openhouse"
+
+
+def test_shadow_warning_when_local_data_nonempty(monkeypatch, tmp_path, capsys):
+    # #80: a non-empty ./data in cwd, shadowed by the new default, gets a
+    # one-time stderr note (no flag, no env). We never read from ./data.
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "stale.json").write_text("{}")
+    cli_mod._shadow_warning_emitted = False
+
+    resolve_data_dir(None)
+    first = capsys.readouterr()
+    assert "./data" in first.err
+    assert "~/.openhouse" in first.err
+
+    # One-time: a second call in the same process stays quiet.
+    resolve_data_dir(None)
+    assert capsys.readouterr().err == ""
+
+
+def test_no_shadow_warning_when_local_data_absent(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.chdir(tmp_path)  # no ./data here
+    cli_mod._shadow_warning_emitted = False
+    resolve_data_dir(None)
+    assert capsys.readouterr().err == ""
+
+
+def test_no_shadow_warning_when_flag_or_env(monkeypatch, tmp_path, capsys):
+    # The note only fires when the default is actually in use.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "stale.json").write_text("{}")
+
+    cli_mod._shadow_warning_emitted = False
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    resolve_data_dir("/flag/store")
+    assert capsys.readouterr().err == ""
+
+    cli_mod._shadow_warning_emitted = False
+    monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
+    resolve_data_dir(None)
+    assert capsys.readouterr().err == ""
 
 
 def _capture_pull_data_dir(monkeypatch):
@@ -161,14 +218,18 @@ def _capture_read_data_dir(monkeypatch):
         return result
 
     # read.py calls cli_mod.resolve_data_dir at run time; spy on it and let the
-    # real run path execute (scanning an absent data dir returns 0 cleanly — no
-    # fixtures needed), so the production resolution line is exercised.
+    # real run path execute, so the production resolution line is exercised. The
+    # absent dirs here now make `read` exit non-zero (it fails loudly on a data
+    # dir with no parsed years — #79); this test only cares that the SPY captured
+    # the resolved path, so the caller asserts on cap["data_dir"], not the rc.
     monkeypatch.setattr(cli_mod, "resolve_data_dir", spy_resolve)
     return captured
 
 
 @pytest.mark.parametrize("verb", ["pull", "parse", "read"])
-def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch):
+def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch, tmp_path):
+    # Isolate HOME so the default resolves to a tmp dotfolder, not the real one.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     if verb == "pull":
         cap = _capture_pull_data_dir(monkeypatch)
         argv_flag = ["pull", "2024", "--data-dir", "/flag/store"]
@@ -185,20 +246,28 @@ def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch):
         argv_env = ["read", "filings", "2024"]
         argv_default = ["read", "filings", "2024"]
 
+    # `read` against these absent dirs now fails loudly (#79); that is fine — this
+    # test asserts the spy captured the RESOLVED path, not the exit code. pull/parse
+    # are stubbed and still return 0.
+    def _run(argv):
+        rc = cli_mod.main(argv)
+        if verb != "read":
+            assert rc == 0
+
     # flag wins even with env set
     monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
-    assert cli_mod.main(argv_flag) == 0
+    _run(argv_flag)
     assert cap["data_dir"] == Path("/flag/store")
 
     # env used when no flag
     monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
-    assert cli_mod.main(argv_env) == 0
+    _run(argv_env)
     assert cap["data_dir"] == Path("/env/store")
 
     # default when neither
     monkeypatch.delenv(DATA_DIR_ENV, raising=False)
-    assert cli_mod.main(argv_default) == 0
-    assert cap["data_dir"] == Path("./data")
+    _run(argv_default)
+    assert cap["data_dir"] == tmp_path / ".openhouse"
 
 
 def test_version_flag_prints_version(capsys):
@@ -229,3 +298,54 @@ def test_subcommand_help_has_examples(capsys):
             cli_mod.main([verb, "--help"])
         assert exc.value.code == 0
         assert "examples:" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Targeted pull flags (#78) wire through main() into pull_mod.pull.
+# ---------------------------------------------------------------------------
+def test_pull_targeted_flags_thread_into_pull(monkeypatch):
+    captured = {}
+
+    def fake_pull(years, **kwargs):
+        captured["years"] = years
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(pull_mod, "pull", fake_pull)
+    rc = cli_mod.main(
+        [
+            "pull", "2020-2024",
+            "--contact", "Jane Doe <jane@example.com>",
+            "--member", "Pelosi",
+            "--newest-first",
+        ]
+    )
+    assert rc == 0
+    assert captured["member"] == "Pelosi"
+    assert captured["doc_id"] is None
+    assert captured["newest_first"] is True
+
+
+def test_pull_doc_id_flag_threads_into_pull(monkeypatch):
+    captured = {}
+
+    def fake_pull(years, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(pull_mod, "pull", fake_pull)
+    rc = cli_mod.main(
+        ["pull", "2024", "--contact", "Jane Doe <jane@example.com>",
+         "--doc-id", "20024277"]
+    )
+    assert rc == 0
+    assert captured["doc_id"] == "20024277"
+    assert captured["newest_first"] is False
+
+
+def test_pull_help_lists_targeted_examples(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["pull", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--member" in out and "--doc-id" in out and "--newest-first" in out

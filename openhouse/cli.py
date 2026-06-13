@@ -103,29 +103,63 @@ def _parse_one(token: str, arg: str) -> int:
 
 
 DATA_DIR_ENV = "OPENHOUSE_DATA_DIR"
-DEFAULT_DATA_DIR = "./data"
+# The default store is a single per-user dotfolder in $HOME (resolved at call
+# time via Path.home()), NOT cwd-relative — so pull/parse/read land in one
+# stable place regardless of which directory the tool is launched from.
+DEFAULT_DATA_DIR = "~/.openhouse"
 
 _DATA_DIR_HELP = (
     f"root data directory (precedence: this flag, then ${DATA_DIR_ENV}, then "
     f"the {DEFAULT_DATA_DIR} default)"
 )
 
+_shadow_warning_emitted = False
+
+
+def _warn_shadowed_local_data() -> None:
+    """One-time stderr note when the new ``~/.openhouse`` default shadows a
+    non-empty cwd-relative ``./data`` — so users from before #80 aren't
+    surprised by an apparently-empty store. We do NOT auto-migrate or read from
+    ``./data``; this is purely informational.
+    """
+    global _shadow_warning_emitted
+    if _shadow_warning_emitted:
+        return
+    local = Path("./data")
+    try:
+        non_empty = local.is_dir() and any(local.iterdir())
+    except OSError:
+        non_empty = False
+    if not non_empty:
+        return
+    _shadow_warning_emitted = True
+    print(
+        f"note: a non-empty ./data exists here but the default store is now "
+        f"{DEFAULT_DATA_DIR}; ./data is ignored. Pass --data-dir ./data (or set "
+        f"${DATA_DIR_ENV}) to use it.",
+        file=sys.stderr,
+    )
+
 
 def resolve_data_dir(flag_value: str | None) -> Path:
     """Resolve the data root, precedence: ``--data-dir`` flag → ``OPENHOUSE_DATA_DIR``
-    env → ``./data`` default.
+    env → ``~/.openhouse`` default.
 
     ``flag_value`` is the explicitly-passed ``--data-dir`` (or ``None`` if the flag
     was omitted — the flag's argparse default must be ``None`` for this to be
     distinguishable). The environment is read here, not at import time, so a single
     resolver governs all three verbs and tests can drive it with ``monkeypatch``.
+
+    When the default is used (no flag, no env), emit a one-time stderr note if a
+    non-empty ``./data`` exists in the cwd and is now being shadowed.
     """
     if flag_value is not None:
         return Path(flag_value)
     env_value = os.environ.get(DATA_DIR_ENV)
     if env_value:
         return Path(env_value)
-    return Path(DEFAULT_DATA_DIR)
+    _warn_shadowed_local_data()
+    return Path.home() / ".openhouse"
 
 
 VALID_PDF_TYPES = ("ptr", "fd")
@@ -163,7 +197,7 @@ stages:
   inspect  offline — sample parsed filings for human accuracy review in a browser
   ready    offline — install the agent skill into ~/.claude/skills/openhouse
 
-data directory (precedence): --data-dir, then $OPENHOUSE_DATA_DIR, then ./data
+data directory (precedence): --data-dir, then $OPENHOUSE_DATA_DIR, then ~/.openhouse
 environment: $OPENHOUSE_CONTACT (pull's User-Agent), $OPENHOUSE_DATA_DIR
 coverage: annual FDs from 2008; PTRs (STOCK Act) from 2012.
 
@@ -205,7 +239,10 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             '  openhouse pull 2024 --contact "Jane Doe <jane@example.com>"\n'
             "  openhouse pull 2020-2024 --types ptr     # only PTRs, five years\n"
-            "  openhouse pull 2024 --index-only         # index metadata, no PDFs"
+            "  openhouse pull 2024 --index-only         # index metadata, no PDFs\n"
+            "  openhouse pull 2024 --member Pelosi      # only that filer's PDFs\n"
+            "  openhouse pull 2024 --doc-id 20024277    # one filing's PDF\n"
+            "  openhouse pull 2020-2024 --newest-first  # 2024 first, 2020 last"
         ),
     )
     pull_p.add_argument("years", help="YYYY or YYYY-YYYY")
@@ -274,6 +311,32 @@ def build_parser() -> argparse.ArgumentParser:
             "skip the one-time CC0 congress-legislators fetch (the offline "
             "bioguide-identity join in `parse` then falls back to name-only keys)"
         ),
+    )
+    # Targeted pull (#78): narrow WHICH PDFs download — never faster, just fewer.
+    pull_p.add_argument(
+        "--doc-id",
+        default=None,
+        help=(
+            "fetch only this single filing's PDF (by its DocID). Still fetches "
+            "the year index for the filing's type/metadata, but no other PDF. "
+            "REQUIRES exactly one year (the URL is keyed on year). Mutually "
+            "exclusive with --member."
+        ),
+    )
+    pull_p.add_argument(
+        "--member",
+        default=None,
+        help=(
+            "fetch only the PDFs of filings whose filer matches this name "
+            "(case-insensitive substring, the same matcher as `read --member`). "
+            "Fetches the full year index, then narrows the downloads. Mutually "
+            "exclusive with --doc-id."
+        ),
+    )
+    pull_p.add_argument(
+        "--newest-first",
+        action="store_true",
+        help="process the requested years newest-first (descending) instead of oldest-first",
     )
 
     parse_p = subparsers.add_parser(
@@ -459,6 +522,9 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 types=types,
                 reference=args.reference,
+                member=args.member,
+                doc_id=args.doc_id,
+                newest_first=args.newest_first,
                 fetched_at=fetched_at,
             )
         except pull_mod.PullError as exc:

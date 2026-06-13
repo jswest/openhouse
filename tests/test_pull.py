@@ -364,6 +364,62 @@ def test_pull_legislators_idempotent_skip(tmp_path):
     assert len(result["skipped"]) == 2
 
 
+def test_pull_legislators_uses_gh_pages_mirror(tmp_path):
+    """#75: the reference fetch targets the live gh-pages JSON mirror, not the
+    dead raw.githubusercontent.com path."""
+    from openhouse.pull import pull_legislators
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"[]")
+
+    client = make_client(handler)
+    pull_legislators(client, tmp_path, sleep=no_sleep)
+    assert seen == [
+        "https://unitedstates.github.io/congress-legislators/"
+        "legislators-current.json",
+        "https://unitedstates.github.io/congress-legislators/"
+        "legislators-historical.json",
+    ]
+
+
+def test_pull_reference_fetch_failure_is_non_fatal(tmp_path, capsys):
+    """#75: a reference fetch failure (e.g. upstream 404) must NOT abort the pull
+    — it warns and proceeds without bioguide enrichment, exactly like
+    --no-reference, so disclosure PDFs still download."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "legislators-" in path:
+            return httpx.Response(404)  # reference source moved/gone
+        if path.endswith("2024FD.zip"):
+            return httpx.Response(200, content=make_index_zip(2024))
+        return httpx.Response(200, content=b"%PDF-fake")
+
+    client = make_client(handler)
+    rc = pull(
+        [2024],
+        data_dir=tmp_path,
+        index_only=False,
+        contact=CONTACT,
+        reference=True,  # reference ON, but the fetch will fail
+        fetched_at="2026-06-11T00:00:00",
+        client=client,
+        sleep=no_sleep,
+    )
+    assert rc == 0  # the pull as a whole succeeds despite the reference failure
+    year_dir = tmp_path / "raw" / "2024"
+    assert (year_dir / "2024FD.xml").exists()
+    # PDFs still downloaded — the abort happened before this in the old code.
+    assert (year_dir / "ptr" / "20024277.pdf").exists()
+    # No reference files were written (the join falls back to name: keys).
+    assert not (tmp_path / "raw" / "reference" / "legislators-current.json").exists()
+    err = capsys.readouterr().err
+    assert "without bioguide identity" in err.lower()
+
+
 # ---------------------------------------------------------------------------
 # Bad year range is rejected (reusing the #2 parser, via the CLI)
 # ---------------------------------------------------------------------------
@@ -706,6 +762,229 @@ def test_pdf_year_summary_reports_counts(tmp_path, capsys):
     assert "2024: PDFs — 5 fetched" in err
     # Family grouping didn't change the totals.
     assert result["fetched"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Targeted pull (#78): --doc-id, --member, --newest-first
+# ---------------------------------------------------------------------------
+def _pdf_urls(handler) -> list[str]:
+    """Only the PDF (not index) URLs a handler saw."""
+    return [u for u in handler.urls if u.endswith(".pdf")]
+
+
+def test_doc_id_fetches_exactly_one_pdf(tmp_path):
+    """--doc-id fetches only that single filing's PDF, by its predictable URL,
+    and NOT the rest of the year's bodies."""
+    write_index(tmp_path)
+    handler = pdf_handler()
+    client = make_client(handler)
+
+    result = pull_pdfs_year(
+        client, 2024, tmp_path, FETCHED_AT, doc_ids={PTR_DOC}, sleep=no_sleep
+    )
+
+    pdf_urls = _pdf_urls(handler)
+    assert len(pdf_urls) == 1
+    assert pdf_urls[0].endswith(f"ptr-pdfs/2024/{PTR_DOC}.pdf")
+    assert (tmp_path / "raw" / "2024" / "ptr" / f"{PTR_DOC}.pdf").exists()
+    # No other family's body was fetched.
+    assert not (tmp_path / "raw" / "2024" / "fd").exists()
+    assert result["fetched"] == 1
+
+
+def test_doc_id_via_pull_fetches_index_then_one_pdf(tmp_path):
+    """End-to-end through pull(): --doc-id fetches the year index (for metadata)
+    then exactly one PDF — not the whole year."""
+    pdf_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("2024FD.zip"):
+            return httpx.Response(200, content=make_index_zip(2024))
+        pdf_calls.append(str(request.url))
+        return httpx.Response(200, content=b"%PDF-fake")
+
+    client = make_client(handler)
+    rc = pull(
+        [2024],
+        data_dir=tmp_path,
+        index_only=False,
+        contact=CONTACT,
+        reference=False,
+        doc_id=FD_DOC,
+        fetched_at=FETCHED_AT,
+        client=client,
+        sleep=no_sleep,
+    )
+    assert rc == 0
+    # Index fetched (so the filing's family/metadata is known), one PDF only.
+    assert (tmp_path / "raw" / "2024" / "2024FD.xml").exists()
+    assert len(pdf_calls) == 1
+    assert pdf_calls[0].endswith(f"financial-pdfs/2024/{FD_DOC}.pdf")
+    assert (tmp_path / "raw" / "2024" / "fd" / f"{FD_DOC}.pdf").exists()
+    assert not (tmp_path / "raw" / "2024" / "ptr").exists()
+
+
+def test_doc_id_requires_exactly_one_year(tmp_path):
+    client = make_client(pdf_handler())
+    with pytest.raises(PullError) as exc:
+        pull(
+            [2023, 2024],
+            data_dir=tmp_path,
+            index_only=False,
+            contact=CONTACT,
+            reference=False,
+            doc_id=FD_DOC,
+            fetched_at=FETCHED_AT,
+            client=client,
+            sleep=no_sleep,
+        )
+    assert "doc-id" in str(exc.value).lower()
+
+
+def test_doc_id_and_member_are_mutually_exclusive(tmp_path):
+    client = make_client(pdf_handler())
+    with pytest.raises(PullError) as exc:
+        pull(
+            [2024],
+            data_dir=tmp_path,
+            index_only=False,
+            contact=CONTACT,
+            reference=False,
+            doc_id=FD_DOC,
+            member="Adams",
+            fetched_at=FETCHED_AT,
+            client=client,
+            sleep=no_sleep,
+        )
+    assert "mutually exclusive" in str(exc.value).lower()
+
+
+def test_doc_id_absent_from_index_warns_and_fetches_nothing(tmp_path, capsys):
+    write_index(tmp_path)
+    handler = pdf_handler()
+    client = make_client(handler)
+    result = pull_pdfs_year(
+        client, 2024, tmp_path, FETCHED_AT, doc_ids={"does-not-exist"},
+        sleep=no_sleep,
+    )
+    assert _pdf_urls(handler) == []
+    assert result["fetched"] == 0
+
+
+def test_member_fetches_only_matching_filers_pdfs(tmp_path):
+    """--member fetches only the PDFs of filings whose filer matches the name."""
+    from openhouse.pull import doc_ids_for_member
+
+    write_index(tmp_path)
+    xml_path = tmp_path / "raw" / "2024" / "2024FD.xml"
+
+    # "Adams" is the PTR filer (DocID 20024277) in the trimmed fixture.
+    matches = doc_ids_for_member(xml_path, 2024, "Adams")
+    assert matches == {PTR_DOC}
+
+    handler = pdf_handler()
+    client = make_client(handler)
+    result = pull_pdfs_year(
+        client, 2024, tmp_path, FETCHED_AT, doc_ids=matches, sleep=no_sleep
+    )
+    pdf_urls = _pdf_urls(handler)
+    assert len(pdf_urls) == 1
+    assert pdf_urls[0].endswith(f"ptr-pdfs/2024/{PTR_DOC}.pdf")
+    assert result["fetched"] == 1
+
+
+def test_member_via_pull_narrows_downloads(tmp_path):
+    """End-to-end: --member pulls the full index then only matching PDFs."""
+    pdf_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("2024FD.zip"):
+            return httpx.Response(200, content=make_index_zip(2024))
+        pdf_calls.append(str(request.url))
+        return httpx.Response(200, content=b"%PDF-fake")
+
+    client = make_client(handler)
+    rc = pull(
+        [2024],
+        data_dir=tmp_path,
+        index_only=False,
+        contact=CONTACT,
+        reference=False,
+        member="Allen",  # the FD filer (DocID 10066961)
+        fetched_at=FETCHED_AT,
+        client=client,
+        sleep=no_sleep,
+    )
+    assert rc == 0
+    assert (tmp_path / "raw" / "2024" / "2024FD.xml").exists()
+    assert len(pdf_calls) == 1
+    assert pdf_calls[0].endswith(f"financial-pdfs/2024/{FD_DOC}.pdf")
+
+
+def test_member_no_match_fetches_no_pdfs(tmp_path):
+    from openhouse.pull import doc_ids_for_member
+
+    write_index(tmp_path)
+    xml_path = tmp_path / "raw" / "2024" / "2024FD.xml"
+    matches = doc_ids_for_member(xml_path, 2024, "Nonexistent McPerson")
+    assert matches == set()
+
+    handler = pdf_handler()
+    client = make_client(handler)
+    result = pull_pdfs_year(
+        client, 2024, tmp_path, FETCHED_AT, doc_ids=matches, sleep=no_sleep
+    )
+    assert _pdf_urls(handler) == []
+    assert result["fetched"] == 0
+
+
+def test_newest_first_reverses_year_order(tmp_path):
+    """--newest-first processes the requested years descending (index fetched
+    in 2024-then-2023 order, not the default ascending)."""
+    index_years: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        year = int(request.url.path.split("/")[-1][:4])
+        index_years.append(year)
+        return httpx.Response(200, content=make_index_zip(year))
+
+    client = make_client(handler)
+    rc = pull(
+        [2023, 2024],
+        data_dir=tmp_path,
+        index_only=True,
+        contact=CONTACT,
+        reference=False,
+        newest_first=True,
+        client=client,
+        sleep=no_sleep,
+    )
+    assert rc == 0
+    assert index_years == [2024, 2023]  # descending
+
+
+def test_default_year_order_is_ascending(tmp_path):
+    """Without --newest-first the order is unchanged (ascending)."""
+    index_years: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        year = int(request.url.path.split("/")[-1][:4])
+        index_years.append(year)
+        return httpx.Response(200, content=make_index_zip(year))
+
+    client = make_client(handler)
+    pull(
+        [2023, 2024],
+        data_dir=tmp_path,
+        index_only=True,
+        contact=CONTACT,
+        reference=False,
+        client=client,
+        sleep=no_sleep,
+    )
+    assert index_years == [2023, 2024]  # ascending, unchanged
 
 
 def test_pdf_progress_bar_renders_on_a_tty(tmp_path, monkeypatch):
