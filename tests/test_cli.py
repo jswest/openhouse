@@ -96,8 +96,8 @@ def test_inspect_unparsed_year_exits_1(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Data-dir resolution (#50): flag → OPENHOUSE_DATA_DIR env → ./data, applied
-# uniformly across pull / parse / read via one shared resolver.
+# Data-dir resolution (#50, #80): flag → OPENHOUSE_DATA_DIR env → ~/.openhouse,
+# applied uniformly across pull / parse / read via one shared resolver.
 # ---------------------------------------------------------------------------
 
 from pathlib import Path
@@ -118,15 +118,72 @@ def test_resolve_env_when_no_flag(monkeypatch):
     assert resolve_data_dir(None) == Path("/env/store")
 
 
-def test_resolve_default_when_neither(monkeypatch):
+def test_resolve_default_when_neither(monkeypatch, tmp_path):
     monkeypatch.delenv(DATA_DIR_ENV, raising=False)
-    assert resolve_data_dir(None) == Path("./data")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert resolve_data_dir(None) == tmp_path / ".openhouse"
 
 
-def test_resolve_empty_env_falls_through_to_default(monkeypatch):
+def test_resolve_empty_env_falls_through_to_default(monkeypatch, tmp_path):
     # An empty env var is treated as unset, not as a data root named "".
     monkeypatch.setenv(DATA_DIR_ENV, "")
-    assert resolve_data_dir(None) == Path("./data")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert resolve_data_dir(None) == tmp_path / ".openhouse"
+
+
+def test_resolve_default_is_home_relative_not_cwd(monkeypatch, tmp_path):
+    # #80: the default is a per-user dotfolder in $HOME, independent of cwd.
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    resolved = resolve_data_dir(None)
+    assert resolved.is_absolute()
+    assert resolved == tmp_path / ".openhouse"
+
+
+def test_shadow_warning_when_local_data_nonempty(monkeypatch, tmp_path, capsys):
+    # #80: a non-empty ./data in cwd, shadowed by the new default, gets a
+    # one-time stderr note (no flag, no env). We never read from ./data.
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "stale.json").write_text("{}")
+    cli_mod._shadow_warning_emitted = False
+
+    resolve_data_dir(None)
+    first = capsys.readouterr()
+    assert "./data" in first.err
+    assert "~/.openhouse" in first.err
+
+    # One-time: a second call in the same process stays quiet.
+    resolve_data_dir(None)
+    assert capsys.readouterr().err == ""
+
+
+def test_no_shadow_warning_when_local_data_absent(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.chdir(tmp_path)  # no ./data here
+    cli_mod._shadow_warning_emitted = False
+    resolve_data_dir(None)
+    assert capsys.readouterr().err == ""
+
+
+def test_no_shadow_warning_when_flag_or_env(monkeypatch, tmp_path, capsys):
+    # The note only fires when the default is actually in use.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "stale.json").write_text("{}")
+
+    cli_mod._shadow_warning_emitted = False
+    monkeypatch.delenv(DATA_DIR_ENV, raising=False)
+    resolve_data_dir("/flag/store")
+    assert capsys.readouterr().err == ""
+
+    cli_mod._shadow_warning_emitted = False
+    monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
+    resolve_data_dir(None)
+    assert capsys.readouterr().err == ""
 
 
 def _capture_pull_data_dir(monkeypatch):
@@ -168,7 +225,9 @@ def _capture_read_data_dir(monkeypatch):
 
 
 @pytest.mark.parametrize("verb", ["pull", "parse", "read"])
-def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch):
+def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch, tmp_path):
+    # Isolate HOME so the default resolves to a tmp dotfolder, not the real one.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     if verb == "pull":
         cap = _capture_pull_data_dir(monkeypatch)
         argv_flag = ["pull", "2024", "--data-dir", "/flag/store"]
@@ -198,7 +257,7 @@ def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch):
     # default when neither
     monkeypatch.delenv(DATA_DIR_ENV, raising=False)
     assert cli_mod.main(argv_default) == 0
-    assert cap["data_dir"] == Path("./data")
+    assert cap["data_dir"] == tmp_path / ".openhouse"
 
 
 def test_version_flag_prints_version(capsys):

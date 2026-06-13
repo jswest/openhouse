@@ -103,29 +103,63 @@ def _parse_one(token: str, arg: str) -> int:
 
 
 DATA_DIR_ENV = "OPENHOUSE_DATA_DIR"
-DEFAULT_DATA_DIR = "./data"
+# The default store is a single per-user dotfolder in $HOME (resolved at call
+# time via Path.home()), NOT cwd-relative — so pull/parse/read land in one
+# stable place regardless of which directory the tool is launched from.
+DEFAULT_DATA_DIR = "~/.openhouse"
 
 _DATA_DIR_HELP = (
     f"root data directory (precedence: this flag, then ${DATA_DIR_ENV}, then "
     f"the {DEFAULT_DATA_DIR} default)"
 )
 
+_shadow_warning_emitted = False
+
+
+def _warn_shadowed_local_data() -> None:
+    """One-time stderr note when the new ``~/.openhouse`` default shadows a
+    non-empty cwd-relative ``./data`` — so users from before #80 aren't
+    surprised by an apparently-empty store. We do NOT auto-migrate or read from
+    ``./data``; this is purely informational.
+    """
+    global _shadow_warning_emitted
+    if _shadow_warning_emitted:
+        return
+    local = Path("./data")
+    try:
+        non_empty = local.is_dir() and any(local.iterdir())
+    except OSError:
+        non_empty = False
+    if not non_empty:
+        return
+    _shadow_warning_emitted = True
+    print(
+        f"note: a non-empty ./data exists here but the default store is now "
+        f"{DEFAULT_DATA_DIR}; ./data is ignored. Pass --data-dir ./data (or set "
+        f"${DATA_DIR_ENV}) to use it.",
+        file=sys.stderr,
+    )
+
 
 def resolve_data_dir(flag_value: str | None) -> Path:
     """Resolve the data root, precedence: ``--data-dir`` flag → ``OPENHOUSE_DATA_DIR``
-    env → ``./data`` default.
+    env → ``~/.openhouse`` default.
 
     ``flag_value`` is the explicitly-passed ``--data-dir`` (or ``None`` if the flag
     was omitted — the flag's argparse default must be ``None`` for this to be
     distinguishable). The environment is read here, not at import time, so a single
     resolver governs all three verbs and tests can drive it with ``monkeypatch``.
+
+    When the default is used (no flag, no env), emit a one-time stderr note if a
+    non-empty ``./data`` exists in the cwd and is now being shadowed.
     """
     if flag_value is not None:
         return Path(flag_value)
     env_value = os.environ.get(DATA_DIR_ENV)
     if env_value:
         return Path(env_value)
-    return Path(DEFAULT_DATA_DIR)
+    _warn_shadowed_local_data()
+    return Path.home() / ".openhouse"
 
 
 VALID_PDF_TYPES = ("ptr", "fd")
@@ -163,7 +197,7 @@ stages:
   inspect  offline — sample parsed filings for human accuracy review in a browser
   ready    offline — install the agent skill into ~/.claude/skills/openhouse
 
-data directory (precedence): --data-dir, then $OPENHOUSE_DATA_DIR, then ./data
+data directory (precedence): --data-dir, then $OPENHOUSE_DATA_DIR, then ~/.openhouse
 environment: $OPENHOUSE_CONTACT (pull's User-Agent), $OPENHOUSE_DATA_DIR
 coverage: annual FDs from 2008; PTRs (STOCK Act) from 2012.
 
