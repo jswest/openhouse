@@ -1701,6 +1701,12 @@ _FD_POSITION_TITLES = (
     "delegate",
     "commissioner",
     "governor",
+    # Editorial/board roles attested on real filings (Pan 2023/10055778 row 2
+    # ``Editor Telos Press`` — GH-0103 — structured null because the title was
+    # absent from this list while row 1 ``Treasurer`` split fine).
+    "editor in chief",
+    "editor",
+    "publisher",
 )
 
 
@@ -1764,6 +1770,65 @@ def _parse_schedule_f(lines: list[str]) -> list[ScheduleFItem]:
     return items
 
 
+# A Schedule H ``Dates`` column: a single travel date or a date *range*
+# (``06/01/2020 - 06/03/2020`` / ``June 2020`` / ``6/1/2020``). The dash-joined
+# range is matched greedily so the whole span lands in ``dates``, not just its
+# first endpoint. ``Month YYYY`` and the ``MM/DD/YYYY`` forms mirror the other
+# schedules' date vocabularies; the range tail is optional for a single date.
+_FD_H_DATE = (
+    r"(?:January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)\s+\d{4}"
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4}|\d{1,2}/\d{1,2}"
+)
+_FD_H_DATES_RE = re.compile(
+    rf"(?P<dates>(?:{_FD_H_DATE})(?:\s*[-–]\s*(?:{_FD_H_DATE}))?)",
+    re.IGNORECASE,
+)
+
+
+def _parse_schedule_h(lines: list[str]) -> list[ScheduleHItem]:
+    """Schedule H (travel payments) → ``source``/``dates`` + raw_text.
+
+    Columns are ``Source | Dates | Location | Items Provided``. The
+    column-header banner (``Source Dates Location Items``) is dropped upstream in
+    :func:`_segment_schedules` (``_FD_FURNITURE_RE``), so the parser sees only
+    rows. A single trip's ``Location``/``Items`` text wraps across physical lines
+    on real forms (Green 2020/10040812 — GH-0103); left to ``_salvage_raw`` that
+    shreds one trip into several raw_text-only fragments. We coalesce instead:
+    each row anchors on the line bearing the ``Dates`` column (a date or
+    date-range) and folds the wrapped continuation lines in, so one trip is one
+    item.
+
+    The ``Dates`` signature is the only stable interior delimiter, so we split it
+    off confidently — ``source`` is the text before it, ``dates`` the matched
+    span. ``Location`` and ``Items`` merge with no reliable boundary, so both stay
+    ``None`` (best-effort, #17 scope) and the verbatim ``raw_text`` carries the
+    full row. A row with no recognizable date keeps everything in ``raw_text``.
+    """
+    items: list[ScheduleHItem] = []
+    for raw in _group_items(
+        lines, starts_item=lambda s: bool(_FD_H_DATES_RE.search(s))
+    ):
+        scrubbed = _scrub_raw_text(raw)
+        date_m = _FD_H_DATES_RE.search(scrubbed)
+        if date_m:
+            dates = date_m.group("dates").strip()
+            source = _scrub_field(scrubbed[: date_m.start()].strip()) or None
+        else:
+            dates = None
+            source = None
+        items.append(
+            ScheduleHItem(
+                source=source,
+                dates=dates,
+                location=None,
+                items=None,
+                raw_text=scrubbed,
+            )
+        )
+    return items
+
+
 def _split_trailing_dollar(raw: str) -> tuple[str, str | None, str | None]:
     """Split a row into ``(scrubbed, source, money)`` on a trailing dollar figure.
 
@@ -1800,10 +1865,12 @@ def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
     return items
 
 
-# H (travel) and J (new-filer comp) have no entry: their columns merge with no
-# stable delimiter and no committed fixture has a filled form to anchor a split,
-# so they fall through to ``_salvage_raw`` — one raw_text-only item per row, all
-# structured columns ``None``. Adding a column parser later is a one-line entry.
+# J (new-filer comp) has no entry: its two columns merge with no stable
+# delimiter and no committed fixture has a filled form to anchor a split, so it
+# falls through to ``_salvage_raw`` — one raw_text-only item per row, all
+# structured columns ``None``. H (travel) anchors on its ``Dates`` column to
+# coalesce wrapped itineraries and split off source/dates (GH-0103); its
+# ``Location``/``Items`` still merge, so those stay ``None`` (best-effort, #17).
 _FD_STRUCTURED = {
     "A": _parse_schedule_a,
     "B": _parse_schedule_b,
@@ -1812,6 +1879,7 @@ _FD_STRUCTURED = {
     "E": _parse_schedule_e,
     "F": _parse_schedule_f,
     "G": _parse_schedule_g,
+    "H": _parse_schedule_h,
     "I": _parse_schedule_i,
 }
 

@@ -314,6 +314,63 @@ def test_schedule_g_h_i_j_structured_synthetic(monkeypatch):
     assert "advisory and consulting" in j[0]["raw_text"]
 
 
+def test_schedule_e_editor_title_structures(monkeypatch):
+    # GH-0103: Pan 2023/10055778 Schedule E row 2 is ``Editor Telos Press`` —
+    # the same shape as a row 1 ``Treasurer`` that splits fine, but ``Editor``
+    # was absent from the position-title vocabulary, so position/organization
+    # came back null while raw_text stayed intact (inconsistency in one schedule).
+    # The PDF isn't a committed fixture; the title-list mechanism it exercises is
+    # validated on the THOMPSON real fixture (test_schedule_e_positions_structured).
+    page = "\n".join(
+        [
+            "ScheDule e: PoSitionS",
+            "Position Name of Organization",
+            "Treasurer Telos Press",
+            "Editor Telos Press",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    e = extract_fd_schedules(Path("synthetic.pdf")).schedules["E"]
+    assert len(e) == 2
+    # Row 1 structures (as it always did) AND row 2 now structures the same way —
+    # consistent within the schedule, not null-while-its-twin-splits.
+    assert e[0]["position"] == "Treasurer"
+    assert e[1]["position"] == "Editor"
+    assert e[1]["organization"] == "Telos Press"
+    assert e[1]["raw_text"] == "Editor Telos Press"
+
+
+def test_schedule_h_banner_skipped_and_itinerary_coalesced(monkeypatch):
+    # GH-0103: Green 2020/10040812 Schedule H shreds — the parser neither skips
+    # the column-header banner (``Source Dates Location Items``) nor coalesces the
+    # multi-line itinerary, so one trip becomes garbled header/fragment rows. The
+    # PDF isn't a committed fixture; this reproduces the shape synthetically: a
+    # banner + a trip whose Location/Items wrap across three physical lines.
+    page = "\n".join(
+        [
+            "ScheDule H: travel PaymentS anD reimburSementS",
+            "Source Dates Location Items",
+            "Policy Institute 06/01/2020 - 06/03/2020 Aspen, Colorado",
+            "Lodging, airfare, and conference",
+            "registration fees",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    h = extract_fd_schedules(Path("synthetic.pdf")).schedules["H"]
+    # The banner is dropped (not an item); the three-line trip coalesces into ONE
+    # structured item rather than shredding into a header + fragment rows.
+    assert len(h) == 1
+    assert set(h[0].keys()) == {"source", "dates", "location", "items", "raw_text"}
+    assert h[0]["source"] == "Policy Institute"
+    assert h[0]["dates"] == "06/01/2020 - 06/03/2020"
+    # The wrapped Location/Items lines are folded into the one row's raw_text.
+    assert "Aspen, Colorado" in h[0]["raw_text"]
+    assert "registration fees" in h[0]["raw_text"]
+    assert "Source Dates Location Items" not in h[0]["raw_text"]
+
+
 # --- D structured (synthetic, since the fixture's D is "None disclosed.") ------
 
 
