@@ -371,6 +371,33 @@ def test_schedule_h_banner_skipped_and_itinerary_coalesced(monkeypatch):
     assert "Source Dates Location Items" not in h[0]["raw_text"]
 
 
+def test_schedule_h_yearless_slash_in_continuation_does_not_anchor(monkeypatch):
+    # GH-0103 critic: the Dates anchor must not fire on a *yearless* ``M/D`` slash
+    # buried in a wrapped Location/Items line (``1/2 day``, ``9/11 Memorial``).
+    # Pre-fix that split one trip into two items and fabricated a ``dates`` value
+    # (``1/2``) the filer never wrote — violating degrade-not-fabricate and the
+    # very coalescing this schedule's parser exists to do.
+    page = "\n".join(
+        [
+            "ScheDule H: travel PaymentS anD reimburSementS",
+            "Source Dates Location Items",
+            "Heritage Foundation 06/01/2020 - 06/03/2020 Washington, DC",
+            "Lodging, 1/2 day conference, meals, and a",
+            "visit to the 9/11 Memorial Museum",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    h = extract_fd_schedules(Path("synthetic.pdf")).schedules["H"]
+    # ONE trip — the yearless fragments do not anchor spurious extra items.
+    assert len(h) == 1
+    assert h[0]["dates"] == "06/01/2020 - 06/03/2020"
+    # No fabricated date: ``1/2`` / ``9/11`` never become a structured ``dates``.
+    assert all(item["dates"] != "1/2" and item["dates"] != "9/11" for item in h)
+    # The wrapped continuation text is preserved in the single row's raw_text.
+    assert "9/11 Memorial Museum" in h[0]["raw_text"]
+
+
 # --- D structured (synthetic, since the fixture's D is "None disclosed.") ------
 
 

@@ -1773,12 +1773,17 @@ def _parse_schedule_f(lines: list[str]) -> list[ScheduleFItem]:
 # A Schedule H ``Dates`` column: a single travel date or a date *range*
 # (``06/01/2020 - 06/03/2020`` / ``June 2020`` / ``6/1/2020``). The dash-joined
 # range is matched greedily so the whole span lands in ``dates``, not just its
-# first endpoint. ``Month YYYY`` and the ``MM/DD/YYYY`` forms mirror the other
-# schedules' date vocabularies; the range tail is optional for a single date.
+# first endpoint. ``Month YYYY`` and the ``MM/DD/YYYY``/``M/YYYY`` forms mirror
+# the other schedules' date vocabularies (1499, 1660); the range tail is optional
+# for a single date. A **yearless** ``M/D`` form is deliberately NOT matched: this
+# regex also gates row-anchoring (``starts_item``), so a bare ``1/2`` / ``9/11``
+# in a wrapped Location/Items continuation line would otherwise spuriously anchor
+# a new trip and fabricate a ``dates`` value the filer never wrote (GH-0103
+# critic). A real travel date carries a year.
 _FD_H_DATE = (
     r"(?:January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+\d{4}"
-    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4}|\d{1,2}/\d{1,2}"
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4}"
 )
 _FD_H_DATES_RE = re.compile(
     rf"(?P<dates>(?:{_FD_H_DATE})(?:\s*[-–]\s*(?:{_FD_H_DATE}))?)",
