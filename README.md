@@ -151,12 +151,14 @@ After pulling `main` or cutting a release:
 
 ```sh
 openhouse ready                       # re-press the agent skill if SKILL.md changed
-uv tool install --force --editable .  # refresh the CLI and its --version string
+uv tool install --force --no-cache --editable .  # rebuild the CLI + refresh --version
 openhouse parse <years>               # re-parse only if SCHEMA_VERSION moved
 ```
 
-A bare editable install already runs current code; the reinstall is mainly to
-refresh the cached `--version`. The data directory defaults to `~/.openhouse`
-(override with `--data-dir` or `OPENHOUSE_DATA_DIR`).
+A bare editable install already runs current code; the reinstall (with
+`--no-cache`, since uv caches the build and a new tag changes no source file)
+just refreshes `--version` — which reads `0.<schema>.<patch+1>.devN` once `main`
+has moved past a tag. The data directory defaults to `~/.openhouse` (override
+with `--data-dir` or `OPENHOUSE_DATA_DIR`).
 
 Design contract: [SPEC.md](./SPEC.md). License: [MIT](./LICENSE.txt).
