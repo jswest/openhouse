@@ -624,6 +624,24 @@ _FD_TRAILER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The post-table "Asset Class Details" appendix title (#97). It follows the last
+# schedule and is NOT schedule content — its body is a key/legend of asset-class
+# codes, never disclosed rows. When the last schedule is empty (``None
+# disclosed.``) the appendix would otherwise be salvaged into fabricated rows for
+# a schedule the filer left blank, violating the "never fabricate a row" agreement.
+# Two renderings, matched against the NUL-scrubbed line (``_scrub_raw_text``):
+#   • intact / case-mangled — ``Schedules A and B Asset Class Details`` /
+#     ``ScheDule a anD B aSSet claSS DetailS`` — carries the literal phrase.
+#   • small-caps glyph-collapse — every word but the schedule letters loses its
+#     glyphs, so the title flattens to its initials: ``S A B A C D`` (Schedules A
+#     and B Asset Class Details) / ``S A A C D`` (Schedule A Asset Class Details).
+#     Anchored ``S … A C D`` (Asset Class Details), single-letter tokens only, so
+#     a real content row (multi-letter words) can't collide.
+_FD_APPENDIX_RE = re.compile(
+    r"(asset\s+class\s+details|^S(?:\s+[A-Za-z]){1,4}\s+A\s+C\s+D\s*$)",
+    re.IGNORECASE,
+)
+
 # An A/B row's trailing "tx. over $1,000?" checkbox glyph (gfedc unchecked /
 # gfedcb checked) — the same glyph as the PTR cap-gains box, anchored at line end.
 _FD_GLYPH_RE = re.compile(r"\bgfedcb?\s*$")
@@ -636,6 +654,15 @@ _FD_TYPE_TAG_RE = re.compile(r"\[([A-Za-z0-9]+)\]")
 # small-caps owner tokens unpredictably (``Sp`` / ``Jt``); extractors normalize
 # the captured token with .upper().
 _FD_OWNER_AFTER_TYPE_RE = re.compile(r"\][\s]*(SP|DC|JT)\b", re.IGNORECASE)
+
+# The same owner token after the subholding arrow ``⇒`` — where it prints on a
+# wrapped row whose ``[TYPE]`` tag landed off the anchor line (GH-0099). The
+# arrow itself is the column boundary, so the token right after it is the owner.
+_FD_OWNER_AFTER_ARROW_RE = re.compile(r"⇒[\s]*(SP|DC|JT)\b", re.IGNORECASE)
+
+# The checkbox glyph matched anywhere (not just line-end) — used to lift the
+# glyph token out of the asset slice on wrapped rows where it renders mid-name.
+_FD_GLYPH_TOKEN_RE = re.compile(r"\bgfedcb?\b")
 
 # An amount-range bucket; FD ranges wrap across lines, so we match all occurrences
 # in the assembled (de-wrapped) item text. ``Over $X`` / open-ended values do not
@@ -696,19 +723,22 @@ def _segment_schedules(lines: list[str]) -> dict[str, list[str]]:
     current: str | None = None
     buf: list[str] = []
 
-    def flush() -> None:
-        if current is None:
-            return
-        content = [ln for ln in buf if ln.strip()]
-        # An empty schedule (``None disclosed.``) is absent, never an empty list.
-        meaningful = [
+    def meaningful_rows() -> list[str]:
+        # The non-furniture, non-``None disclosed.`` lines of the current buffer.
+        # An empty schedule (``None disclosed.``) yields ``[]`` and is recorded as
+        # **absent**, never an empty list.
+        return [
             ln
-            for ln in content
+            for ln in (b for b in buf if b.strip())
             if not _NONE_DISCLOSED_RE.match(ln.strip())
             and not _FD_FURNITURE_RE.match(ln.strip())
         ]
-        if meaningful:
-            schedules[current] = meaningful
+
+    def flush() -> None:
+        if current is None:
+            return
+        if rows := meaningful_rows():
+            schedules[current] = rows
 
     for ln in lines:
         s = ln.strip()
@@ -719,6 +749,21 @@ def _segment_schedules(lines: list[str]) -> dict[str, list[str]]:
             buf = []
             continue
         if current is not None and _FD_TRAILER_RE.match(s):
+            flush()
+            current = None
+            buf = []
+            continue
+        # The "Asset Class Details" appendix (#97) follows the last schedule and
+        # is never disclosed rows. If the current schedule is empty so far (the
+        # filer marked it ``None disclosed.``), terminate it here so the appendix
+        # is not salvaged into fabricated rows for a blank schedule. If the
+        # schedule already has real content, fold the appendix into it (as on an
+        # intact document) rather than dropping it — never silently drop.
+        if (
+            current is not None
+            and not meaningful_rows()
+            and _FD_APPENDIX_RE.search(_scrub_raw_text(s))
+        ):
             flush()
             current = None
             buf = []
@@ -761,6 +806,32 @@ def _scrub_field(s: str | None) -> str | None:
     The gate makes this a strict no-op on every NUL-free value.
     """
     return _scrub_raw_text(s) if s and "\x00" in s else s
+
+
+def _strip_spans(raw: str, end: int, spans: list[tuple[int, int]]) -> str:
+    """``raw[:end]`` with the character ranges in ``spans`` removed.
+
+    Used to lift Schedule A's column text (value / income / owner / glyph) out of
+    the asset-name slice (GH-0099). Only spans that fall within ``[0, end)`` are
+    removed; a span reaching past ``end`` (a wrapped high bound that landed after
+    the ``[TYPE]`` tag) is clipped to ``end`` so it cannot leave a fragment. The
+    gaps left behind are collapsed to single spaces, then trimmed — the verbatim
+    ``raw_text`` keeps every character regardless.
+    """
+    keep = []
+    for s, e in spans:
+        e = min(e, end)
+        if s < e:  # non-empty after clipping to ``end``
+            keep.append((s, e))
+    keep.sort()
+    out: list[str] = []
+    cursor = 0
+    for s, e in keep:
+        if s > cursor:
+            out.append(raw[cursor:s])
+        cursor = max(cursor, e)
+    out.append(raw[cursor:end])
+    return re.sub(r"\s+", " ", "".join(out)).strip()
 
 
 def _group_items(lines: list[str], *, starts_item) -> list[str]:
@@ -856,8 +927,17 @@ def _fd_columns(raw: str) -> str:
 
 def _fd_amount_entries(
     cols: str, start: int = 0
-) -> list[tuple[int, int, AmountRange | None]]:
-    """The row's column-amount *entries*, in column order: ``(start, end, range)``.
+) -> tuple[list[tuple[int, int, AmountRange | None]], list[tuple[int, int]]]:
+    """The row's column-amount *entries*, in column order: ``(start, end, range)``,
+    plus the character spans consumed as **wrapped high bounds** (the bare ``$N``
+    tokens paired to dangling lows — GH-0099).
+
+    The entries carry the column slots the caller maps positionally to value /
+    income / preceding. A dangling low's slot ends at the dash; its wrapped high
+    bound lands later in the de-wrapped text as a bare token. That bare span is
+    column data too — physically displaced from its slot — so it is returned
+    alongside the entries for callers (the asset-name slicer) that must strip
+    *all* column text out of a row's name field, not just the contiguous slots.
 
     An entry is anything that occupies an amount column in the de-wrapped row
     text (SPEC §2.2 wraps put every wrapped piece back on one line, in column
@@ -875,46 +955,110 @@ def _fd_amount_entries(
       (say, a dollar figure inside an asset name) makes the wrap ambiguous, and
       every dangling resolves to ``None`` instead (degrade, never fabricate —
       #12). An unresolved dangling still holds its column slot.
+
+    **Cross-column contamination** (GH-0098): when *every* column's high bound
+    wraps, an earlier column's wrapped high can land in the de-wrapped text right
+    in front of a later column's ``$lo -`` start — so ``_FD_AMOUNT_RE`` greedily
+    glues ``$laterLow - $earlierHigh`` into a spurious complete bucket, crossing
+    the columns and leaving the row's first low dangling against the *wrong* high
+    (``value $250,001 - $50,000`` — ``high < low`` — with income overstated). The
+    tell is an **inverted** result: a bucket whose ``low > high`` cannot be a real
+    Clerk range, so the left-to-right pairing must have crossed columns. We first
+    build the entries reading buckets as written; if any range inverts, we re-read
+    treating each contaminating bucket (one preceded by a dangling low) as a split
+    ``$laterLow -`` start + a wrapped ``$earlierHigh`` bare, which restores column
+    order. A genuine inline bucket (``$201 - $1,000``) never inverts, so the
+    no-split reading already stands — the retry only fires on real contamination.
+    Any range still inverted after the retry degrades to ``None`` (slot held,
+    ``raw_text`` intact): an impossible bucket is never emitted (degrade, never
+    fabricate — #12).
     """
-    buckets = list(_FD_AMOUNT_RE.finditer(cols, start))
-    spans = [m.span() for m in buckets]
 
-    def unclaimed(m: re.Match) -> bool:
-        # No overlap with any span already claimed by an earlier entry kind
-        # (reads ``spans`` at call time, so each ``spans +=`` below narrows it).
-        return not any(b0 < m.end() and m.start() < b1 for b0, b1 in spans)
+    def build(
+        split_contaminated: bool,
+    ) -> tuple[list[tuple[int, int, AmountRange | None]], list[tuple[int, int]]]:
+        letter_lows = list(_FD_DANGLING_LOW_RE.finditer(cols, start))
+        buckets: list[re.Match] = []
+        # (start, end, low) for lows split out of cross-column buckets.
+        split_lows: list[tuple[int, int, str]] = []
+        for m in _FD_AMOUNT_RE.finditer(cols, start):
+            if split_contaminated and any(d.start() < m.start() for d in letter_lows):
+                low = re.match(r"\$([\d,]+)\s*-\s*", m.group(0))
+                split_lows.append((m.start(), m.start() + low.end(), low.group(1)))
+            else:
+                buckets.append(m)
+        spans = [m.span() for m in buckets]
 
-    overs = [m for m in _FD_A_OVER_RE.finditer(cols, start) if unclaimed(m)]
-    spans += [m.span() for m in overs]
-    danglings = [m for m in _FD_DANGLING_LOW_RE.finditer(cols, start) if unclaimed(m)]
-    spans += [m.span() for m in danglings]
-    bares = [
-        m
-        for m in _FD_BARE_AMOUNT_RE.finditer(cols, start)
-        if unclaimed(m)
-        and not cols[m.end() :].lstrip().startswith("-")  # a range's own low
-        and not cols[m.end() :].startswith(".")  # an exact value's dollars
-    ]
+        def unclaimed(m: re.Match) -> bool:
+            # No overlap with any span already claimed by an earlier entry kind
+            # (reads ``spans`` at call time, so each ``spans +=`` below narrows it).
+            return not any(b0 < m.end() and m.start() < b1 for b0, b1 in spans)
 
-    entries: list[tuple[int, int, AmountRange | None]] = [
-        (m.start(), m.end(), _bucket(m.group(0))) for m in buckets
-    ]
-    entries += [(m.start(), m.end(), None) for m in overs]
-    if danglings and len(danglings) == len(bares):
-        entries += [
-            (d.start(), d.end(), _parse_amount_range(f"${d.group(1)} - {b.group(0)}"))
-            for d, b in zip(danglings, bares)
+        overs = [m for m in _FD_A_OVER_RE.finditer(cols, start) if unclaimed(m)]
+        spans += [m.span() for m in overs]
+        # Column lows in column order: letter-followed danglings + split-out lows.
+        danglings = [(d.start(), d.end(), d.group(1)) for d in letter_lows]
+        danglings += split_lows
+        danglings.sort()
+        spans += [(s, e) for s, e, _ in danglings]
+        bares = [
+            m
+            for m in _FD_BARE_AMOUNT_RE.finditer(cols, start)
+            if unclaimed(m)
+            and not cols[m.end() :].lstrip().startswith("-")  # a range's own low
+            and not cols[m.end() :].startswith(".")  # an exact value's dollars
         ]
-    else:
-        entries += [(d.start(), d.end(), None) for d in danglings]
-    return sorted(entries)
+
+        entries: list[tuple[int, int, AmountRange | None]] = [
+            (m.start(), m.end(), _bucket(m.group(0))) for m in buckets
+        ]
+        entries += [(m.start(), m.end(), None) for m in overs]
+        # Wrapped high bounds (the bares paired to danglings) are column data
+        # displaced out of their slot — report their spans so the asset-name
+        # slicer can strip them (GH-0099). Only the *paired* bares count; an
+        # unmatched/ambiguous wrap degrades to None and its tokens stay in the
+        # name verbatim (degrade, never fabricate — #12).
+        wrapped_high_spans: list[tuple[int, int]] = []
+        if danglings and len(danglings) == len(bares):
+            entries += [
+                (s, e, _parse_amount_range(f"${low} - {b.group(0)}"))
+                for (s, e, low), b in zip(danglings, bares)
+            ]
+            wrapped_high_spans = [b.span() for b in bares]
+        else:
+            entries += [(s, e, None) for s, e, _ in danglings]
+        entries.sort()
+        return entries, wrapped_high_spans
+
+    def is_inverted(r: AmountRange | None) -> bool:
+        return bool(r and r.low is not None and r.high is not None and r.low > r.high)
+
+    def inverted(es: list[tuple[int, int, AmountRange | None]]) -> bool:
+        return any(is_inverted(r) for _, _, r in es)
+
+    entries, wrapped = build(split_contaminated=False)
+    if inverted(entries):
+        retry, retry_wrapped = build(split_contaminated=True)
+        if not inverted(retry):
+            entries, wrapped = retry, retry_wrapped
+    # Never emit a range that is still inverted — degrade it to None.
+    cleaned = [(s, e, None if is_inverted(r) else r) for s, e, r in entries]
+    return cleaned, wrapped
 
 
 def _schedule_a_amounts(
     raw: str,
-) -> tuple[AmountRange | None, str | None, AmountRange | None, AmountRange | None]:
+) -> tuple[
+    AmountRange | None,
+    str | None,
+    AmountRange | None,
+    AmountRange | None,
+    list[tuple[int, int]],
+]:
     """Untangle Schedule A's ``value_of_asset``, ``income_type``, ``income_amount``,
-    and (Candidate/New-Filer forms only) ``income_preceding``.
+    and (Candidate/New-Filer forms only) ``income_preceding`` — plus the
+    character spans (into ``raw``) of all the column text consumed, so the
+    caller can lift those spans out of the asset-name slice (GH-0099).
 
     The row's amount columns print in a fixed order — value, income current
     year, and (C/H forms only — GH-0070) income preceding year — so the parse is
@@ -941,12 +1085,18 @@ def _schedule_a_amounts(
 
     none_value = _FD_A_NONE_VALUE_RE.search(cols)
     entries: list[tuple[int, int, AmountRange | None]]
+    wrapped: list[tuple[int, int]]
     if none_value:
-        # The literal None occupies the value slot; amounts shift right.
-        entries = [(none_value.start(), none_value.end(), None)]
-        entries += _fd_amount_entries(cols, none_value.end())
+        # The literal None occupies the value slot; amounts shift right. Anchor
+        # the slot at the literal word, not the ⇒/] before it — so stripping
+        # this column span (GH-0099) leaves the subholding arrow in the name.
+        lit = re.search(r"(?:None|Undetermined)\b", none_value.group(0))
+        lit_start = none_value.start() + lit.start()
+        entries = [(lit_start, none_value.end(), None)]
+        rest, wrapped = _fd_amount_entries(cols, none_value.end())
+        entries += rest
     else:
-        entries = _fd_amount_entries(cols)
+        entries, wrapped = _fd_amount_entries(cols)
 
     value = entries[0][2] if entries else None
     income = entries[1][2] if len(entries) > 1 else None
@@ -956,7 +1106,34 @@ def _schedule_a_amounts(
         if len(entries) > 1
         else None
     )
-    return value, income_type, income, preceding
+    # Column spans to lift out of the asset name: each entry's slot, the whole
+    # value→income gap (which carries the income-type word(s) — they print
+    # *between* the name fragments on wrapped/subholding rows), and the wrapped
+    # high bounds displaced out of their slots. The trailing checkbox glyph is
+    # handled separately by the slicer (it is row furniture, not an amount).
+    spans = [(s, e) for s, e, _ in entries]
+    spans += wrapped
+    if len(entries) > 1:
+        spans.append((entries[0][1], entries[1][0]))
+    # ``None``/``Undetermined`` value/income literals carry no ``$`` so they are
+    # not amount entries, yet on a ⇒/]-anchored wrapped row they sit in the
+    # column zone (``⇒ None None gfedc Name``) and bleed into the name. The
+    # checkbox glyph marks the column/name boundary on these rows, so any such
+    # literal between the anchor and the glyph is column data — strip it
+    # (GH-0099). Member rows print the glyph after the name, so this only fires
+    # on wrapped rows; literals already inside an amount entry are left alone.
+    glyph = _FD_GLYPH_TOKEN_RE.search(cols)
+    if glyph:
+        anchors = [m.end() for m in re.finditer(r"[\]⇒]", cols) if m.end() <= glyph.start()]
+        if anchors:
+            zone_start = anchors[-1]
+            spans += [
+                m.span()
+                for m in re.finditer(r"\b(?:None|Undetermined)\b", cols)
+                if zone_start <= m.start() < glyph.start()
+                and not any(s <= m.start() < e for s, e, _ in entries)
+            ]
+    return value, income_type, income, preceding, spans
 
 
 # An A-row's value-column signature: right after the ``[TYPE]`` tag (and the
@@ -1056,17 +1233,35 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
         desc_m = re.search(rf"{_FD_DESCRIPTION_LABEL}\s*(.*)$", raw)
         if desc_m:
             description = _scrub_field(desc_m.group(1).strip()) or None
-        # The asset name is everything up to the [TYPE] tag.
+        # Column amounts are positional — see _schedule_a_amounts for the
+        # None-value shift and the SPEC §2.2 wrap repair. ``col_spans`` are the
+        # character ranges those columns occupy in ``raw`` (GH-0099).
         type_m = _FD_TYPE_TAG_RE.search(raw)
         asset_type = type_m.group(1) if type_m else None
-        asset = _scrub_field(raw[: type_m.start()].strip() if type_m else raw.strip())
-        owner_m = _FD_OWNER_AFTER_TYPE_RE.search(raw)
-        owner = owner_m.group(1).upper() if owner_m else None
-        # Column amounts are positional — see _schedule_a_amounts for the
-        # None-value shift and the SPEC §2.2 wrap repair.
-        value_of_asset, income_type, income_amount, income_preceding = (
+        value_of_asset, income_type, income_amount, income_preceding, col_spans = (
             _schedule_a_amounts(raw)
         )
+        # The owner column (SP/DC/JT) prints right after the [TYPE] tag on a
+        # single-line row, but after the subholding arrow ⇒ when the name wraps
+        # — and there the token lands *inside* the asset slice. Match both.
+        owner_m = _FD_OWNER_AFTER_TYPE_RE.search(raw) or _FD_OWNER_AFTER_ARROW_RE.search(
+            raw
+        )
+        owner = owner_m.group(1).upper() if owner_m else None
+        # The asset name is everything up to the [TYPE] tag — but on wrapped /
+        # subholding (⇒) rows the value / income-type / income column text
+        # renders physically *between* the name fragments, so it falls inside
+        # that slice (GH-0099). Lift the already-parsed column spans (plus the
+        # owner token and trailing checkbox glyph) back out, then collapse the
+        # gaps they leave, so the structured ``asset`` is the clean name only.
+        slice_end = type_m.start() if type_m else len(raw)
+        # _strip_spans clips/drops anything past slice_end, so the owner and
+        # glyph spans can be appended unconditionally alongside the column spans.
+        strip = list(col_spans)
+        if owner_m:
+            strip.append(owner_m.span())
+        strip += [g.span() for g in _FD_GLYPH_TOKEN_RE.finditer(raw, 0, slice_end)]
+        asset = _scrub_field(_strip_spans(raw, slice_end, strip))
         income_type = _scrub_field(income_type)
         items.append(
             ScheduleAItem(
@@ -1193,7 +1388,7 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
         # pre-detail text (a wrapped high bound can sit past the checkbox glyph
         # — ``… S $1,000,001 - gfedcb $5,000,000``; B has one amount column, so
         # the first entry is it).
-        entries = _fd_amount_entries(_fd_columns(raw))
+        entries, _ = _fd_amount_entries(_fd_columns(raw))
         items.append(
             ScheduleBItem(
                 asset=asset,
@@ -1209,12 +1404,58 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
     return items
 
 
+# Schedule C income-Type vocabulary (GH-0101). The Type column is a small,
+# closed set of phrases on the live form; these are the values attested on the
+# committed fixtures (Thompson: ``Retirement Plan``, ``Pension``, ``Annuity
+# Plan``; Hackett candidate: ``Salary``) and in the issue's cited filings
+# (``Spouse Salary``, ``Professional Services``, ``Spouse Pension``). Longest
+# phrases must precede their prefixes so the alternation is greedy-correct
+# (``Retirement Plan`` before ``Pension``/``Salary``). An UNKNOWN Type is *not*
+# in this list — the caller then falls back to the single-token split so the row
+# still divides (and ``raw_text`` keeps it whole regardless): never dropped.
+_FD_C_TYPE_PHRASES = (
+    "Retirement Plan",
+    "Annuity Plan",
+    "Professional Services",
+    "Salary",
+    "Pension",
+    "Annuity",
+    "Bonus",
+    "Commission",
+    "Director Fees",
+    "Director's Fees",
+    "Fees",
+    "Honoraria",
+    "Partnership Income",
+    "Severance",
+)
+# An optional owner token (the owner column renders folded in front of the Type:
+# ``Member Retirement Plan`` / ``Spouse Pension`` — issue example Davis is
+# ``Spouse Salary``) then one vocabulary phrase, anchored to the head's end so it
+# only claims the trailing Type column, never a phrase buried in the source name.
+_FD_C_TYPE_RE = re.compile(
+    r"\s((?:(?:Member|Spouse|SP|DC|JT)\s+)?(?:"
+    + "|".join(re.escape(p) for p in _FD_C_TYPE_PHRASES)
+    + r"))\s*$"
+)
+
+
 def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
     """Schedule C (earned income) → structured items + raw_text.
 
     Columns are ``Source | Type | Amount [| Preceding-year amount]``. Each row is
     one physical line; the trailing money/``N/A`` token(s) are the amount, the
-    word before them the income type, the remainder the source.
+    ``Type`` phrase before them the income type, the remainder the source.
+
+    The Type column is *multi-word* on real forms (``Retirement Plan``, ``Annuity
+    Plan``, ``Professional Services``) and may carry the owner column folded in
+    front of it (``Spouse Pension``, ``Member Retirement Plan``). A naive
+    last-whitespace split bleeds the Type's leading word(s) into ``source`` and
+    truncates ``income_type`` to its final word (GH-0101). We match the Type from
+    a small vocabulary of phrases attested on the committed fixtures / the issue,
+    longest-first, optionally prefixed by an owner token — and fall back to the
+    single-token split for an *unknown* Type so it still divides somewhere rather
+    than being dropped (the verbatim ``raw_text`` carries the whole row either way).
     """
     items: list[ScheduleCItem] = []
     for raw in _group_items(lines, starts_item=lambda s: True):
@@ -1225,13 +1466,18 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
         )
         amount = amt_m.group(1).strip() if amt_m else None
         head = raw[: amt_m.start()].strip() if amt_m else raw.strip()
-        # The income type is the last whitespace-token of the head (Salary,
-        # Pension, Annuity, …); the rest is the source.
-        parts = head.rsplit(" ", 1)
-        if len(parts) == 2 and parts[1]:
-            source, income_type = parts[0].strip(), parts[1].strip()
+        # Prefer a known multi-word Type phrase (with any owner prefix) at the
+        # tail; only when none is attested do we fall back to the last token.
+        type_m = _FD_C_TYPE_RE.search(head)
+        if type_m:
+            source = head[: type_m.start()].strip()
+            income_type = type_m.group(1).strip()
         else:
-            source, income_type = head, None
+            parts = head.rsplit(" ", 1)
+            if len(parts) == 2 and parts[1]:
+                source, income_type = parts[0].strip(), parts[1].strip()
+            else:
+                source, income_type = head, None
         items.append(
             ScheduleCItem(
                 source=_scrub_field(source) or _scrub_field(raw),
@@ -1267,6 +1513,65 @@ _FD_D_BARE_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
 _FD_RANGE_START_RE = re.compile(r"\$[\d,]+\s*-|Over\b")
 
 
+def _fd_d_amount(
+    raw: str,
+) -> tuple[AmountRange | None, int, list[tuple[int, int]]]:
+    """Resolve a Schedule D row's Amount column → ``(range, type_end, strip)``.
+
+    The Amount-of-Liability column sits to the right of the Type column. When the
+    Type wraps to a second physical line, pdfplumber re-flows the columns
+    left-to-right and the amount's **low bound and dash land *between* the type
+    fragments**, with the high bound after the wrapped type continuation
+    (GH-0102): ``Mortgage on Rental Property, $100,001 - Washington, DC
+    $250,000``. ``_FD_AMOUNT_RE`` then sees no contiguous ``$lo - $hi`` bucket and
+    the row silently emits ``amount_range: null`` with the amount tokens swept
+    into ``liability_type`` — a present-but-invisible liability amount.
+
+    Returns the resolved range (or ``None``), the offset at which the Type column
+    ends, and the character spans to **lift out** of the type slice (the displaced
+    amount tokens — a wrapped low+dash and/or high bound that landed amid the type
+    text).
+
+    The wrapped-Type case (GH-0102) is why a single ``raw[date:amount-start]``
+    slice is wrong: the type spans *both sides* of the amount low bound, so the
+    type slice must run to the row end with the amount tokens carved out, not
+    truncate at the first ``$``.
+
+    When the amount is **present but unparseable** (a dangling low with no
+    recoverable high) the displaced tokens are *not* carved out — they stay in
+    ``liability_type`` so the present-but-unparsed amount never vanishes from every
+    structured field at once (it would otherwise survive only in ``raw_text``); the
+    loss stays visible (CLAUDE.md "never silently drop"), matching Schedule A's
+    degrade-but-hold-the-slot rule.
+    """
+    # 1) A contiguous ``$lo - $hi`` bucket — the unwrapped (or already de-wrapped
+    #    contiguous) case. Type ends at its start; nothing displaced.
+    bucket = _FD_AMOUNT_RE.search(raw)
+    # 2) A dangling low (``$lo -`` with a word, not ``$hi``, right after) — the
+    #    wrapped-Type signature: the high bound spilled past the type continuation.
+    dangling = _FD_DANGLING_LOW_RE.search(raw)
+    if bucket and not (dangling and dangling.start() < bucket.start()):
+        # The first complete bucket precedes any dangling low → it is the amount.
+        # Type ends at the bucket start; the bucket itself is excluded by the end.
+        return _bucket(bucket.group(0)), bucket.start(), []
+    if dangling:
+        # The dangling-low span (``$lo -``) plus a recovered high bound are amount
+        # tokens that landed *inside* the wrapped type, so the type slice runs to
+        # the row end and carves them out (lifting them rejoins the split type).
+        high_m = _FD_BARE_AMOUNT_RE.search(raw, dangling.end())
+        if high_m:
+            # _bucket already normalizes the dash spacing of the joined label.
+            rng = _bucket(f"{dangling.group(0)}{high_m.group(0)}")
+            return rng, len(raw), [(dangling.start(), dangling.end()), high_m.span()]
+        # Amount tokens present (a ``$lo -`` opens the column) but no high bound
+        # recovered — unparseable, not absent. Leave the low *in* the type slice
+        # (no carve) so the present amount stays visible in a structured field and
+        # never collapses silently to ``amount_range: null``; ``raw_text`` carries
+        # the verbatim row regardless.
+        return None, len(raw), []
+    return None, len(raw), []
+
+
 def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
     """Schedule D (liabilities) → structured items + raw_text.
 
@@ -1296,19 +1601,33 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
         start = owner_m.end() if owner_m else 0
         end = date_m.start() if date_m else len(raw)
         creditor = _scrub_field(raw[start:end].strip())
-        # Liability type = text between the date and the amount.
-        amt_m = _FD_AMOUNT_RE.search(raw)
+        # Amount column resolved BEFORE the type is read: a wrapped Type column
+        # interleaves the amount's low/high bounds among the type fragments
+        # (GH-0102), so the amount tokens must be located and carved out of the
+        # type slice — otherwise they sweep into ``liability_type`` and the row
+        # silently emits ``amount_range: null`` (the present amount, invisible).
+        amount_range, type_end, amt_spans = _fd_d_amount(raw)
         ltype = None
         if date_m:
-            type_end = amt_m.start() if amt_m else len(raw)
-            ltype = _scrub_field(raw[date_m.end() : type_end].strip() or None)
+            # Type = text from the date to ``type_end`` with the displaced amount
+            # tokens carved out. Rebase the spans to the post-date slice so a
+            # wrapped low/high that landed mid-type is removed, rejoining the type.
+            d_end = date_m.end()
+            ltype = _scrub_field(
+                _strip_spans(
+                    raw[d_end:],
+                    type_end - d_end,
+                    [(s - d_end, e - d_end) for s, e in amt_spans],
+                )
+                or None
+            )
         items.append(
             ScheduleDItem(
                 creditor=creditor or _scrub_field(raw),
                 owner=owner,
                 date_incurred=date_incurred,
                 liability_type=ltype,
-                amount_range=_fd_amount_range(raw),
+                amount_range=amount_range,
                 raw_text=_scrub_raw_text(raw),
             )
         )
@@ -1382,6 +1701,12 @@ _FD_POSITION_TITLES = (
     "delegate",
     "commissioner",
     "governor",
+    # Editorial/board roles attested on real filings (Pan 2023/10055778 row 2
+    # ``Editor Telos Press`` — GH-0103 — structured null because the title was
+    # absent from this list while row 1 ``Treasurer`` split fine).
+    "editor in chief",
+    "editor",
+    "publisher",
 )
 
 
@@ -1445,6 +1770,70 @@ def _parse_schedule_f(lines: list[str]) -> list[ScheduleFItem]:
     return items
 
 
+# A Schedule H ``Dates`` column: a single travel date or a date *range*
+# (``06/01/2020 - 06/03/2020`` / ``June 2020`` / ``6/1/2020``). The dash-joined
+# range is matched greedily so the whole span lands in ``dates``, not just its
+# first endpoint. ``Month YYYY`` and the ``MM/DD/YYYY``/``M/YYYY`` forms mirror
+# the other schedules' date vocabularies (1499, 1660); the range tail is optional
+# for a single date. A **yearless** ``M/D`` form is deliberately NOT matched: this
+# regex also gates row-anchoring (``starts_item``), so a bare ``1/2`` / ``9/11``
+# in a wrapped Location/Items continuation line would otherwise spuriously anchor
+# a new trip and fabricate a ``dates`` value the filer never wrote (GH-0103
+# critic). A real travel date carries a year.
+_FD_H_DATE = (
+    r"(?:January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)\s+\d{4}"
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4}"
+)
+_FD_H_DATES_RE = re.compile(
+    rf"(?P<dates>(?:{_FD_H_DATE})(?:\s*[-–]\s*(?:{_FD_H_DATE}))?)",
+    re.IGNORECASE,
+)
+
+
+def _parse_schedule_h(lines: list[str]) -> list[ScheduleHItem]:
+    """Schedule H (travel payments) → ``source``/``dates`` + raw_text.
+
+    Columns are ``Source | Dates | Location | Items Provided``. The
+    column-header banner (``Source Dates Location Items``) is dropped upstream in
+    :func:`_segment_schedules` (``_FD_FURNITURE_RE``), so the parser sees only
+    rows. A single trip's ``Location``/``Items`` text wraps across physical lines
+    on real forms (Green 2020/10040812 — GH-0103); left to ``_salvage_raw`` that
+    shreds one trip into several raw_text-only fragments. We coalesce instead:
+    each row anchors on the line bearing the ``Dates`` column (a date or
+    date-range) and folds the wrapped continuation lines in, so one trip is one
+    item.
+
+    The ``Dates`` signature is the only stable interior delimiter, so we split it
+    off confidently — ``source`` is the text before it, ``dates`` the matched
+    span. ``Location`` and ``Items`` merge with no reliable boundary, so both stay
+    ``None`` (best-effort, #17 scope) and the verbatim ``raw_text`` carries the
+    full row. A row with no recognizable date keeps everything in ``raw_text``.
+    """
+    items: list[ScheduleHItem] = []
+    for raw in _group_items(
+        lines, starts_item=lambda s: bool(_FD_H_DATES_RE.search(s))
+    ):
+        scrubbed = _scrub_raw_text(raw)
+        date_m = _FD_H_DATES_RE.search(scrubbed)
+        if date_m:
+            dates = date_m.group("dates").strip()
+            source = _scrub_field(scrubbed[: date_m.start()].strip()) or None
+        else:
+            dates = None
+            source = None
+        items.append(
+            ScheduleHItem(
+                source=source,
+                dates=dates,
+                location=None,
+                items=None,
+                raw_text=scrubbed,
+            )
+        )
+    return items
+
+
 def _split_trailing_dollar(raw: str) -> tuple[str, str | None, str | None]:
     """Split a row into ``(scrubbed, source, money)`` on a trailing dollar figure.
 
@@ -1481,10 +1870,12 @@ def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
     return items
 
 
-# H (travel) and J (new-filer comp) have no entry: their columns merge with no
-# stable delimiter and no committed fixture has a filled form to anchor a split,
-# so they fall through to ``_salvage_raw`` — one raw_text-only item per row, all
-# structured columns ``None``. Adding a column parser later is a one-line entry.
+# J (new-filer comp) has no entry: its two columns merge with no stable
+# delimiter and no committed fixture has a filled form to anchor a split, so it
+# falls through to ``_salvage_raw`` — one raw_text-only item per row, all
+# structured columns ``None``. H (travel) anchors on its ``Dates`` column to
+# coalesce wrapped itineraries and split off source/dates (GH-0103); its
+# ``Location``/``Items`` still merge, so those stay ``None`` (best-effort, #17).
 _FD_STRUCTURED = {
     "A": _parse_schedule_a,
     "B": _parse_schedule_b,
@@ -1493,6 +1884,7 @@ _FD_STRUCTURED = {
     "E": _parse_schedule_e,
     "F": _parse_schedule_f,
     "G": _parse_schedule_g,
+    "H": _parse_schedule_h,
     "I": _parse_schedule_i,
 }
 

@@ -11,6 +11,7 @@ page text — no Clerk, no extra binary fixtures.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -174,9 +175,51 @@ def test_schedule_c_items():
     body = extract_fd_schedules(THOMPSON)
     c = body.schedules["C"]
     assert len(c) == 4
-    miss = next(i for i in c if i["source"].startswith("State of Mississippi Member"))
+    miss = next(i for i in c if i["raw_text"].startswith("State of Mississippi Member"))
     assert miss["amount"] == "$11,195.00"
     assert miss["raw_text"].startswith("State of Mississippi Member Retirement")
+
+
+def test_schedule_c_multiword_type_does_not_bleed_into_source():
+    # GH-0101: the Type column is multi-word on the real form and folds the owner
+    # column in front of it. A last-whitespace split bled the Type's leading
+    # word(s) into ``source`` and truncated ``income_type`` to its final word.
+    # The vocabulary split must keep the full Type out of the source. Asserted on
+    # the committed Thompson fixture (real-fixture reproduction, not synthetic).
+    c = extract_fd_schedules(THOMPSON).schedules["C"]
+
+    # "State of Mississippi Member Retirement Plan $11,195.00": pre-fix source
+    # gained "Member Retirement", income_type was truncated to "Plan".
+    member = next(i for i in c if i["raw_text"].startswith("State of Mississippi Member"))
+    assert member["source"] == "State of Mississippi"
+    assert member["income_type"] == "Member Retirement Plan"
+
+    # "... Benefit Payment Services Spouse Pension N/A": pre-fix source gained
+    # "Spouse", income_type was just "Pension".
+    pension = next(i for i in c if "Benefit Payment Services" in i["raw_text"])
+    assert pension["source"] == "The Northern Trust Company, Benefit Payment Services"
+    assert pension["income_type"] == "Spouse Pension"
+
+    # "AXA Equitable Annuity Spouse Annuity Plan N/A": "Annuity" also appears in
+    # the SOURCE (company name) — the tail-anchored Type must not swallow it.
+    annuity = next(i for i in c if i["raw_text"].startswith("AXA"))
+    assert annuity["source"] == "AXA Equitable Annuity"
+    assert annuity["income_type"] == "Spouse Annuity Plan"
+
+
+def test_schedule_c_unknown_multiword_type_degrades_safely(monkeypatch):
+    # An UNKNOWN Type (not in the vocabulary) falls back to the single-token
+    # split rather than being dropped — and the verbatim row survives in
+    # raw_text either way (CLAUDE.md: never silently drop).
+    from openhouse.pdf import _parse_schedule_c
+
+    rows = _parse_schedule_c(["Weird Co Mystery Compensation $5.00"])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.amount == "$5.00"
+    assert row.income_type == "Compensation"  # last-token fallback
+    assert row.source == "Weird Co Mystery"
+    assert row.raw_text == "Weird Co Mystery Compensation $5.00"
 
 
 # --- Schedules E–J: structured columns, every item keeps verbatim raw_text ----
@@ -269,6 +312,90 @@ def test_schedule_g_h_i_j_structured_synthetic(monkeypatch):
     assert len(j) == 1
     assert set(j[0].keys()) == {"source", "description", "raw_text"}
     assert "advisory and consulting" in j[0]["raw_text"]
+
+
+def test_schedule_e_editor_title_structures(monkeypatch):
+    # GH-0103: Pan 2023/10055778 Schedule E row 2 is ``Editor Telos Press`` —
+    # the same shape as a row 1 ``Treasurer`` that splits fine, but ``Editor``
+    # was absent from the position-title vocabulary, so position/organization
+    # came back null while raw_text stayed intact (inconsistency in one schedule).
+    # The PDF isn't a committed fixture; the title-list mechanism it exercises is
+    # validated on the THOMPSON real fixture (test_schedule_e_positions_structured).
+    page = "\n".join(
+        [
+            "ScheDule e: PoSitionS",
+            "Position Name of Organization",
+            "Treasurer Telos Press",
+            "Editor Telos Press",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    e = extract_fd_schedules(Path("synthetic.pdf")).schedules["E"]
+    assert len(e) == 2
+    # Row 1 structures (as it always did) AND row 2 now structures the same way —
+    # consistent within the schedule, not null-while-its-twin-splits.
+    assert e[0]["position"] == "Treasurer"
+    assert e[1]["position"] == "Editor"
+    assert e[1]["organization"] == "Telos Press"
+    assert e[1]["raw_text"] == "Editor Telos Press"
+
+
+def test_schedule_h_banner_skipped_and_itinerary_coalesced(monkeypatch):
+    # GH-0103: Green 2020/10040812 Schedule H shreds — the parser neither skips
+    # the column-header banner (``Source Dates Location Items``) nor coalesces the
+    # multi-line itinerary, so one trip becomes garbled header/fragment rows. The
+    # PDF isn't a committed fixture; this reproduces the shape synthetically: a
+    # banner + a trip whose Location/Items wrap across three physical lines.
+    page = "\n".join(
+        [
+            "ScheDule H: travel PaymentS anD reimburSementS",
+            "Source Dates Location Items",
+            "Policy Institute 06/01/2020 - 06/03/2020 Aspen, Colorado",
+            "Lodging, airfare, and conference",
+            "registration fees",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    h = extract_fd_schedules(Path("synthetic.pdf")).schedules["H"]
+    # The banner is dropped (not an item); the three-line trip coalesces into ONE
+    # structured item rather than shredding into a header + fragment rows.
+    assert len(h) == 1
+    assert set(h[0].keys()) == {"source", "dates", "location", "items", "raw_text"}
+    assert h[0]["source"] == "Policy Institute"
+    assert h[0]["dates"] == "06/01/2020 - 06/03/2020"
+    # The wrapped Location/Items lines are folded into the one row's raw_text.
+    assert "Aspen, Colorado" in h[0]["raw_text"]
+    assert "registration fees" in h[0]["raw_text"]
+    assert "Source Dates Location Items" not in h[0]["raw_text"]
+
+
+def test_schedule_h_yearless_slash_in_continuation_does_not_anchor(monkeypatch):
+    # GH-0103 critic: the Dates anchor must not fire on a *yearless* ``M/D`` slash
+    # buried in a wrapped Location/Items line (``1/2 day``, ``9/11 Memorial``).
+    # Pre-fix that split one trip into two items and fabricated a ``dates`` value
+    # (``1/2``) the filer never wrote — violating degrade-not-fabricate and the
+    # very coalescing this schedule's parser exists to do.
+    page = "\n".join(
+        [
+            "ScheDule H: travel PaymentS anD reimburSementS",
+            "Source Dates Location Items",
+            "Heritage Foundation 06/01/2020 - 06/03/2020 Washington, DC",
+            "Lodging, 1/2 day conference, meals, and a",
+            "visit to the 9/11 Memorial Museum",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    h = extract_fd_schedules(Path("synthetic.pdf")).schedules["H"]
+    # ONE trip — the yearless fragments do not anchor spurious extra items.
+    assert len(h) == 1
+    assert h[0]["dates"] == "06/01/2020 - 06/03/2020"
+    # No fabricated date: ``1/2`` / ``9/11`` never become a structured ``dates``.
+    assert all(item["dates"] != "1/2" and item["dates"] != "9/11" for item in h)
+    # The wrapped continuation text is preserved in the single row's raw_text.
+    assert "9/11 Memorial Museum" in h[0]["raw_text"]
 
 
 # --- D structured (synthetic, since the fixture's D is "None disclosed.") ------
@@ -487,6 +614,74 @@ def test_nul_appendix_title_is_not_a_heading(monkeypatch):
     assert sorted(body.schedules) == ["E"]
     raw = " ".join(i["raw_text"] for i in body.schedules["E"])
     assert "Charles Schwab JT TEN" in raw  # appendix folded, not dropped
+
+
+def test_empty_trailing_schedule_does_not_absorb_appendix(monkeypatch):
+    # #97: an empty trailing schedule (``None disclosed.``) must terminate BEFORE
+    # the post-table "Asset Class Details" appendix. Otherwise the appendix asset
+    # lines are salvaged into fabricated rows for a schedule the filer left blank
+    # (Bucshon 2020/10040126: Schedule I "None disclosed." → 6 phantom rows).
+    page = "\n".join(
+        [
+            "ScheDule a: aSSetS anD \"unearneD\" income",
+            "asset owner value of asset income income tx. >",
+            "Deaconess 401(k) Plan [IH] JT $1,001 - $15,000 None",
+            # Trailing Schedule I, marked empty by the filer.
+            "ScheDule i: PaymentS maDe to cHarity in lieu of Honoraria",
+            "None disclosed.",
+            # The post-table appendix (intact / case-mangled glyphs). Its lines
+            # are an asset-class legend, NOT Schedule I disclosures.
+            "ScheDule a anD B aSSet claSS DetailS",
+            "Deaconess 401(k) Plan",
+            "Schwab Brokerage Account",
+            "Schwab IRA Rollover #1",
+            "Schwab Roth IRA",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    # A has its real row; I was "None disclosed." → absent, NOT fabricated rows.
+    assert "I" not in body.schedules
+    assert sorted(body.schedules) == ["A"]
+    # The appendix asset names never surface as disclosed content anywhere.
+    all_raw = " ".join(
+        item["raw_text"] for items in body.schedules.values() for item in items
+    )
+    assert "Schwab Brokerage Account" not in all_raw
+    assert "Schwab IRA Rollover" not in all_raw
+
+
+def test_empty_trailing_schedule_nul_appendix_not_fabricated(monkeypatch):
+    # #97, glyph-collapse rendering: the small-caps appendix title flattens to its
+    # initials ("S A A C D" = Schedule A Asset Class Details), so neither the
+    # heading nor the trailer regex fired and the appendix bled into the empty
+    # trailing schedule (Pan 2023/10055778: Schedule J "None disclosed." → phantom
+    # "Non-federal Retirement Accounts" rows).
+    nul = "\x00"
+    page = "\n".join(
+        [
+            f"S{nul * 7} E: P{nul * 8}",
+            "Position Name of Organization",
+            "Board member Some Nonprofit, Inc.",
+            # Trailing Schedule J, empty.
+            f"S{nul * 7} J: C{nul * 10}",
+            "None disclosed.",
+            # Appendix title collapsed to "S A A C D" (no "<LETTER>:", no phrase).
+            f"S{nul * 7} A A{nul * 4} C{nul * 4} D{nul * 6}",
+            "Non-federal Retirement Accounts",
+            "Charles Schwab JT TEN (Owner: JT)",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    # E keeps its real row; J was "None disclosed." → absent, not fabricated.
+    assert "J" not in body.schedules
+    assert sorted(body.schedules) == ["E"]
+    all_raw = " ".join(
+        item["raw_text"] for items in body.schedules.values() for item in items
+    )
+    assert "Non-federal Retirement Accounts" not in all_raw
+    assert "Charles Schwab" not in all_raw
 
 
 def test_nul_extension_cover_sheet_still_not_an_fd_body(monkeypatch):
@@ -894,6 +1089,111 @@ def test_member_form_double_wrap_row_repairs_both_bounds():
     assert twiex["income_amount"]["label"] == "$5,001 - $15,000"
 
 
+def test_member_form_subholding_asset_name_has_no_bled_column_text():
+    # GH-0099: on a ⇒-subholding row the value / income-type / income / glyph
+    # column text renders physically *between* the wrapped name fragments, so
+    # ``raw[:type_tag]`` swallowed it into the asset string (asset unusable as a
+    # grouping key, owner often dropped). The already-parsed column spans must be
+    # lifted back out, leaving the clean subholding name — while the structured
+    # value/income fields (verified by the sibling wrap tests) stay intact.
+    a = extract_fd_schedules(WELCH_SUBWRAP).schedules["A"]
+
+    # Single-wrap row: "Welch account ⇒ $15,001 - $50,000 Dividends $201 -
+    # gfedcb aberdeen … Strategy $1,000 K-1 Free ETF (BCI) [EF]". Pre-fix the
+    # asset carried "$15,001 - $50,000 Dividends $201 - gfedcb … $1,000".
+    first = a[0]
+    assert first["asset"] == (
+        "Welch account ⇒ aberdeen Standard Bloomberg all Commodity "
+        "Strategy K-1 Free ETF (BCI)"
+    )
+    # Structured columns the bled text was lifted into (GH-0099 must not regress
+    # the GH-0098 wrap repair the names were entangled with).
+    assert first["value_of_asset"]["label"] == "$15,001 - $50,000"
+    assert first["income_type"] == "Dividends"
+    assert first["income_amount"]["label"] == "$201 - $1,000"
+
+    # Double-wrap row: both bounds wrapped; the two bare highs ($250,000 /
+    # $15,000) sat inside the name. They land in their structured fields and the
+    # asset name keeps only the (TWIEX) holding (plus a residual wrapped income
+    # word the sub-pattern leaves — the name no longer carries any $ or owner).
+    twiex = next(i for i in a if "TWIEX" in i["raw_text"])
+    assert "$" not in twiex["asset"]
+    assert twiex["value_of_asset"]["label"] == "$100,001 - $250,000"
+    assert twiex["income_amount"]["label"] == "$5,001 - $15,000"
+
+    # None/None row: "Welch account ⇒ None None gfedc Charles Schwab
+    # Corporation (SCHW) [ST]". The value-None / income-None literals and glyph
+    # are column furniture — strip them, keep the ⇒ subholding marker.
+    schwab = next(
+        i for i in a if i["raw_text"].startswith("Welch account ⇒ None None")
+    )
+    assert schwab["asset"] == "Welch account ⇒ Charles Schwab Corporation (SCHW)"
+
+    # No surviving row carries an owner code, dollar range, or glyph in its name.
+    for item in a:
+        assert not re.search(r"\bgfedcb?\b", item["asset"])
+        assert "$" not in item["asset"]
+        assert not re.search(r"⇒\s*(?:SP|DC|JT)\b", item["asset"])
+
+
+def test_schedule_a_wrapped_value_high_does_not_cross_pair_income(monkeypatch):
+    # GH-0098: when the value-of-asset high bound wraps and lands *between* the
+    # income low and the income high in the de-wrapped row, the greedy bucket
+    # regex used to glue ``$incomeLow - $valueHigh`` into a spurious complete
+    # bucket — crossing the columns and leaving value dangling against the wrong
+    # high. The Clerk's Cline (2021/10054358) Rental Property row: PDF value
+    # $250,001 - $500,000, income $15,001 - $50,000. The value high ($500,000)
+    # wraps onto the continuation line, ahead of the income high ($50,000):
+    #   "Rental Property [RP] JT $250,001 - Rent $15,001 -"
+    #   "$500,000 $50,000"
+    # Pre-fix this parsed value $250,001 - $50,000 (high < low) and income
+    # $15,001 - $500,000 (100x overstated). The two ranges must stay anchored to
+    # their originating columns.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "Rental Property [RP] JT $250,001 - Rent $15,001 -",
+            "$500,000 $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    item = extract_fd_schedules(Path("synthetic.pdf")).schedules["A"][0]
+    assert item["value_of_asset"] == {
+        "low": 250001,
+        "high": 500000,
+        "label": "$250,001 - $500,000",
+    }
+    assert item["income_type"] == "Rent"
+    assert item["income_amount"] == {
+        "low": 15001,
+        "high": 50000,
+        "label": "$15,001 - $50,000",
+    }
+
+
+def test_schedule_a_both_highs_wrap_in_reading_order_keeps_columns(monkeypatch):
+    # GH-0098 (DelBene 2021/10046520, Gryphon Partners Fund V): both the value
+    # and income high bounds wrap, in value-high-then-income-high reading order,
+    # so ``$incomeLow - $valueHigh`` glues into a spurious bucket. PDF value
+    # $1,000,001 - $5,000,000, income $50,001 - $100,000; pre-fix parsed value
+    # $1,000,001 - $100,000 (high < low) and income $50,001 - $5,000,000.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "Gryphon Partners Fund V [PE] JT $1,000,001 - Dividends $50,001 -",
+            "$5,000,000 $100,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    item = extract_fd_schedules(Path("synthetic.pdf")).schedules["A"][0]
+    assert item["value_of_asset"]["label"] == "$1,000,001 - $5,000,000"
+    assert item["income_amount"]["label"] == "$50,001 - $100,000"
+
+
 # --- GH-0070: Schedule B anchors for directly-held (arrow-less) rows -----------
 
 DIRECTB = PDF_FIXTURES / "efiled_fd_directb_10043047.pdf"
@@ -985,6 +1285,76 @@ def test_schedule_d_bare_year_alone_does_not_anchor(monkeypatch):
     assert len(d) == 1
     assert d[0]["date_incurred"] == "June 2018"
     assert "Established 1999" in d[0]["raw_text"]
+
+
+def test_schedule_d_wrapped_type_amount_not_lost(monkeypatch):
+    # GH-0102: when the Type column wraps to a second physical line, pdfplumber
+    # re-flows columns left-to-right and the amount's low bound + dash land
+    # *between* the type fragments, with the high bound after the type
+    # continuation. Before the fix, _FD_AMOUNT_RE saw no contiguous "$lo - $hi"
+    # bucket, so amount_range went silently null and the amount tokens were swept
+    # into liability_type. Two real wrapped shapes from the issue:
+    #   Bucshon (2020/10040126) BB&T: type "Mortgage on Rental Property,
+    #     Washington, DC", amount "$100,001 - $250,000".
+    #   Bost (2021/10047859): type "Personal residence", amount
+    #     "$250,001 - $500,000".
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            # BB&T wrapped row: low bound ends line 1, type continuation + high
+            # bound on line 2 (the documented interleave shape).
+            "BB&T Bank December 2015 Mortgage on Rental Property, $100,001 -",
+            "Washington, DC $250,000",
+            # A single-line control row (its amount already parsed correctly).
+            "Old National Bank January 2016 Mortgage $15,001 - $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 2
+    wrapped, control = d[0], d[1]
+    # Positive: the wrapped amount now resolves to its real bucket, not null.
+    assert wrapped["amount_range"] == {
+        "low": 100001,
+        "high": 250000,
+        "label": "$100,001 - $250,000",
+    }
+    # The type is the clean, rejoined string — the amount tokens are carved back
+    # out of the interleave, never left swept into liability_type.
+    assert wrapped["liability_type"] == "Mortgage on Rental Property, Washington, DC"
+    assert wrapped["creditor"] == "BB&T Bank"
+    assert wrapped["date_incurred"] == "December 2015"
+    # Control row is unaffected (single-line amount still parses).
+    assert control["amount_range"]["label"] == "$15,001 - $50,000"
+    assert control["liability_type"] == "Mortgage"
+
+
+def test_schedule_d_present_but_unparseable_amount_stays_visible(monkeypatch):
+    # GH-0102 "never silently drop": when the Amount column holds a low bound + dash
+    # but no recoverable high bound, the amount is present-but-unparseable. It must
+    # NOT collapse to amount_range:null with the tokens carved away — the present
+    # amount stays visible in a structured field (liability_type) so a liability
+    # query is not silently unsound, and raw_text carries the verbatim row.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            # Dangling low ("$lo -" followed by a word), no "$hi" anywhere.
+            "Some Bank December 2015 Personal Loan $100,001 - undisclosed",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 1
+    # No fabricated bucket — the unparseable amount is null (degrade, never fake).
+    assert d[0]["amount_range"] is None
+    # But the present amount tokens survive in a structured field, not just
+    # raw_text — the loss is visible, not silent.
+    assert "$100,001 -" in d[0]["liability_type"]
+    assert "$100,001 -" in d[0]["raw_text"]
 
 
 def test_schedule_f_bare_year_leading_date(monkeypatch):
