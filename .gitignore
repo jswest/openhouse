@@ -37,3 +37,6 @@ node_modules/
 # so a clone with no drawer self-skips its drift check. Never committed.
 .claude/skills/*/.stamp
 .claude/scratch
+
+# Playwright MCP scratch output (browser console logs + page snapshots)
+.playwright-mcp/
