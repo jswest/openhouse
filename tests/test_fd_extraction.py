@@ -489,6 +489,74 @@ def test_nul_appendix_title_is_not_a_heading(monkeypatch):
     assert "Charles Schwab JT TEN" in raw  # appendix folded, not dropped
 
 
+def test_empty_trailing_schedule_does_not_absorb_appendix(monkeypatch):
+    # #97: an empty trailing schedule (``None disclosed.``) must terminate BEFORE
+    # the post-table "Asset Class Details" appendix. Otherwise the appendix asset
+    # lines are salvaged into fabricated rows for a schedule the filer left blank
+    # (Bucshon 2020/10040126: Schedule I "None disclosed." → 6 phantom rows).
+    page = "\n".join(
+        [
+            "ScheDule a: aSSetS anD \"unearneD\" income",
+            "asset owner value of asset income income tx. >",
+            "Deaconess 401(k) Plan [IH] JT $1,001 - $15,000 None",
+            # Trailing Schedule I, marked empty by the filer.
+            "ScheDule i: PaymentS maDe to cHarity in lieu of Honoraria",
+            "None disclosed.",
+            # The post-table appendix (intact / case-mangled glyphs). Its lines
+            # are an asset-class legend, NOT Schedule I disclosures.
+            "ScheDule a anD B aSSet claSS DetailS",
+            "Deaconess 401(k) Plan",
+            "Schwab Brokerage Account",
+            "Schwab IRA Rollover #1",
+            "Schwab Roth IRA",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    # A has its real row; I was "None disclosed." → absent, NOT fabricated rows.
+    assert "I" not in body.schedules
+    assert sorted(body.schedules) == ["A"]
+    # The appendix asset names never surface as disclosed content anywhere.
+    all_raw = " ".join(
+        item["raw_text"] for items in body.schedules.values() for item in items
+    )
+    assert "Schwab Brokerage Account" not in all_raw
+    assert "Schwab IRA Rollover" not in all_raw
+
+
+def test_empty_trailing_schedule_nul_appendix_not_fabricated(monkeypatch):
+    # #97, glyph-collapse rendering: the small-caps appendix title flattens to its
+    # initials ("S A A C D" = Schedule A Asset Class Details), so neither the
+    # heading nor the trailer regex fired and the appendix bled into the empty
+    # trailing schedule (Pan 2023/10055778: Schedule J "None disclosed." → phantom
+    # "Non-federal Retirement Accounts" rows).
+    nul = "\x00"
+    page = "\n".join(
+        [
+            f"S{nul * 7} E: P{nul * 8}",
+            "Position Name of Organization",
+            "Board member Some Nonprofit, Inc.",
+            # Trailing Schedule J, empty.
+            f"S{nul * 7} J: C{nul * 10}",
+            "None disclosed.",
+            # Appendix title collapsed to "S A A C D" (no "<LETTER>:", no phrase).
+            f"S{nul * 7} A A{nul * 4} C{nul * 4} D{nul * 6}",
+            "Non-federal Retirement Accounts",
+            "Charles Schwab JT TEN (Owner: JT)",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    # E keeps its real row; J was "None disclosed." → absent, not fabricated.
+    assert "J" not in body.schedules
+    assert sorted(body.schedules) == ["E"]
+    all_raw = " ".join(
+        item["raw_text"] for items in body.schedules.values() for item in items
+    )
+    assert "Non-federal Retirement Accounts" not in all_raw
+    assert "Charles Schwab" not in all_raw
+
+
 def test_nul_extension_cover_sheet_still_not_an_fd_body(monkeypatch):
     # A glyphs-lost extension/cover sheet (small-caps titles render as NUL runs
     # but there are no "S… <LETTER>:" headings) must STILL raise NotAnFdBody —
