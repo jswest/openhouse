@@ -199,3 +199,33 @@ def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch):
     monkeypatch.delenv(DATA_DIR_ENV, raising=False)
     assert cli_mod.main(argv_default) == 0
     assert cap["data_dir"] == Path("./data")
+
+
+def test_version_flag_prints_version(capsys):
+    # `action="version"` exits 0 after printing; --version is a top-level flag,
+    # so it never reaches the `read` interception in main().
+    from openhouse import __version__
+
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"openhouse {__version__}"
+
+
+def test_top_help_shows_pipeline_epilog(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    # The epilog orients the reader: the pipeline, env vars, coverage bounds.
+    assert "typical workflow:" in out
+    assert "OPENHOUSE_DATA_DIR" in out
+    assert "PTRs (STOCK Act) from 2012" in out
+
+
+def test_subcommand_help_has_examples(capsys):
+    for verb in ("pull", "parse", "read"):
+        with pytest.raises(SystemExit) as exc:
+            cli_mod.main([verb, "--help"])
+        assert exc.value.code == 0
+        assert "examples:" in capsys.readouterr().out
