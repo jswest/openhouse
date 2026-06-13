@@ -962,6 +962,64 @@ def test_member_form_double_wrap_row_repairs_both_bounds():
     assert twiex["income_amount"]["label"] == "$5,001 - $15,000"
 
 
+def test_schedule_a_wrapped_value_high_does_not_cross_pair_income(monkeypatch):
+    # GH-0098: when the value-of-asset high bound wraps and lands *between* the
+    # income low and the income high in the de-wrapped row, the greedy bucket
+    # regex used to glue ``$incomeLow - $valueHigh`` into a spurious complete
+    # bucket — crossing the columns and leaving value dangling against the wrong
+    # high. The Clerk's Cline (2021/10054358) Rental Property row: PDF value
+    # $250,001 - $500,000, income $15,001 - $50,000. The value high ($500,000)
+    # wraps onto the continuation line, ahead of the income high ($50,000):
+    #   "Rental Property [RP] JT $250,001 - Rent $15,001 -"
+    #   "$500,000 $50,000"
+    # Pre-fix this parsed value $250,001 - $50,000 (high < low) and income
+    # $15,001 - $500,000 (100x overstated). The two ranges must stay anchored to
+    # their originating columns.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "Rental Property [RP] JT $250,001 - Rent $15,001 -",
+            "$500,000 $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    item = extract_fd_schedules(Path("synthetic.pdf")).schedules["A"][0]
+    assert item["value_of_asset"] == {
+        "low": 250001,
+        "high": 500000,
+        "label": "$250,001 - $500,000",
+    }
+    assert item["income_type"] == "Rent"
+    assert item["income_amount"] == {
+        "low": 15001,
+        "high": 50000,
+        "label": "$15,001 - $50,000",
+    }
+
+
+def test_schedule_a_both_highs_wrap_in_reading_order_keeps_columns(monkeypatch):
+    # GH-0098 (DelBene 2021/10046520, Gryphon Partners Fund V): both the value
+    # and income high bounds wrap, in value-high-then-income-high reading order,
+    # so ``$incomeLow - $valueHigh`` glues into a spurious bucket. PDF value
+    # $1,000,001 - $5,000,000, income $50,001 - $100,000; pre-fix parsed value
+    # $1,000,001 - $100,000 (high < low) and income $50,001 - $5,000,000.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "Gryphon Partners Fund V [PE] JT $1,000,001 - Dividends $50,001 -",
+            "$5,000,000 $100,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    item = extract_fd_schedules(Path("synthetic.pdf")).schedules["A"][0]
+    assert item["value_of_asset"]["label"] == "$1,000,001 - $5,000,000"
+    assert item["income_amount"]["label"] == "$50,001 - $100,000"
+
+
 # --- GH-0070: Schedule B anchors for directly-held (arrow-less) rows -----------
 
 DIRECTB = PDF_FIXTURES / "efiled_fd_directb_10043047.pdf"
