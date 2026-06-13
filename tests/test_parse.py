@@ -460,3 +460,34 @@ def test_types_partial_run_emits_stderr_note(tmp_path, capsys):
     _seed_classify_year(tmp_path)
     parse([2020], data_dir=tmp_path, types=["ptr"], strict=False, fetched_at=FETCHED_AT)
     assert "--types excludes fd" in capsys.readouterr().err
+
+
+def test_stale_body_removed_when_filing_degrades(tmp_path):
+    # GH-0070: a body written by an earlier parse generation must not survive a
+    # run in which the filing produces no body (here: extraction failure) — a
+    # stale body beside an extract_failed manifest entry masquerades as data.
+    from openhouse.parse import _classify_records
+    from openhouse.schemas import FilingMetadata, Filer, FilingTypeInfo
+
+    rec = FilingMetadata(
+        doc_id="10009999",
+        year=2020,
+        filer=Filer(first="Pat", last="Example"),
+        filer_id="name:example.pat",
+        filing_type=FilingTypeInfo.from_code("O"),
+        source_pdf="raw/2020/fd/10009999.pdf",
+    )
+    data_dir = tmp_path
+    (data_dir / "raw/2020/fd").mkdir(parents=True)
+    (data_dir / "raw/2020/fd/10009999.pdf").write_bytes(b"%PDF-1.4 truncated")
+    parsed_dir = data_dir / "parsed/2020"
+    stale = parsed_dir / "fd/10009999.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"schedules": {"A": []}}\n')
+
+    unparsed = _classify_records(
+        [rec], data_dir=data_dir, types=["fd"], year=2020, parsed_dir=parsed_dir
+    )
+    assert rec.parse_status == "error"
+    assert any(e["reason"] == "extract_failed" for e in unparsed)
+    assert not stale.exists(), "stale body must be removed, not left as data"

@@ -130,6 +130,19 @@ def _unparsed_entry(rec: FilingMetadata, reason: str) -> dict:
     return {"doc_id": rec.doc_id, "filer_id": rec.filer_id, "reason": reason}
 
 
+def _remove_stale_body(parsed_dir: Path, doc_id: str, family: str) -> None:
+    """Delete a body file left by an earlier parse generation, if present.
+
+    Called whenever the current run produces **no** body for a filing (an
+    extraction failure, a scanned/missing PDF, a bodyless cover sheet): a
+    leftover ``parsed/<year>/{ptr,fd}/<DocID>.json`` from a previous run would
+    otherwise masquerade as current data beside a manifest that says otherwise
+    (GH-0070 — observed with bodies the completeness guard now rejects).
+    """
+    stale = parsed_dir / family / f"{doc_id}.json"
+    stale.unlink(missing_ok=True)
+
+
 def _write_ptr_body(parsed_dir: Path, doc_id: str, transactions: list) -> None:
     """Write one e-filed PTR body to ``parsed/<year>/ptr/<DocID>.json`` (§6.4).
 
@@ -226,6 +239,7 @@ def _classify_records(
             rec.pdf_class = "missing"
             rec.parse_status = "ok"
             unparsed.append(_unparsed_entry(rec, "missing"))
+            _remove_stale_body(parsed_dir, rec.doc_id, family)
         else:
             pdf_path = data_dir / rec.source_pdf
             transactions = None
@@ -260,13 +274,20 @@ def _classify_records(
                 rec.pdf_class = None
                 rec.parse_status = "error"
                 unparsed.append(_unparsed_entry(rec, "extract_failed"))
+                # No body this run — remove any stale one (see _remove_stale_body).
+                _remove_stale_body(parsed_dir, rec.doc_id, family)
             else:
                 rec.pdf_class = pdf_class
                 rec.parse_status = "ok"
                 if transactions is not None:
                     _write_ptr_body(parsed_dir, rec.doc_id, transactions)
-                if fd_body is not None:
+                elif fd_body is not None:
                     _write_fd_body(parsed_dir, rec.doc_id, fd_body)
+                else:
+                    # No body this run for either family (scanned/missing PDF,
+                    # bodyless cover sheet, empty outcome) — drop any stale one
+                    # (see _remove_stale_body).
+                    _remove_stale_body(parsed_dir, rec.doc_id, family)
                 if pdf_class in ("scanned", "missing"):
                     unparsed.append(_unparsed_entry(rec, pdf_class))
 

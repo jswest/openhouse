@@ -72,8 +72,12 @@ def test_none_disclosed_is_absent_not_empty():
 def test_schedule_a_item_count_and_structure():
     body = extract_fd_schedules(THOMPSON)
     a = body.schedules["A"]
-    # 25 asset rows on this form (each [TYPE]-tagged, glyph-terminated).
-    assert len(a) == 25
+    # 27 asset rows on this form. The pre-GH-0070 anchor counted 25: the two
+    # "Public Employees' Retirement System of Mississippi … [DB]" rows wrap
+    # the [TYPE] tag off the glyph-terminated row line and silently merged
+    # into the Prudential row. The glyph-terminated-line anchor recovers them
+    # and the [TYPE]-count completeness guard pins the total.
+    assert len(a) == 27
     # First row: a real-property asset, no owner column, a value range, a LOCATION.
     first = a[0]
     assert first["asset"] == "0.5 acre unimproved property"
@@ -803,3 +807,233 @@ def test_parse_annual_fd_with_lost_headings_is_extract_failed(tmp_path, monkeypa
     assert records[0].pdf_class is None
     assert not (parsed_dir / "fd" / "10042852.json").exists()
     assert [u["reason"] for u in unparsed] == ["extract_failed"]
+
+
+# --- GH-0070: rendering-independent Schedule A row anchors ---------------------
+#
+# Two real fixtures cover the two intact-rendering failure modes the
+# glyph-gated anchor had (ground truth in tests/fixtures/pdf/README.md):
+# the Candidate-form variant with NO checkbox column (no glyph anywhere), and
+# a member form whose every row is a subholding with the [TYPE]-tagged name
+# wrapped off the glyph-bearing line. Before GH-0070 both collapsed into a
+# single merged Schedule A item with parse_status "ok".
+
+HACKETT_CANDIDATE = PDF_FIXTURES / "efiled_fd_candidate_10035478.pdf"
+WELCH_SUBWRAP = PDF_FIXTURES / "efiled_fd_subwrap_10039965.pdf"
+
+
+def test_candidate_form_schedule_a_anchors_without_glyph():
+    a = extract_fd_schedules(HACKETT_CANDIDATE).schedules["A"]
+    # 20 asset rows (counted by hand from the PDF text: 2 direct [BA] accounts,
+    # 12 retirement-plan subholdings, the [OL] S-corp, the [IP] royalties row,
+    # 3 John Hancock subholdings, 1 Trust subholding). Pre-GH-0070: 1.
+    assert len(a) == 20
+    assert all(item["raw_text"] for item in a)
+    # The C-form prints THREE amount columns (value, income current year,
+    # income preceding year) — the third lands in income_preceding.
+    first = a[0]
+    assert first["asset"] == "1st Source Bank Portfolio Account"
+    assert first["asset_type"] == "BA"
+    assert first["value_of_asset"]["label"] == "$1,001 - $15,000"
+    assert first["income_type"] == "Interest"
+    assert first["income_amount"]["label"] == "$1 - $200"
+    assert first["income_preceding"]["label"] == "$1 - $200"
+
+
+def test_candidate_form_none_value_row_shifts_columns():
+    a = extract_fd_schedules(HACKETT_CANDIDATE).schedules["A"]
+    # "Harpercollins … [IP] None Royalties $1 - $200 $201 - $1,000": the value
+    # column is the literal None, so the buckets are the two income columns —
+    # assigning the first to value would fabricate an asset value.
+    royalties = next(i for i in a if i["asset"].startswith("Harpercollins"))
+    assert royalties["value_of_asset"] is None
+    assert royalties["income_type"] == "Royalties"
+    assert royalties["income_amount"]["label"] == "$1 - $200"
+    assert royalties["income_preceding"]["label"] == "$201 - $1,000"
+    assert royalties["description"] == "Royalties from theological book"
+
+
+def test_candidate_form_tagless_dangling_row_anchors():
+    a = extract_fd_schedules(HACKETT_CANDIDATE).schedules["A"]
+    # "Hackett & Associates, PC (S corporation), 100% $250,001 - None" — the
+    # [TYPE] tag wrapped off the anchor line entirely; the dangling value low
+    # is the only signal left, and its high bound ($500,000) sits right before
+    # the folded LOCATION: label.
+    scorp = next(i for i in a if i["asset"].startswith("Hackett & Associates"))
+    assert scorp["asset_type"] == "OL"
+    assert scorp["value_of_asset"]["label"] == "$250,001 - $500,000"
+    assert scorp["income_amount"] is None  # income column is the literal None
+    assert scorp["location"] == "South Bend, IN, US"
+
+
+def test_member_form_subholding_rows_anchor_on_arrow():
+    a = extract_fd_schedules(WELCH_SUBWRAP).schedules["A"]
+    # Every asset row is "Welch account ⇒ …" with the [TYPE]-tagged subholding
+    # name wrapped onto the next line — tag+glyph never share a line, so the
+    # old anchor matched zero rows. 152 = the segment's ⇒-line count.
+    assert len(a) == 152
+    assert all(item["raw_text"] for item in a)
+    # Single-wrap row: the income high bound wrapped into the row's
+    # continuation ("… Dividends $201 - gfedcb <name> $1,000 <name> [EF]").
+    first = a[0]
+    assert first["asset_type"] == "EF"
+    assert first["value_of_asset"]["label"] == "$15,001 - $50,000"
+    assert first["income_type"] == "Dividends"
+    assert first["income_amount"]["label"] == "$201 - $1,000"
+    assert first["income_preceding"] is None  # member form: no third column
+
+
+def test_member_form_double_wrap_row_repairs_both_bounds():
+    a = extract_fd_schedules(WELCH_SUBWRAP).schedules["A"]
+    # "Welch account ⇒ $100,001 - Capital Gains, $5,001 - gfedc / American
+    # Century International Growth Fund (TWIEX) $250,000 Dividends $15,000 /
+    # [MF]" — BOTH the value and income high bounds wrapped. The two dangling
+    # lows re-pair with the two bare wrapped highs in column order.
+    twiex = next(i for i in a if "TWIEX" in i["raw_text"])
+    assert twiex["value_of_asset"]["label"] == "$100,001 - $250,000"
+    assert twiex["income_amount"]["label"] == "$5,001 - $15,000"
+
+
+# --- GH-0070: Schedule B anchors for directly-held (arrow-less) rows -----------
+
+DIRECTB = PDF_FIXTURES / "efiled_fd_directb_10043047.pdf"
+
+
+def test_directly_held_b_rows_anchor_on_column_signature():
+    b = extract_fd_schedules(DIRECTB).schedules["B"]
+    # 6 transactions, none with a subholding arrow — the old ⇒-only anchor
+    # merged all of them into one item. Ground truth counted by hand.
+    assert len(b) == 6
+    condo = b[0]
+    assert condo["asset"] == "DC Condo [RP]"
+    assert condo["asset_type"] == "RP"
+    assert condo["transaction_date"] == "2020-12-21"
+    assert condo["transaction_type"] == "P"
+    assert condo["amount_range"]["label"] == "$250,001 - $500,000"
+
+
+def test_b_row_unpadded_date_and_glyph_interposed_wrap():
+    b = extract_fd_schedules(DIRECTB).schedules["B"]
+    # "Victoria Rental Property [RP] 04/8/2021 S $1,000,001 - gfedcb" with the
+    # $5,000,000 high bound wrapped past the checkbox glyph: the unpadded date
+    # must parse and the dangling low must re-pair with the wrapped high.
+    victoria = next(i for i in b if i["asset"].startswith("Victoria"))
+    assert victoria["transaction_date"] == "2021-04-08"
+    assert victoria["transaction_type"] == "S"
+    assert victoria["amount_range"] == {
+        "low": 1000001,
+        "high": 5000000,
+        "label": "$1,000,001 - $5,000,000",
+    }
+    assert victoria["cap_gains_over_200"] is True
+
+
+def test_subholding_b_rows_still_anchor_on_arrow():
+    b = extract_fd_schedules(WELCH_SUBWRAP).schedules["B"]
+    # 165 = the segment's ⇒-line count; every row's (possibly unpadded) date
+    # must parse.
+    assert len(b) == 165
+    assert all(i["transaction_date"] for i in b)
+
+
+# --- GH-0070: bare-year Date anchors for Schedules D and F ---------------------
+
+
+def test_schedule_d_bare_year_date_anchors_and_extracts(monkeypatch):
+    # Real line shapes from filing 10035546: two rows with Month-YYYY dates
+    # (amount wrapped) and two with BARE-YEAR dates. The bare-year rows never
+    # anchored before GH-0070 and merged into the preceding liability.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            "liability",
+            "FedLoan servicing July 2009 College loans $50,001 -",
+            "$100,000",
+            "City Employees Credit Union Loan 2019 Personal Loan $15,001 - $50,000",
+            "City Employees Credit Union LoC 2018 Line of Credit $15,001 - $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 3
+    assert d[0]["date_incurred"] == "July 2009"
+    assert d[0]["amount_range"]["label"] == "$50,001 - $100,000"
+    assert d[1]["creditor"] == "City Employees Credit Union Loan"
+    assert d[1]["date_incurred"] == "2019"
+    assert d[1]["liability_type"] == "Personal Loan"
+    assert d[2]["date_incurred"] == "2018"
+    assert d[2]["amount_range"]["label"] == "$15,001 - $50,000"
+
+
+def test_schedule_d_bare_year_alone_does_not_anchor(monkeypatch):
+    # A bare year WITHOUT the amount column on the same line is no anchor —
+    # it could be a wrapped creditor-name fragment. The line folds into the
+    # preceding row rather than splitting it.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            "Wells Fargo Home Mortgage June 2018 Mortgage on residence $250,001 -",
+            "Established 1999 Branch $500,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 1
+    assert d[0]["date_incurred"] == "June 2018"
+    assert "Established 1999" in d[0]["raw_text"]
+
+
+def test_schedule_f_bare_year_leading_date(monkeypatch):
+    # Real line shape from filing 10039877: the agreement Date column is a
+    # bare year. Before GH-0070 no row anchored and date stayed None.
+    page = "\n".join(
+        [
+            "ScheDule f: agreementS",
+            "Date Parties to terms of agreement",
+            "2014 GENERAL MOTORS LLC Continued participation in qualified",
+            "retirement plan.",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    f = extract_fd_schedules(Path("synthetic.pdf")).schedules["F"]
+    assert len(f) == 1
+    assert f[0]["date"] == "2014"
+    assert "retirement plan." in f[0]["raw_text"]
+
+
+# --- GH-0070: Schedule A/B completeness guard ----------------------------------
+
+
+def test_fd_completeness_guard_fails_loudly_on_unanchorable_rows(monkeypatch):
+    # An A segment whose rows defeat every anchor signal (no glyph, no value
+    # signature after the [TYPE] tag, no arrow, no dangling low) collapses
+    # into one salvaged item — the guard must surface that as extract_failed
+    # (3 [TYPE] tags, 1 item), never a plausible-but-wrong body with status ok.
+    # The guard fires only on collapse / severe merge: small tag-count drift
+    # (tag-less rows, brackets in filer text) passes — see extract_fd_schedules.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "Some Asset [ST]",
+            "Another Asset [BA]",
+            "Third Asset [MF]",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    with pytest.raises(PdfExtractError, match="Schedule A.*3 \\[TYPE\\] tag"):
+        extract_fd_schedules(Path("synthetic.pdf"))
+
+
+def test_fd_completeness_guard_passes_on_clean_fixtures():
+    # The guard is exercised by every fixture-driven test above; assert once
+    # that it stays quiet on every real fixture — no collapse, no severe merge
+    # (deliberately weaker than exact tag equality, which drifts ~30% in the
+    # wild; see the guard's comment in extract_fd_schedules).
+    for fixture in (THOMPSON, HACKETT_CANDIDATE, WELCH_SUBWRAP, DIRECTB):
+        extract_fd_schedules(fixture)  # raises PdfExtractError on collapse

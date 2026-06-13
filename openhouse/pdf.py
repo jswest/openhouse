@@ -133,14 +133,26 @@ def classify(pdf_path: Path) -> str:
 # the next line. Without this, ~two-thirds of 2020 PTRs failed the completeness
 # guard and were dropped wholesale — exactly the trades the spec says never to
 # silently lose.
-_PTR_ROW_RE = re.compile(
+# The five leading groups every row form shares: owner, asset blob, type, and
+# the date pair. ``_match_ptr_header`` unpacks all four row regexes positionally,
+# so the group count and order MUST stay in lockstep across them — composing
+# from this one fragment (the ``_PTR_*_LABEL`` idiom below) makes that
+# structural, not a convention.
+_PTR_ROW_PREFIX = (
     r"^(?:(SP|DC|JT)\s+)?"  # owner column (blank → self)
     r"(.+?)\s+"  # asset blob (non-greedy up to the type)
     r"([Ss] \(partial\)|[PpSsEe])\s+"  # transaction type (only S can be partial)
     r"(\d{2}/\d{2}/\d{4})\s+"  # transaction date
     r"(\d{2}/\d{2}/\d{4})\s+"  # notification date
-    r"(\$[\d,]+)\s+-\s+(\$[\d,]+)?\s*"  # amount range: low, then optional high
-    r"(gfedcb?)\s*$"  # cap-gains glyph
+)
+# The exact-dollar amount token shared by the two exact-row forms (GH-0049):
+# one bare ``$N[,NNN][.NN]`` money value, no dash. Whole-dollar values are
+# accepted; cents are not required.
+_PTR_EXACT_AMOUNT = r"(\$[\d,]+(?:\.\d{2})?)"
+_PTR_ROW_RE = re.compile(
+    _PTR_ROW_PREFIX
+    + r"(\$[\d,]+)\s+-\s+(\$[\d,]+)?\s*"  # amount range: low, then optional high
+    + r"(gfedcb?)\s*$"  # cap-gains glyph
 )
 # Exact-dollar amount variant (GH-0049). A minority of real PTR rows disclose a
 # single **exact** dollar value (e.g. ``$894.97``) in the amount column instead of
@@ -153,14 +165,29 @@ _PTR_ROW_RE = re.compile(
 # fabricate a range). Whole-dollar exact values (``$500``) are accepted too;
 # cents are not required.
 _PTR_EXACT_ROW_RE = re.compile(
-    r"^(?:(SP|DC|JT)\s+)?"  # owner column (blank → self)
-    r"(.+?)\s+"  # asset blob (non-greedy up to the type)
-    r"([Ss] \(partial\)|[PpSsEe])\s+"  # transaction type (only S can be partial)
-    r"(\d{2}/\d{2}/\d{4})\s+"  # transaction date
-    r"(\d{2}/\d{2}/\d{4})\s+"  # notification date
-    r"(\$[\d,]+(?:\.\d{2})?)\s+"  # amount: a single exact dollar value, no dash
-    r"(gfedcb?)\s*$"  # cap-gains glyph
+    _PTR_ROW_PREFIX
+    + _PTR_EXACT_AMOUNT
+    + r"\s+(gfedcb?)\s*$"  # exact value, then the cap-gains glyph
 )
+# Glyphs-lost rendering row variants (SPEC §2.2 NUL form; PTRs cut over around
+# 2022-04). In those documents the cap-gains checkbox glyph (``gfedc``/
+# ``gfedcb``) is not in the text layer AT ALL, so the trailing-glyph anchor
+# above can never fire and every row would be silently skipped. The remaining
+# signature — optional owner, type letter, date pair, amount column anchored at
+# end of line — is still unambiguous (the ``\s+`` adjacency between the
+# notification date and the leading ``$`` keeps a one-sided ``Over $1,000,000``
+# from matching, exactly as the glyph anchor did). The checkbox *state* is
+# unrecoverable from the text layer: those rows carry ``cap_gains_over_200:
+# None`` ("unknown"), never a fabricated boolean. These variants are consulted
+# only for documents detected as glyphless (NULs in the furniture), so intact
+# documents take exactly the same code paths as before. The high bound is
+# optional for the same column-wrap reason as ``_PTR_ROW_RE`` — a wrapped
+# header now ends ``$LOW -`` bare (no glyph after the dash).
+_PTR_ROW_GLYPHLESS_RE = re.compile(
+    _PTR_ROW_PREFIX
+    + r"(\$[\d,]+)\s+-(?:\s+(\$[\d,]+))?\s*$"  # amount range: low, optional high
+)
+_PTR_EXACT_ROW_GLYPHLESS_RE = re.compile(_PTR_ROW_PREFIX + _PTR_EXACT_AMOUNT + r"\s*$")
 # A wrapped high bound spilled to the next line. It is the lone ``$N`` money token
 # on that continuation line, and may sit either at the **start** (``$50,000`` —
 # the asset name did not also wrap) or **end** (``Shares (COLD) [ST] $50,000`` —
@@ -175,14 +202,28 @@ _PTR_WRAPPED_HIGH_RE = re.compile(r"\$[\d,]+")
 # ``FIlINg STaTuS:`` — 10+ renderings seen across 2020 alone), so only the
 # letter sequence is stable, never the case. Matching a fixed-case literal here
 # silently dropped the detail boundary on the majority of real PTRs.
+#
+# Each label also carries a NUL branch (the ``\x00+`` alternations) for the
+# glyphs-lost rendering (SPEC §2.2 NUL form, same as ``_FD_DETAIL_RE``): the
+# small-caps labels extract as NUL runs, one per lost glyph — ``FILING STATUS:``
+# becomes ``F\x00{5} S\x00{5}:``, ``SUBHOLDING OF:`` becomes ``S\x00{9} O\x00:``,
+# ``DESCRIPTION:`` becomes ``D\x00{10}:``. NULs never occur in filer-entered
+# content (the verified §2.2 invariant), so the NUL branches are collision-proof.
+_PTR_STATUS_LABEL = r"F(?:ILING|\x00+) S(?:TATUS|\x00+):"
+_PTR_SUBHOLDING_LABEL = r"S(?:UBHOLDING|\x00+) O(?:F|\x00+):"
+_PTR_DESCRIPTION_LABEL = r"D(?:ESCRIPTION|\x00+):"
 _PTR_DETAIL_RE = re.compile(
-    r"^(FILING STATUS:|SUBHOLDING OF:|DESCRIPTION:)", re.IGNORECASE
+    rf"^({_PTR_STATUS_LABEL}|{_PTR_SUBHOLDING_LABEL}|{_PTR_DESCRIPTION_LABEL})",
+    re.IGNORECASE,
 )
 # The per-row "FILING STATUS:" line, used to count blocks for the completeness
-# guard — same case-insensitive shape as above (just the status line).
-_PTR_STATUS_RE = re.compile(r"^FILING STATUS:", re.IGNORECASE)
-# A row's DESCRIPTION: detail line (case-insensitive, same small-caps reason).
-_PTR_DESCRIPTION_RE = re.compile(r"^DESCRIPTION:", re.IGNORECASE)
+# guard — same case-insensitive + NUL-branch shape as above (just the status
+# line). Keeping this NUL-aware is what makes the guard LOUD on a glyphless
+# document: a zero-extraction body still counts its real status blocks, so
+# 0 != N raises extract_failed instead of returning a silent empty list.
+_PTR_STATUS_RE = re.compile(rf"^{_PTR_STATUS_LABEL}", re.IGNORECASE)
+# A row's DESCRIPTION: detail line (case-insensitive + NUL branch, as above).
+_PTR_DESCRIPTION_RE = re.compile(rf"^{_PTR_DESCRIPTION_LABEL}", re.IGNORECASE)
 
 # Per-page table furniture pdfplumber repeats at the top of every page. When a
 # row's asset name wraps across a page break, this furniture lands BETWEEN the
@@ -197,6 +238,17 @@ _PTR_FURNITURE_RE = re.compile(r"^(ID Owner Asset|Type Date|Gains >|\$200\?)")
 # wrapped-high search skips both furniture and this glyph remnant so the page-break
 # case recovers the high bound rather than dropping the whole row.
 _PTR_GLYPH_ONLY_RE = re.compile(r"^gfedcb?\s*$")
+
+# The TRANSACTIONS table's footnote, printed exactly once, after the last row
+# (regular font — identical in both renderings). Everything beyond it is
+# document trailer: the ASSET CLASS DETAILS appendix (whose per-asset
+# ``LOCATION:``/``DESCRIPTION:`` detail lines would otherwise bleed into the
+# *last row's* description), the IPO section, and the certification block.
+# Extraction truncates the line list here; every per-row ``FILING STATUS:``
+# block counted by the completeness guard lives above the footnote.
+_PTR_TABLE_END_RE = re.compile(
+    r"^\* For the complete list of asset type abbreviations", re.IGNORECASE
+)
 
 _TICKER_RE = re.compile(r"\(([^()]+)\)")  # a parenthesized symbol in an asset name
 # The ticker is the paren group immediately before the bracketed [TYPE] tag.
@@ -252,16 +304,68 @@ def _asset_type_from_asset(asset: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def _is_ptr_header(line: str) -> bool:
+def _match_ptr_header(
+    line: str, *, glyphless: bool
+) -> tuple[bool, tuple[str | None, ...], str | None] | None:
+    """Match a PTR row header line → ``(is_exact, fields, glyph)``, else ``None``.
+
+    ``fields`` is ``(owner, asset_head, txn_type, txn_date, notif_date, …amount)``
+    — two amount fields (low, optional high) for a range row, one (the exact
+    token) for an exact-dollar row. ``glyph`` is the trailing cap-gains glyph, or
+    ``None`` in the glyphs-lost rendering where the checkbox is not in the text
+    layer at all. The glyph-anchored forms are always tried first (they cannot
+    match a glyphless line, nor vice versa — the end-of-line anchors are mutually
+    exclusive); the glyphless variants are consulted only when the document was
+    detected as glyphless, so intact documents behave exactly as before.
+    """
+    m = _PTR_ROW_RE.match(line)
+    if m:
+        *fields, glyph = m.groups()
+        return False, tuple(fields), glyph
+    m = _PTR_EXACT_ROW_RE.match(line)
+    if m:
+        *fields, glyph = m.groups()
+        return True, tuple(fields), glyph
+    if glyphless:
+        m = _PTR_ROW_GLYPHLESS_RE.match(line)
+        if m:
+            return False, m.groups(), None
+        m = _PTR_EXACT_ROW_GLYPHLESS_RE.match(line)
+        if m:
+            return True, m.groups(), None
+    return None
+
+
+def _is_ptr_header(line: str, *, glyphless: bool = False) -> bool:
     """True if ``line`` opens a PTR transaction row — range OR exact-dollar form.
 
     Used as the row boundary throughout extraction so an exact-dollar row (#49)
     both starts a new row and ends the previous one, exactly like a range row.
     """
-    return bool(_PTR_ROW_RE.match(line) or _PTR_EXACT_ROW_RE.match(line))
+    return _match_ptr_header(line, glyphless=glyphless) is not None
 
 
-def _wrapped_range_tail_follows(lines: list[str], start: int, n: int) -> bool:
+def _is_ptr_skippable(stripped: str) -> bool:
+    """True for a line that carries no row content — skip without ending a wrap.
+
+    Blank lines, repeated per-page table furniture, a stray glyph remnant, and
+    NUL-bearing non-detail lines (the glyphs-lost rendering's form furniture —
+    section titles etc.; SPEC §2.2: NULs never occur in filer content). The
+    wrap-recovery loop and the GH-0049 exact-row guard MUST share one view of
+    "skippable" — the guard exists precisely to mirror the recovery loop's walk,
+    so a divergence here silently breaks its soundness claim.
+    """
+    return bool(
+        not stripped
+        or _PTR_FURNITURE_RE.match(stripped)
+        or _PTR_GLYPH_ONLY_RE.match(stripped)
+        or "\x00" in stripped
+    )
+
+
+def _wrapped_range_tail_follows(
+    lines: list[str], start: int, n: int, *, glyphless: bool = False
+) -> bool:
     """True if the next content line begins with ``-`` (a spilled ``- $HIGH`` tail).
 
     GH-0049 soundness guard (critic): an exact-dollar match (``$N`` + glyph on the
@@ -278,9 +382,9 @@ def _wrapped_range_tail_follows(lines: list[str], start: int, n: int) -> bool:
     k = start
     while k < n:
         nxt = lines[k].strip()
-        if _is_ptr_header(nxt) or _PTR_DETAIL_RE.match(nxt):
+        if _is_ptr_header(nxt, glyphless=glyphless) or _PTR_DETAIL_RE.match(nxt):
             return False
-        if not nxt or _PTR_FURNITURE_RE.match(nxt) or _PTR_GLYPH_ONLY_RE.match(nxt):
+        if _is_ptr_skippable(nxt):
             k += 1
             continue
         return nxt.startswith("-")
@@ -306,19 +410,33 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             f"could not extract PTR body from {pdf_path}: {exc}"
         ) from exc
 
+    # The TRANSACTIONS table ends at its footnote; drop the trailer (appendix /
+    # IPO / certification) so its detail lines never fold into the last row.
+    for idx, ln in enumerate(lines):
+        if _PTR_TABLE_END_RE.match(ln.strip()):
+            lines = lines[:idx]
+            break
+
+    # The glyphs-lost rendering (SPEC §2.2): small-caps furniture extracted as
+    # NUL runs and the checkbox glyphs gone from the text layer. NULs never
+    # occur in an intact-rendering body, so this flag is a precise document-
+    # level marker — intact documents take exactly the same code paths as
+    # before (same detection as the FD extractor).
+    glyphless = any("\x00" in ln for ln in lines)
+
     transactions: list[PtrTransaction] = []
     i = 0
     n = len(lines)
     while i < n:
-        match = _PTR_ROW_RE.match(lines[i].strip())
-        exact_match = None if match else _PTR_EXACT_ROW_RE.match(lines[i].strip())
-        if not match and not exact_match:
+        header = _match_ptr_header(lines[i].strip(), glyphless=glyphless)
+        if header is None:
             i += 1
             continue
+        is_exact, fields, glyph = header
 
-        if match:
-            owner, asset_head, txn_type, txn_date, notif_date, amount_low, amount_high, glyph = (
-                match.groups()
+        if not is_exact:
+            owner, asset_head, txn_type, txn_date, notif_date, amount_low, amount_high = (
+                fields
             )
             amount: AmountRange | None = None  # filled once the high bound is known
         else:
@@ -326,14 +444,12 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             # not a ``$LOW - $HIGH`` bucket. No amount-column wrap to recover — the
             # value is complete on the header line — so ``amount`` is set now and
             # ``amount_high`` is sentinel-non-None to skip the wrap-recovery block.
-            owner, asset_head, txn_type, txn_date, notif_date, exact_token, glyph = (
-                exact_match.groups()
-            )
+            owner, asset_head, txn_type, txn_date, notif_date, exact_token = fields
             # Soundness guard (critic): refuse the exact reading if a wrapped
             # range tail ("- $HIGH") follows — that's a range that lost its dash to
             # a line wrap, not a lone exact value. Fall through to extract_failed
             # rather than fabricate a point.
-            if _wrapped_range_tail_follows(lines, i + 1, n):
+            if _wrapped_range_tail_follows(lines, i + 1, n, glyphless=glyphless):
                 i += 1
                 continue
             amount = _parse_exact_amount(exact_token)
@@ -365,12 +481,13 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
             k = j
             while k < n:
                 nxt = lines[k].strip()
-                if _is_ptr_header(nxt) or _PTR_DETAIL_RE.match(nxt):
+                if _is_ptr_header(nxt, glyphless=glyphless) or _PTR_DETAIL_RE.match(nxt):
                     break  # reached the next row / this row's detail — high bound
                     # never materialized; leave amount_high None (row drops below).
-                if not nxt or _PTR_FURNITURE_RE.match(nxt) or _PTR_GLYPH_ONLY_RE.match(nxt):
+                if _is_ptr_skippable(nxt):
                     k += 1
-                    continue  # page-break furniture / stray glyph — skip, keep looking
+                    continue  # page-break furniture / stray glyph / NUL-run form
+                    # furniture (never filer content — SPEC §2.2) — skip, keep looking
                 high_m = _PTR_WRAPPED_HIGH_RE.search(nxt)
                 if high_m:
                     amount_high = high_m.group(0)
@@ -384,7 +501,7 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
 
         while j < n:
             nxt = lines[j].strip()
-            if _is_ptr_header(nxt):
+            if _is_ptr_header(nxt, glyphless=glyphless):
                 break  # next transaction row — end of this row
             desc_m = _PTR_DESCRIPTION_RE.match(nxt)
             if desc_m:
@@ -392,9 +509,11 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
                 seen_detail = True
             elif _PTR_DETAIL_RE.match(nxt):
                 seen_detail = True
-            elif _PTR_FURNITURE_RE.match(nxt):
-                pass  # repeated per-page table header (page break) — skip, don't
-                # end the wrap and don't fold it into the asset name
+            elif _PTR_FURNITURE_RE.match(nxt) or "\x00" in nxt:
+                pass  # repeated per-page table header (page break) or NUL-run
+                # form furniture (glyphs-lost rendering — never filer content,
+                # SPEC §2.2) — skip, don't end the wrap and don't fold it into
+                # the asset name
             elif nxt and not seen_detail:
                 asset_parts.append(nxt)  # asset-name wrap
             j += 1
@@ -411,7 +530,7 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
         # exact-dollar row already set ``amount`` at the top of the iteration.
         if amount is None:
             amount = _parse_amount_range(f"{amount_low} - {amount_high}")
-        asset = " ".join(part for part in asset_parts if part)
+        asset = _scrub_field(" ".join(part for part in asset_parts if part))
         transactions.append(
             PtrTransaction(
                 owner=owner or "self",
@@ -422,8 +541,11 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
                 transaction_date=datetime.strptime(txn_date, "%m/%d/%Y").date(),
                 notification_date=datetime.strptime(notif_date, "%m/%d/%Y").date(),
                 amount_range=amount,
-                cap_gains_over_200=(glyph == "gfedcb"),
-                description=description,
+                # In the glyphs-lost rendering the checkbox glyph is absent from
+                # the text layer entirely, so its state is unrecoverable: None
+                # means "unknown", never a fabricated boolean (SPEC §6.3).
+                cap_gains_over_200=(glyph == "gfedcb") if glyph is not None else None,
+                description=_scrub_field(description),
             )
         )
         i = j
@@ -510,7 +632,10 @@ _FD_GLYPH_RE = re.compile(r"\bgfedcb?\s*$")
 _FD_TYPE_TAG_RE = re.compile(r"\[([A-Za-z0-9]+)\]")
 
 # An owner column token (SP/DC/JT) appearing right after the [TYPE] tag.
-_FD_OWNER_AFTER_TYPE_RE = re.compile(r"\][\s]*(SP|DC|JT)\b")
+# Case-insensitive: the case-mangled rendering (SPEC §2.2) lowercases the
+# small-caps owner tokens unpredictably (``Sp`` / ``Jt``); extractors normalize
+# the captured token with .upper().
+_FD_OWNER_AFTER_TYPE_RE = re.compile(r"\][\s]*(SP|DC|JT)\b", re.IGNORECASE)
 
 # An amount-range bucket; FD ranges wrap across lines, so we match all occurrences
 # in the assembled (de-wrapped) item text. ``Over $X`` / open-ended values do not
@@ -521,7 +646,8 @@ _FD_AMOUNT_RE = re.compile(r"\$[\d,]+\s*-\s*\$[\d,]+")
 # folded into an item). Matched loosely on its leading words.
 _FD_FURNITURE_RE = re.compile(
     r"^(asset owner|asset \[|owner creditor|Source type|Position name|"
-    r"Date Parties|type\(s\)|gains >|\$1,000\?|\$200\?|filing|current Year|"
+    r"Date Parties|type\(s\)|type gains >|gains >|\$1,000\?|\$200\?|filing|current Year|"
+    r"year to year|"
     r"to Preceding|liability|\* For the complete|\* Asset class|name of organization|"
     # E–J column-header furniture (#17): each schedule's header row, on its own
     # line, leads with these tokens; the values below are filer content.
@@ -536,6 +662,10 @@ _FD_FURNITURE_RE = re.compile(
 _FD_LOCATION_LABEL = r"L(?:OCATION|\x00+):"
 _FD_DESCRIPTION_LABEL = r"D(?:ESCRIPTION|\x00+):"
 _FD_DETAIL_RE = re.compile(rf"^({_FD_LOCATION_LABEL}|{_FD_DESCRIPTION_LABEL})")
+# The same two labels matched mid-string — where a row's detail lines have
+# already been folded into its assembled raw blob and mark the end of the
+# row's *columns* (everything after them is detail text, not column data).
+_FD_DETAIL_ANYWHERE_RE = re.compile(rf"{_FD_LOCATION_LABEL}|{_FD_DESCRIPTION_LABEL}")
 
 
 def _fd_amount_range(text: str) -> AmountRange | None:
@@ -683,9 +813,6 @@ def _group_items(lines: list[str], *, starts_item) -> list[str]:
 # complete ``$lo - $hi`` bucket: the latter's dash is followed by whitespace then
 # ``$``, never a word, so it must not be mistaken for a dangling low.
 _FD_DANGLING_LOW_RE = re.compile(r"\$([\d,]+)\s+-\s+(?=[A-Za-z])")
-# A standalone amount at the very end of the (de-wrapped) row — the wrapped high
-# bound when the value range was split by the income column.
-_FD_TRAILING_AMOUNT_RE = re.compile(r"\$([\d,]+)\s*$")
 
 
 def _income_type_between(raw: str, start: int, end: int) -> str | None:
@@ -706,96 +833,217 @@ def _income_type_between(raw: str, start: int, end: int) -> str | None:
     return cleaned or None
 
 
+# An open-ended ``Over $X`` value — a real column entry that cannot be
+# represented as a ``{low, high}`` bucket. It occupies its column *slot* (so the
+# buckets after it are not mis-assigned one column left) but parses to ``None``;
+# the verbatim ``raw_text`` keeps the wording.
+_FD_A_OVER_RE = re.compile(r"Over\s+\$[\d,]+", re.IGNORECASE)
+# Any bare money token — the candidate pool for wrapped high bounds, filtered in
+# ``_fd_amount_entries`` down to tokens claimed by no bucket/Over/dangling span.
+_FD_BARE_AMOUNT_RE = re.compile(r"\$[\d,]+")
+
+
+def _fd_columns(raw: str) -> str:
+    """The row's *column* data: everything before the first folded detail label.
+
+    A row's ``LOCATION:``/``DESCRIPTION:`` detail lines fold into its assembled
+    raw blob after the columns, so amounts must never be read past the first
+    label — yet a wrapped high bound can sit immediately before one.
+    """
+    m = _FD_DETAIL_ANYWHERE_RE.search(raw)
+    return raw[: m.start()] if m else raw
+
+
+def _fd_amount_entries(
+    cols: str, start: int = 0
+) -> list[tuple[int, int, AmountRange | None]]:
+    """The row's column-amount *entries*, in column order: ``(start, end, range)``.
+
+    An entry is anything that occupies an amount column in the de-wrapped row
+    text (SPEC §2.2 wraps put every wrapped piece back on one line, in column
+    order, because pdfplumber emits left-to-right):
+
+    - a complete ``$lo - $hi`` bucket → its parsed range;
+    - an open-ended ``Over $X`` → ``None`` (unrepresentable as a bucket, but it
+      holds its column slot);
+    - a **dangling low** (``$lo -`` with a word right after — the high bound
+      wrapped off the column) → resolved by pairing, in order, with the row's
+      **bare** money tokens (a ``$N`` that is part of no bucket/dangling/``Over``
+      and is not a cents-bearing exact value): each wrapped high lands as a bare
+      token after its dangling low, in the same column order. The pairing is
+      attempted only when the counts match exactly — any surplus or deficit
+      (say, a dollar figure inside an asset name) makes the wrap ambiguous, and
+      every dangling resolves to ``None`` instead (degrade, never fabricate —
+      #12). An unresolved dangling still holds its column slot.
+    """
+    buckets = list(_FD_AMOUNT_RE.finditer(cols, start))
+    spans = [m.span() for m in buckets]
+
+    def unclaimed(m: re.Match) -> bool:
+        # No overlap with any span already claimed by an earlier entry kind
+        # (reads ``spans`` at call time, so each ``spans +=`` below narrows it).
+        return not any(b0 < m.end() and m.start() < b1 for b0, b1 in spans)
+
+    overs = [m for m in _FD_A_OVER_RE.finditer(cols, start) if unclaimed(m)]
+    spans += [m.span() for m in overs]
+    danglings = [m for m in _FD_DANGLING_LOW_RE.finditer(cols, start) if unclaimed(m)]
+    spans += [m.span() for m in danglings]
+    bares = [
+        m
+        for m in _FD_BARE_AMOUNT_RE.finditer(cols, start)
+        if unclaimed(m)
+        and not cols[m.end() :].lstrip().startswith("-")  # a range's own low
+        and not cols[m.end() :].startswith(".")  # an exact value's dollars
+    ]
+
+    entries: list[tuple[int, int, AmountRange | None]] = [
+        (m.start(), m.end(), _bucket(m.group(0))) for m in buckets
+    ]
+    entries += [(m.start(), m.end(), None) for m in overs]
+    if danglings and len(danglings) == len(bares):
+        entries += [
+            (d.start(), d.end(), _parse_amount_range(f"${d.group(1)} - {b.group(0)}"))
+            for d, b in zip(danglings, bares)
+        ]
+    else:
+        entries += [(d.start(), d.end(), None) for d in danglings]
+    return sorted(entries)
+
+
 def _schedule_a_amounts(
     raw: str,
-) -> tuple[AmountRange | None, str | None, AmountRange | None]:
-    """Untangle Schedule A's ``value_of_asset``, ``income_type``, ``income_amount``.
+) -> tuple[AmountRange | None, str | None, AmountRange | None, AmountRange | None]:
+    """Untangle Schedule A's ``value_of_asset``, ``income_type``, ``income_amount``,
+    and (Candidate/New-Filer forms only) ``income_preceding``.
 
-    Normal case: the two complete ``$lo - $hi`` buckets in order, with the income
-    *type* word(s) (``Rent``/``Dividends``/…) sitting between them. Interleave case
-    (SPEC §2.2): the value range's low bound is dangling (``$100,001 -`` with the
-    income column right after) and its high bound wrapped to the row's end
-    (``… gfedc $250,000``); we pair them, and the income type sits between the
-    dangling ``-`` and the income bucket. A failure to untangle leaves the field
-    ``None`` — the verbatim ``raw_text`` still carries the row in full.
+    The row's amount columns print in a fixed order — value, income current
+    year, and (C/H forms only — GH-0070) income preceding year — so the parse is
+    positional over the row's :func:`_fd_amount_entries`: first entry → value,
+    second → income, third → preceding. The member form never prints three
+    amount columns, so a third entry only ever means a C/H row. Two twists:
+
+    - **None-value rows**: a value column opening with the literal ``None``/
+      ``Undetermined`` (``_FD_A_NONE_VALUE_RE``) holds the value slot, shifting
+      every amount entry one column right — assigning the first bucket to value
+      would fabricate one.
+    - **Column wraps** (SPEC §2.2): a wrapped high bound leaves a dangling low;
+      :func:`_fd_amount_entries` re-pairs them (or degrades that entry to
+      ``None``) while preserving the column order.
+
+    The income *type* word(s) (``Rent``/``Dividends``/…) sit between the value
+    and income columns. Only the text before the first folded ``LOCATION:``/
+    ``DESCRIPTION:`` label is column data — a wrapped high bound can sit right
+    before a detail label, and detail text must never be read as columns. A
+    field that cannot be untangled is ``None`` — the verbatim ``raw_text``
+    still carries the row in full.
     """
-    dangling = _FD_DANGLING_LOW_RE.search(raw)
-    if dangling:
-        # Interleave case: the value low bound dangled. Its high bound is the
-        # trailing wrapped amount if one materialized — otherwise the wrap is
-        # unresolved and value stays None rather than mis-assigning the income
-        # bucket to it (#12's "degrade to None rather than a wrong value"). The
-        # income range and its type come from the first complete bucket after the
-        # dangling ``-``, with the gap before that bucket holding the type word.
-        trailing = _FD_TRAILING_AMOUNT_RE.search(raw)
-        value = (
-            _parse_amount_range(f"${dangling.group(1)} - ${trailing.group(1)}")
-            if trailing
-            else None
-        )
-        income_match = _FD_AMOUNT_RE.search(raw, dangling.end())
-        if income_match:
-            income = _bucket(income_match.group(0))
-            income_type = _income_type_between(
-                raw, dangling.end(), income_match.start()
-            )
-            return value, income_type, income
-        if value is not None:
-            return value, None, None
-        # value None and no bucket after the dangling — fall through to the
-        # generic two-bucket scan over the whole row (unchanged from #12).
-    matches = list(_FD_AMOUNT_RE.finditer(raw))
-    value = _bucket(matches[0].group(0)) if matches else None
-    income = _bucket(matches[1].group(0)) if len(matches) > 1 else None
+    cols = _fd_columns(raw)
+
+    none_value = _FD_A_NONE_VALUE_RE.search(cols)
+    entries: list[tuple[int, int, AmountRange | None]]
+    if none_value:
+        # The literal None occupies the value slot; amounts shift right.
+        entries = [(none_value.start(), none_value.end(), None)]
+        entries += _fd_amount_entries(cols, none_value.end())
+    else:
+        entries = _fd_amount_entries(cols)
+
+    value = entries[0][2] if entries else None
+    income = entries[1][2] if len(entries) > 1 else None
+    preceding = entries[2][2] if len(entries) > 2 else None
     income_type = (
-        _income_type_between(raw, matches[0].end(), matches[1].start())
-        if len(matches) > 1
+        _income_type_between(cols, entries[0][1], entries[1][0])
+        if len(entries) > 1
         else None
     )
-    return value, income_type, income
+    return value, income_type, income, preceding
 
 
-# A glyphs-lost A-row's value-column signature: right after the ``[TYPE]`` tag
-# (and the optional owner token) the value column begins — a ``$lo -`` range
-# start (the dash is load-bearing), the open-ended ``Over $X`` bucket, an exact
-# dollar value (``$96,550.00`` — note the required ``.dd`` cents), or the literal
+# An A-row's value-column signature: right after the ``[TYPE]`` tag (and the
+# optional owner token) the value column begins — a ``$lo -`` range start (the
+# dash is load-bearing), the open-ended ``Over $X`` bucket, an exact dollar
+# value (``$96,550.00`` — note the required ``.dd`` cents), or the literal
 # ``None``/``Undetermined``.
 # A wrapped subholding tail (``Cash [BA] $5,000,000`` — the row's wrapped value
 # *high* bound) carries a bare amount with **no dash, no cents, no ``Over``**, so
 # it does not match and stays a continuation, exactly as the glyph anchor would
 # have treated it (verified collision-free against continuation lines).
-_FD_A_ROW_AFTER_TYPE_RE = re.compile(
-    r"\]\s*(?:SP|DC|JT)?\s*(?:\$[\d,]+\s*-|Over\b|\$[\d,]+\.\d{2}|None\b|Undetermined\b)"
+#
+# Until GH-0070 this signature anchored only glyphs-lost (NUL) documents, with
+# intact documents gated on the trailing checkbox glyph. That gate was the bug:
+# Candidate/New-Filer report forms have **no checkbox column at all** (no glyph
+# in any rendering), and even on the member form a row whose ``[TYPE]``-tagged
+# name wraps off the glyph-bearing line never carries tag+glyph together. The
+# signature anchors in **every** rendering now; the glyph remains an additional
+# anchor signal, never a gate.
+# The literal words match case-insensitively via (?i:…) — the case-mangled
+# rendering lowercases them (``none`` / ``over``) like every other small-caps
+# victim; the owner tokens in the two row signatures below get the same
+# treatment. The money forms are case-free.
+_FD_VALUE_START = r"(?:\$[\d,]+\s*-|(?i:Over)\b|\$[\d,]+\.\d{2}|(?i:None)\b|(?i:Undetermined)\b)"
+_FD_A_ROW_AFTER_TYPE_RE = re.compile(rf"\]\s*(?i:SP|DC|JT)?\s*{_FD_VALUE_START}")
+# The same value-column signature after the subholding arrow. A bare ``⇒`` is
+# NOT a row anchor (GH-0070): a long parent name can wrap with the arrow
+# landing on the *continuation* line among the wrapped high bounds
+# (``LISA BLUNT ROCHESTER TR ⇒ $500,000 Dividends $2,500``) — only an arrow
+# followed by the value column's start opens a row.
+_FD_A_ROW_AFTER_ARROW_RE = re.compile(rf"⇒\s*(?i:SP|DC|JT)?\s*{_FD_VALUE_START}")
+
+# A value column that *opens* with the literal ``None``/``Undetermined`` —
+# immediately after the ``[TYPE]`` tag or the subholding arrow (plus the
+# optional owner token). On such a row every ``$lo - $hi`` bucket belongs to
+# the **income** columns, not the value column; assigning the first bucket to
+# ``value_of_asset`` (the positional default) would fabricate a value the
+# filer explicitly declared None. The ``]``/``⇒`` anchor is what keeps this
+# sound: a ``None`` in the *income* columns sits after the value bucket, never
+# in this position.
+_FD_A_NONE_VALUE_RE = re.compile(
+    r"[\]⇒]\s*(?:SP|DC|JT)?\s*(?:None|Undetermined)\b", re.IGNORECASE
 )
 
 
-def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAItem]:
+def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
     """Schedule A (assets & "unearned" income) → structured items + raw_text.
 
-    ``glyphless`` marks the glyphs-lost rendering (SPEC §2.2 NUL form), in which
-    the trailing tx-over-$1,000 checkbox glyph (``gfedc``/``gfedcb``) is not in
-    the text layer at all — so the intact-form row anchor (``[TYPE]`` + glyph)
-    can never fire and every row would merge into one salvaged blob. For those
-    documents only, a row anchors on its own column signature instead; intact
-    documents keep the proven glyph anchor byte-for-byte.
+    A row anchors on any of three rendering-independent signals (GH-0070): the
+    ``[TYPE]`` tag + trailing tx-over-$1,000 checkbox glyph (member forms, intact
+    rendering), the ``[TYPE]`` tag + value-column signature (all renderings —
+    the only anchor available on Candidate/New-Filer forms, which have no
+    checkbox column, and on glyphs-lost NUL documents, which lose the glyph),
+    or the subholding owner arrow ``⇒`` (the row's ``[TYPE]``-tagged name often
+    wraps onto the next line, leaving only the arrow on the anchor line). A
+    fourth, narrow signal — a dangling value low bound on a tag-less line —
+    catches the C/H row whose ``[TYPE]`` wrapped off the line entirely.
     """
 
     def starts(s: str) -> bool:
-        # An asset row carries a [TYPE] tag and ends in the tx-over-$1,000 glyph;
-        # LOCATION:/DESCRIPTION: detail and bare amount-wrap lines do not.
+        # LOCATION:/DESCRIPTION: detail and bare amount-wrap lines never start
+        # a row; everything else is judged by the column signatures above.
         if _FD_DETAIL_RE.match(s):
             return False
-        if _FD_TYPE_TAG_RE.search(s) and _FD_GLYPH_RE.search(s):
-            return True
-        if not glyphless:
-            return False
-        # Glyphs-lost rendering: anchor on the row's column signature — the
-        # [TYPE] tag followed by the value column ($lo - / None / Undetermined),
-        # or a subholding row (owner arrow ⇒) whose [TYPE]-tagged subholding
-        # name wrapped onto the next line.
+        if _FD_GLYPH_RE.search(s):
+            # The checkbox is the row's LAST column, so a glyph-terminated line
+            # IS a row line — even with no [TYPE] on it (a long name can push
+            # the tag onto the wrap with the glyph still on the row line:
+            # ``Public Employees' Retirement System of Mississippi Undetermined
+            # Tax-Deferred gfedc`` / ``[DB]``). The one exception is a stranded
+            # glyph alone on its line (a wrapped checkbox remnant, same
+            # artifact as the PTR page-break case): that belongs to the row
+            # above and must fold in, not anchor an empty one.
+            return not _PTR_GLYPH_ONLY_RE.match(s)
         if _FD_TYPE_TAG_RE.search(s):
             return bool(_FD_A_ROW_AFTER_TYPE_RE.search(s))
-        return "⇒" in s
+        if "⇒" in s:
+            # Only an arrow followed by the value column opens a row — a bare
+            # arrow can sit on a wrapped continuation (see the regex comment).
+            return bool(_FD_A_ROW_AFTER_ARROW_RE.search(s))
+        # Tag-less line carrying a dangling value low bound (``Hackett &
+        # Associates, PC …, 100% $250,001 - None``): the asset name ran long
+        # enough to push the [TYPE] tag onto the next line, so the value
+        # column's range start is the only anchor signal left. Wrap
+        # continuation lines carry bare amounts or name text — never a
+        # ``$lo - <word>`` dangling start — so this cannot split a row.
+        return bool(_FD_DANGLING_LOW_RE.search(s))
 
     items: list[ScheduleAItem] = []
     for raw in _group_items(lines, starts_item=starts):
@@ -813,14 +1061,12 @@ def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAIte
         asset_type = type_m.group(1) if type_m else None
         asset = _scrub_field(raw[: type_m.start()].strip() if type_m else raw.strip())
         owner_m = _FD_OWNER_AFTER_TYPE_RE.search(raw)
-        owner = owner_m.group(1) if owner_m else None
-        # The first amount bucket is the asset value; a second (if any) is income.
-        # SPEC §2.2: a value range's high bound can wrap to the line *end*, with
-        # the income column interleaved between low and high (``$100,001 -
-        # Interest $201 - $1,000 gfedc $250,000``). _schedule_a_amounts untangles
-        # that common interleave; otherwise the two complete buckets are taken in
-        # order. raw_text always carries the verbatim row regardless.
-        value_of_asset, income_type, income_amount = _schedule_a_amounts(raw)
+        owner = owner_m.group(1).upper() if owner_m else None
+        # Column amounts are positional — see _schedule_a_amounts for the
+        # None-value shift and the SPEC §2.2 wrap repair.
+        value_of_asset, income_type, income_amount, income_preceding = (
+            _schedule_a_amounts(raw)
+        )
         income_type = _scrub_field(income_type)
         items.append(
             ScheduleAItem(
@@ -830,6 +1076,7 @@ def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAIte
                 value_of_asset=value_of_asset,
                 income_type=income_type,
                 income_amount=income_amount,
+                income_preceding=income_preceding,
                 location=location,
                 description=description,
                 raw_text=_scrub_raw_text(raw),
@@ -838,43 +1085,115 @@ def _parse_schedule_a(lines: list[str], *, glyphless: bool) -> list[ScheduleAIte
     return items
 
 
+# A B transaction row's column signature: the Date column (the Clerk prints
+# single-digit days/months unpadded — ``05/5/2020``, ``04/8/2021``), the tx-type
+# letter (small-caps can lower-case it, as on PTR rows), then the amount
+# column's start (``$lo`` or ``Over``). Requiring the amount start is what keeps
+# this from false-anchoring a wrapped asset *name* that happens to contain a
+# date (a bond's maturity, say) — a name never continues ``<date> P $…``. The
+# date and type are captured so field extraction can use the SAME match that
+# anchored the row (never a stray date earlier in the asset name).
+_FD_B_ROW_RE = re.compile(
+    r"\b(\d{1,2}/\d{1,2}/\d{4})\s+([Ss] \(partial\)|[PpSsEe])\s+(?:\$[\d,]|Over\b)"
+)
+# A subholding B row: the arrow plus the type+amount columns identify it. The
+# Date column is deliberately NOT required — filers put periodicity words there
+# (``457 Sooner Savings ⇒ Semi-Annually S $15,001 - …``), and such a row still
+# has the type letter and amount. A bare ``⇒`` is NOT an anchor — a wrapped
+# parent name can put the arrow on a continuation line among wrapped high
+# bounds (same artifact as Schedule A's ``_FD_A_ROW_AFTER_ARROW_RE``).
+_FD_B_ARROW_ROW_RE = re.compile(
+    r"⇒.*?\b([Ss] \(partial\)|[PpSsEe])\s+(?:\$[\d,]|Over\b)"
+)
+# A B row's Date column value (same unpadded forms; strptime's %m/%d accepts
+# unpadded components) — used on ⇒-anchored rows, whose asset side never
+# carries the column signature.
+_FD_B_DATE_RE = re.compile(r"(\d{1,2}/\d{1,2}/\d{4})")
+
+
 def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
     """Schedule B (transactions) → structured items + raw_text.
 
-    A B row carries the asset's ``[TYPE]`` tag, an owner arrow ``⇒``, a date, a
-    ``P``/``S`` type and an amount. The asset name often wraps onto the *following*
-    line, so item-start anchors on the ``⇒``-bearing line and folds the wrap in.
+    A B row carries the asset's ``[TYPE]`` tag, a date, a ``P``/``S`` type and
+    an amount; a subholding row leads with the owner arrow ``⇒``. The asset name
+    often wraps onto the *following* line(s), so item-start anchors on the
+    ``⇒``-bearing line **or** the date+type+amount column signature
+    (``_FD_B_ROW_RE``) — a directly-held asset's row has no arrow at all
+    (GH-0070), and anchoring on the arrow alone merged every such transaction
+    into the preceding item.
     """
 
     def starts(s: str) -> bool:
-        return "⇒" in s
+        if _FD_DETAIL_RE.match(s):
+            return False
+        if _FD_GLYPH_RE.search(s):
+            # The cap-gains checkbox is the row's last column — a
+            # glyph-terminated line IS a row line, except a stranded glyph
+            # alone (a wrapped checkbox remnant folds into its row).
+            return not _PTR_GLYPH_ONLY_RE.match(s)
+        return bool(_FD_B_ROW_RE.search(s) or _FD_B_ARROW_ROW_RE.search(s))
 
     items: list[ScheduleBItem] = []
     for raw in _group_items(lines, starts_item=starts):
-        owner_m = re.search(r"⇒\s*(SP|DC|JT)?\b", raw)
-        owner = owner_m.group(1) if owner_m and owner_m.group(1) else None
-        date_m = re.search(r"(\d{2}/\d{2}/\d{4})", raw)
+        # Transaction type tokens normalize as on PTR rows: small-caps can
+        # lower-case the letter; ``S (partial)`` keeps its marker. The ``\b``
+        # must sit on the *letter* branch only — a trailing ``\b`` after
+        # ``S (partial)`` never matches (``)`` then space is not a word
+        # boundary), which silently collapsed every partial sale to a bare S.
+        token = None
+        if "⇒" in raw:
+            owner_m = re.search(r"⇒\s*(SP|DC|JT)?\b", raw, re.IGNORECASE)
+            owner = (
+                owner_m.group(1).upper() if owner_m and owner_m.group(1) else None
+            )
+            # The Date column is the first date after the asset name; the type
+            # letter follows it. (A subholding row's asset side never carries
+            # the column signature, so the first date IS the Date column.)
+            # Filers can put a periodicity word there instead of a date
+            # (``⇒ Semi-Annually S $15,001 - …``): then the date degrades to
+            # None and the type comes from the type+amount signature.
+            date_m = _FD_B_DATE_RE.search(raw)
+            asset = _scrub_field(raw.split("⇒", 1)[0].strip())
+            if date_m:
+                tt_m = re.match(
+                    r"[Ss] \(partial\)|[PpSsEe]\b", raw[date_m.end() :].lstrip()
+                )
+                token = tt_m.group(0) if tt_m else None
+            else:
+                tt_m = _FD_B_ARROW_ROW_RE.search(raw)
+                token = tt_m.group(1) if tt_m else None
+        else:
+            # Directly-held row (GH-0070): the owner column (if any) sits right
+            # after the [TYPE] tag, as on Schedule A — and the date/type come
+            # from the SAME column-signature match that anchored the row, so a
+            # date embedded in the asset name (a bond's maturity) can never be
+            # mistaken for the Date column. A salvaged pre-anchor item has no
+            # signature match and correctly degrades to None.
+            after_type = _FD_OWNER_AFTER_TYPE_RE.search(raw)
+            owner = after_type.group(1).upper() if after_type else None
+            date_m = _FD_B_ROW_RE.search(raw)
+            asset = _scrub_field(raw[: date_m.start()].strip() if date_m else raw)
+            token = date_m.group(2) if date_m else None
         transaction_date = (
             datetime.strptime(date_m.group(1), "%m/%d/%Y").date() if date_m else None
         )
-        # Transaction type: the P/S/E letter sitting after the date, with the
-        # ``S (partial)`` marker preserved. The ``\b`` must sit on the *letter*
-        # branch only — a trailing ``\b`` after ``S (partial)`` never matches (``)``
-        # then space is not a word boundary), which silently collapsed every
-        # partial sale to a bare ``S``. Mirror the PTR normalization instead.
         ttype = None
-        if date_m:
-            tt_m = re.match(r"(S \(partial\)|[PSE]\b)", raw[date_m.end() :].lstrip())
-            if tt_m:
-                token = tt_m.group(1)
-                ttype = "S(partial)" if "(partial)" in token else token
+        if token:
+            ttype = "S(partial)" if "(partial)" in token else token[0].upper()
+            # The "(partial)" marker can wrap onto the asset-name continuation
+            # line, detached from its S; only sales carry it, so an S row whose
+            # raw text holds the marker anywhere is a partial sale.
+            if ttype == "S" and "(partial)" in raw:
+                ttype = "S(partial)"
         type_m = _FD_TYPE_TAG_RE.search(raw)
         asset_type = type_m.group(1) if type_m else None
-        # Asset name = everything before the ⇒ arrow, plus any wrapped tail with
-        # the [TYPE] tag; keep it simple — the text up to ⇒ is the primary name.
-        asset = _scrub_field(raw.split("⇒", 1)[0].strip())
         glyph_m = re.search(r"\bgfedcb?\b", raw)
         cap_gains = (glyph_m.group(0) == "gfedcb") if glyph_m else None
+        # The amount column, wrap-aware: the first column-amount entry over the
+        # pre-detail text (a wrapped high bound can sit past the checkbox glyph
+        # — ``… S $1,000,001 - gfedcb $5,000,000``; B has one amount column, so
+        # the first entry is it).
+        entries = _fd_amount_entries(_fd_columns(raw))
         items.append(
             ScheduleBItem(
                 asset=asset,
@@ -882,7 +1201,7 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
                 asset_type=asset_type,
                 transaction_date=transaction_date,
                 transaction_type=ttype,
-                amount_range=_fd_amount_range(raw),
+                amount_range=entries[0][2] if entries else None,
                 cap_gains_over_200=cap_gains,
                 raw_text=_scrub_raw_text(raw),
             )
@@ -935,18 +1254,43 @@ _FD_DATE_RE = re.compile(
 )
 
 
+# A bare-year ``Date incurred`` (``2019``) — filers enter these alongside the
+# fuller ``Month YYYY``/``MM/YYYY`` forms (GH-0070). The century prefix plus the
+# word boundaries keep it from matching inside a formatted amount (the comma
+# grouping breaks any 4-digit run) or a longer number.
+_FD_D_BARE_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
+# The amount column's *range start* (``$lo -`` or ``Over``) — the corroborating
+# signal a bare-year D anchor requires (below). The dash is load-bearing: a
+# wrapped continuation line can carry a bare year AND the row's wrapped high
+# bound (``Established 1999 Branch $500,000``), but only a real row carries the
+# range's own ``$lo -`` opening.
+_FD_RANGE_START_RE = re.compile(r"\$[\d,]+\s*-|Over\b")
+
+
 def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
     """Schedule D (liabilities) → structured items + raw_text.
 
     Columns are ``Owner | Creditor | Date incurred | Type | Amount``. The amount
     range wraps onto the next line, so item-start anchors on the row bearing a
-    month/year ``Date incurred`` and folds the wrapped amount in.
+    ``Date incurred`` and folds the wrapped amount in. A bare-year date
+    (``… Loan 2019 Personal Loan $15,001 - …`` — GH-0070) anchors only when the
+    line also carries the amount column's *range start*: a year alone (or a
+    year next to a wrapped bare high bound) can sit on a continuation line, but
+    only a real row opens its own range.
     """
+
+    def starts(s: str) -> bool:
+        if _FD_DATE_RE.search(s):
+            return True
+        return bool(_FD_D_BARE_YEAR_RE.search(s) and _FD_RANGE_START_RE.search(s))
+
     items: list[ScheduleDItem] = []
-    for raw in _group_items(lines, starts_item=lambda s: bool(_FD_DATE_RE.search(s))):
-        owner_m = re.match(r"(SP|DC|JT)\b", raw)
-        owner = owner_m.group(1) if owner_m else None
-        date_m = _FD_DATE_RE.search(raw)
+    for raw in _group_items(lines, starts_item=starts):
+        owner_m = re.match(r"(SP|DC|JT)\b", raw, re.IGNORECASE)
+        owner = owner_m.group(1).upper() if owner_m else None
+        # The fuller date forms win; a bare year is the fallback (and is what
+        # anchored the row when no fuller form is present).
+        date_m = _FD_DATE_RE.search(raw) or _FD_D_BARE_YEAR_RE.search(raw)
         date_incurred = date_m.group(1) if date_m else None
         # Creditor = text between any owner token and the date.
         start = owner_m.end() if owner_m else 0
@@ -994,7 +1338,10 @@ _FD_LEADING_DATE_RE = re.compile(
     r"^\s*("
     r"(?:January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+\d{4}"
-    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b",
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4}"
+    # A bare-year agreement date (``2014 GENERAL MOTORS LLC …`` — GH-0070);
+    # last so the fuller forms win at the same position.
+    r"|(?:19|20)\d{2})\b",
     re.IGNORECASE,
 )
 
@@ -1134,13 +1481,12 @@ def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
     return items
 
 
-# Schedule A dispatches separately in :func:`extract_fd_schedules` because it
-# threads the document-level ``glyphless`` flag (the NUL-rendering row anchor).
 # H (travel) and J (new-filer comp) have no entry: their columns merge with no
 # stable delimiter and no committed fixture has a filled form to anchor a split,
 # so they fall through to ``_salvage_raw`` — one raw_text-only item per row, all
 # structured columns ``None``. Adding a column parser later is a one-line entry.
 _FD_STRUCTURED = {
+    "A": _parse_schedule_a,
     "B": _parse_schedule_b,
     "C": _parse_schedule_c,
     "D": _parse_schedule_d,
@@ -1222,19 +1568,11 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
             "(likely an extension/cover sheet)"
         )
 
-    # The glyphs-lost rendering (SPEC §2.2): small-caps furniture extracted as
-    # NUL runs. NULs never occur in an intact-rendering body, so this flag is a
-    # precise document-level marker — intact documents take exactly the same
-    # code paths as before.
-    glyphless = any("\x00" in ln for ln in lines)
-
     segments = _segment_schedules(lines)
     schedules: dict[str, list] = {}
     for letter in sorted(segments):
         content = segments[letter]
-        if letter == "A":
-            items = _parse_schedule_a(content, glyphless=glyphless)
-        elif parser := _FD_STRUCTURED.get(letter):
+        if parser := _FD_STRUCTURED.get(letter):
             items = parser(content)
         else:
             items = []
@@ -1243,6 +1581,32 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
         # fallback. Never silently drop.
         if not items:
             items = _salvage_raw(letter, content)
+        # Completeness guard (GH-0070), the FD analog of the PTR FILINg STATUS:
+        # block count: an A/B row normally carries one [TYPE] tag — on its
+        # anchor line or a wrapped continuation — so the segment's tag count
+        # approximates a row count INDEPENDENT of the row anchors (a guard that
+        # shares the anchor's failure mode passes 0 == 0 and stays silent,
+        # which is exactly how every post-2022-04 PTR parsed as empty). The
+        # invariant is approximate, not exact (measured on a 300-doc stratified
+        # sample: ~30% of documents drift by a row or two — tag-less rows,
+        # filer text carrying brackets, header fragments), so the guard fires
+        # only on the two unambiguous failure classes, never on small drift:
+        # a TOTAL COLLAPSE (one item where the tags say several rows — the
+        # GH-0070 headline failure) and a SEVERE MERGE (half or fewer of the
+        # tag-counted rows anchored). Those become extract_failed — explicit
+        # in the unparsed manifest — rather than a plausible-but-wrong body
+        # with status ok. Only A and B carry per-row tags, so only they are
+        # guarded; small drift passes, with verbatim raw_text still complete.
+        if letter in ("A", "B"):
+            expected = sum(len(_FD_TYPE_TAG_RE.findall(ln)) for ln in content)
+            collapse = len(items) == 1 and expected >= 3
+            severe = len(items) * 2 <= expected and expected >= 4
+            if collapse or severe:
+                raise PdfExtractError(
+                    f"FD Schedule {letter} extraction incomplete for {pdf_path}: "
+                    f"anchored {len(items)} row(s) but the segment carries "
+                    f"{expected} [TYPE] tag(s) — rows merged"
+                )
         schedules[letter] = [it.model_dump(mode="json") for it in items]
 
     return FdBody(schedules=schedules)

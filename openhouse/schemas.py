@@ -36,7 +36,13 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 # verbatim ``raw_text``; and an ``exact`` point-value on ``AmountRange`` (#49)
 # so a single exact-dollar PTR amount (e.g. ``$894.97``) is represented soundly
 # rather than coerced into a fake low–high bucket. All of these ride generation 5.
-SCHEMA_VERSION = 5
+# Generation 6 (GH-0070): ``PtrTransaction.cap_gains_over_200`` becomes nullable
+# (None = unknown — the glyphs-lost rendering drops the checkbox from the text
+# layer entirely) and ``ScheduleAItem`` gains ``income_preceding`` (the
+# Candidate/New-Filer form variant's third income column). The same generation
+# re-anchors FD Schedule A/B/D/F row segmentation and adds the A/B completeness
+# guard, so a re-parse from ``raw/`` is required — which the bump forces.
+SCHEMA_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
@@ -216,7 +222,12 @@ class PtrTransaction(BaseModel):
       an ``{exact, label}`` point when the row discloses a single exact dollar
       value instead of a range (GH-0049).
     - ``cap_gains_over_200`` — the cap-gains checkbox (the form renders
-      ``gfedc`` unchecked vs ``gfedcb`` checked at the row's end).
+      ``gfedc`` unchecked vs ``gfedcb`` checked at the row's end). ``None``
+      means **unknown**: in the glyphs-lost rendering (SPEC §2.2 NUL form,
+      dominant for PTRs from ~2022-04 on) the checkbox glyph vanishes from the
+      text layer entirely, so the state is unrecoverable — recorded as ``null``,
+      never coerced to a boolean (the same unrecoverable-field treatment as the
+      FD Schedule B ``cap_gains_over_200``).
     - ``description`` — the ``DESCRIPTION:`` line text if present, else ``None``.
     """
 
@@ -228,7 +239,7 @@ class PtrTransaction(BaseModel):
     transaction_date: date
     notification_date: date
     amount_range: AmountRange
-    cap_gains_over_200: bool
+    cap_gains_over_200: Optional[bool] = None
     description: Optional[str] = None
 
 
@@ -261,6 +272,11 @@ class ScheduleAItem(BaseModel):
     value_of_asset: Optional[AmountRange] = None
     income_type: Optional[str] = None
     income_amount: Optional[AmountRange] = None
+    # The Candidate/New-Filer form variant's third income column, "income
+    # preceding year" (GH-0070); the member annual form has no such column, so
+    # this is None there — None means "column not on this form / not parsed",
+    # never a zero.
+    income_preceding: Optional[AmountRange] = None
     location: Optional[str] = None
     description: Optional[str] = None
     raw_text: str
