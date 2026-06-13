@@ -288,3 +288,54 @@ def test_subcommand_help_has_examples(capsys):
             cli_mod.main([verb, "--help"])
         assert exc.value.code == 0
         assert "examples:" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Targeted pull flags (#78) wire through main() into pull_mod.pull.
+# ---------------------------------------------------------------------------
+def test_pull_targeted_flags_thread_into_pull(monkeypatch):
+    captured = {}
+
+    def fake_pull(years, **kwargs):
+        captured["years"] = years
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(pull_mod, "pull", fake_pull)
+    rc = cli_mod.main(
+        [
+            "pull", "2020-2024",
+            "--contact", "Jane Doe <jane@example.com>",
+            "--member", "Pelosi",
+            "--newest-first",
+        ]
+    )
+    assert rc == 0
+    assert captured["member"] == "Pelosi"
+    assert captured["doc_id"] is None
+    assert captured["newest_first"] is True
+
+
+def test_pull_doc_id_flag_threads_into_pull(monkeypatch):
+    captured = {}
+
+    def fake_pull(years, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(pull_mod, "pull", fake_pull)
+    rc = cli_mod.main(
+        ["pull", "2024", "--contact", "Jane Doe <jane@example.com>",
+         "--doc-id", "20024277"]
+    )
+    assert rc == 0
+    assert captured["doc_id"] == "20024277"
+    assert captured["newest_first"] is False
+
+
+def test_pull_help_lists_targeted_examples(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["pull", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--member" in out and "--doc-id" in out and "--newest-first" in out
