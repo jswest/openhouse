@@ -218,8 +218,10 @@ def _capture_read_data_dir(monkeypatch):
         return result
 
     # read.py calls cli_mod.resolve_data_dir at run time; spy on it and let the
-    # real run path execute (scanning an absent data dir returns 0 cleanly — no
-    # fixtures needed), so the production resolution line is exercised.
+    # real run path execute, so the production resolution line is exercised. The
+    # absent dirs here now make `read` exit non-zero (it fails loudly on a data
+    # dir with no parsed years — #79); this test only cares that the SPY captured
+    # the resolved path, so the caller asserts on cap["data_dir"], not the rc.
     monkeypatch.setattr(cli_mod, "resolve_data_dir", spy_resolve)
     return captured
 
@@ -244,19 +246,27 @@ def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch, tmp_path):
         argv_env = ["read", "filings", "2024"]
         argv_default = ["read", "filings", "2024"]
 
+    # `read` against these absent dirs now fails loudly (#79); that is fine — this
+    # test asserts the spy captured the RESOLVED path, not the exit code. pull/parse
+    # are stubbed and still return 0.
+    def _run(argv):
+        rc = cli_mod.main(argv)
+        if verb != "read":
+            assert rc == 0
+
     # flag wins even with env set
     monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
-    assert cli_mod.main(argv_flag) == 0
+    _run(argv_flag)
     assert cap["data_dir"] == Path("/flag/store")
 
     # env used when no flag
     monkeypatch.setenv(DATA_DIR_ENV, "/env/store")
-    assert cli_mod.main(argv_env) == 0
+    _run(argv_env)
     assert cap["data_dir"] == Path("/env/store")
 
     # default when neither
     monkeypatch.delenv(DATA_DIR_ENV, raising=False)
-    assert cli_mod.main(argv_default) == 0
+    _run(argv_default)
     assert cap["data_dir"] == tmp_path / ".openhouse"
 
 

@@ -77,6 +77,14 @@ openhouse read summary 2024
   `--since`, `--until`, `--min-amount`.
 - `summary <range>` — per-year roll-up from the manifests.
 
+**This skill queries EXISTING parsed data with `read` only.** Do not `pull` or
+`parse` to satisfy a query — those are acquisition steps, not query steps. If a
+`read` comes back empty, it almost always means the wrong data directory, not
+missing data: check `--data-dir` / `OPENHOUSE_DATA_DIR` points at a parsed
+corpus. A range query against a dir with no parsed years now **fails loudly**
+(non-zero exit, error to stderr) rather than returning a misleading empty
+result — that error is the signal you are pointed at the wrong place.
+
 ### Sound or complete — read the residual line
 
 Every query declares which way to trust it; a zero-result answer is never

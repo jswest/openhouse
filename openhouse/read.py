@@ -257,6 +257,28 @@ def _print_skipped(skipped: list[int]) -> None:
         )
 
 
+def _require_present(data_dir: Path, present: list[int], years: list[int]) -> None:
+    """Fail LOUDLY when NONE of the requested ``years`` are parsed on disk (#79).
+
+    A range query over a data dir with no parsed years for the range bounds
+    nothing: "complete over 0 filings, residual 0" reads like a trustworthy zero
+    but is really "I looked here and found no parsed data at all" — the
+    sound/complete contract (CLAUDE.md) is violated by reporting it as an empty
+    match. This is the wrong-``--data-dir`` / unparsed-corpus case, distinct from
+    a real query that scanned parsed data and matched nothing (which stays exit
+    0). Raises :class:`ReadError` (→ non-zero exit, message on stderr) naming the
+    resolved data dir so the operator can see where ``read`` actually looked.
+    """
+    if present:
+        return
+    raise ReadError(
+        f"no parsed data for {years} under {data_dir} (looked in "
+        f"{data_dir / 'parsed'}/<year>/). This is NOT an empty match — there is "
+        f"nothing parsed here to query. Check --data-dir / OPENHOUSE_DATA_DIR "
+        f"points at a parsed corpus, then run `openhouse parse` if needed."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Filters (shared predicates over filing-metadata dicts).
 # ---------------------------------------------------------------------------
@@ -435,6 +457,7 @@ def _filings_table(filings: list[dict]):
 def cmd_filings(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _require_present(data_dir, present, years)
     _warn_schema_drift(data_dir, present)
 
     matched: list[dict] = []
@@ -685,6 +708,7 @@ def _trades_table(trades: list[dict]):
 def cmd_trades(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _require_present(data_dir, present, years)
     _warn_schema_drift(data_dir, present)
 
     trades = _collect_trades(data_dir, present, args)
@@ -756,6 +780,7 @@ def _summary_table(payload: dict):
 def cmd_summary(args, data_dir: Path, years: list[int]) -> int:
     present, skipped = _resolve_years(data_dir, years)
     _print_skipped(skipped)
+    _require_present(data_dir, present, years)
     _warn_schema_drift(data_dir, present)
 
     year_summaries = []
