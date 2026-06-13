@@ -678,14 +678,12 @@ def pull(
         # --no-reference does, rather than abort before any disclosure PDF
         # downloads. `parse` then falls back to the last-resort name: key for
         # every filer. A real disclosure-side failure below still aborts.
-        reference_fetched = reference
         if reference:
             try:
                 pull_legislators(
                     client, data_dir, force=force, delay=delay, sleep=sleep
                 )
             except PullError as exc:
-                reference_fetched = False
                 print(
                     f"warning: could not fetch the CC0 congress-legislators "
                     f"reference set ({exc}); continuing WITHOUT bioguide identity "
