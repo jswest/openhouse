@@ -1513,6 +1513,65 @@ _FD_D_BARE_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
 _FD_RANGE_START_RE = re.compile(r"\$[\d,]+\s*-|Over\b")
 
 
+def _fd_d_amount(
+    raw: str,
+) -> tuple[AmountRange | None, int, list[tuple[int, int]]]:
+    """Resolve a Schedule D row's Amount column → ``(range, type_end, strip)``.
+
+    The Amount-of-Liability column sits to the right of the Type column. When the
+    Type wraps to a second physical line, pdfplumber re-flows the columns
+    left-to-right and the amount's **low bound and dash land *between* the type
+    fragments**, with the high bound after the wrapped type continuation
+    (GH-0102): ``Mortgage on Rental Property, $100,001 - Washington, DC
+    $250,000``. ``_FD_AMOUNT_RE`` then sees no contiguous ``$lo - $hi`` bucket and
+    the row silently emits ``amount_range: null`` with the amount tokens swept
+    into ``liability_type`` — a present-but-invisible liability amount.
+
+    Returns the resolved range (or ``None``), the offset at which the Type column
+    ends, and the character spans to **lift out** of the type slice (the displaced
+    amount tokens — a wrapped low+dash and/or high bound that landed amid the type
+    text).
+
+    The wrapped-Type case (GH-0102) is why a single ``raw[date:amount-start]``
+    slice is wrong: the type spans *both sides* of the amount low bound, so the
+    type slice must run to the row end with the amount tokens carved out, not
+    truncate at the first ``$``.
+
+    When the amount is **present but unparseable** (a dangling low with no
+    recoverable high) the displaced tokens are *not* carved out — they stay in
+    ``liability_type`` so the present-but-unparsed amount never vanishes from every
+    structured field at once (it would otherwise survive only in ``raw_text``); the
+    loss stays visible (CLAUDE.md "never silently drop"), matching Schedule A's
+    degrade-but-hold-the-slot rule.
+    """
+    # 1) A contiguous ``$lo - $hi`` bucket — the unwrapped (or already de-wrapped
+    #    contiguous) case. Type ends at its start; nothing displaced.
+    bucket = _FD_AMOUNT_RE.search(raw)
+    # 2) A dangling low (``$lo -`` with a word, not ``$hi``, right after) — the
+    #    wrapped-Type signature: the high bound spilled past the type continuation.
+    dangling = _FD_DANGLING_LOW_RE.search(raw)
+    if bucket and not (dangling and dangling.start() < bucket.start()):
+        # The first complete bucket precedes any dangling low → it is the amount.
+        # Type ends at the bucket start; the bucket itself is excluded by the end.
+        return _bucket(bucket.group(0)), bucket.start(), []
+    if dangling:
+        # The dangling-low span (``$lo -``) plus a recovered high bound are amount
+        # tokens that landed *inside* the wrapped type, so the type slice runs to
+        # the row end and carves them out (lifting them rejoins the split type).
+        high_m = _FD_BARE_AMOUNT_RE.search(raw, dangling.end())
+        if high_m:
+            # _bucket already normalizes the dash spacing of the joined label.
+            rng = _bucket(f"{dangling.group(0)}{high_m.group(0)}")
+            return rng, len(raw), [(dangling.start(), dangling.end()), high_m.span()]
+        # Amount tokens present (a ``$lo -`` opens the column) but no high bound
+        # recovered — unparseable, not absent. Leave the low *in* the type slice
+        # (no carve) so the present amount stays visible in a structured field and
+        # never collapses silently to ``amount_range: null``; ``raw_text`` carries
+        # the verbatim row regardless.
+        return None, len(raw), []
+    return None, len(raw), []
+
+
 def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
     """Schedule D (liabilities) → structured items + raw_text.
 
@@ -1542,19 +1601,33 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
         start = owner_m.end() if owner_m else 0
         end = date_m.start() if date_m else len(raw)
         creditor = _scrub_field(raw[start:end].strip())
-        # Liability type = text between the date and the amount.
-        amt_m = _FD_AMOUNT_RE.search(raw)
+        # Amount column resolved BEFORE the type is read: a wrapped Type column
+        # interleaves the amount's low/high bounds among the type fragments
+        # (GH-0102), so the amount tokens must be located and carved out of the
+        # type slice — otherwise they sweep into ``liability_type`` and the row
+        # silently emits ``amount_range: null`` (the present amount, invisible).
+        amount_range, type_end, amt_spans = _fd_d_amount(raw)
         ltype = None
         if date_m:
-            type_end = amt_m.start() if amt_m else len(raw)
-            ltype = _scrub_field(raw[date_m.end() : type_end].strip() or None)
+            # Type = text from the date to ``type_end`` with the displaced amount
+            # tokens carved out. Rebase the spans to the post-date slice so a
+            # wrapped low/high that landed mid-type is removed, rejoining the type.
+            d_end = date_m.end()
+            ltype = _scrub_field(
+                _strip_spans(
+                    raw[d_end:],
+                    type_end - d_end,
+                    [(s - d_end, e - d_end) for s, e in amt_spans],
+                )
+                or None
+            )
         items.append(
             ScheduleDItem(
                 creditor=creditor or _scrub_field(raw),
                 owner=owner,
                 date_incurred=date_incurred,
                 liability_type=ltype,
-                amount_range=_fd_amount_range(raw),
+                amount_range=amount_range,
                 raw_text=_scrub_raw_text(raw),
             )
         )

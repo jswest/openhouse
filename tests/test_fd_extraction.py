@@ -1203,6 +1203,76 @@ def test_schedule_d_bare_year_alone_does_not_anchor(monkeypatch):
     assert "Established 1999" in d[0]["raw_text"]
 
 
+def test_schedule_d_wrapped_type_amount_not_lost(monkeypatch):
+    # GH-0102: when the Type column wraps to a second physical line, pdfplumber
+    # re-flows columns left-to-right and the amount's low bound + dash land
+    # *between* the type fragments, with the high bound after the type
+    # continuation. Before the fix, _FD_AMOUNT_RE saw no contiguous "$lo - $hi"
+    # bucket, so amount_range went silently null and the amount tokens were swept
+    # into liability_type. Two real wrapped shapes from the issue:
+    #   Bucshon (2020/10040126) BB&T: type "Mortgage on Rental Property,
+    #     Washington, DC", amount "$100,001 - $250,000".
+    #   Bost (2021/10047859): type "Personal residence", amount
+    #     "$250,001 - $500,000".
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            # BB&T wrapped row: low bound ends line 1, type continuation + high
+            # bound on line 2 (the documented interleave shape).
+            "BB&T Bank December 2015 Mortgage on Rental Property, $100,001 -",
+            "Washington, DC $250,000",
+            # A single-line control row (its amount already parsed correctly).
+            "Old National Bank January 2016 Mortgage $15,001 - $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 2
+    wrapped, control = d[0], d[1]
+    # Positive: the wrapped amount now resolves to its real bucket, not null.
+    assert wrapped["amount_range"] == {
+        "low": 100001,
+        "high": 250000,
+        "label": "$100,001 - $250,000",
+    }
+    # The type is the clean, rejoined string — the amount tokens are carved back
+    # out of the interleave, never left swept into liability_type.
+    assert wrapped["liability_type"] == "Mortgage on Rental Property, Washington, DC"
+    assert wrapped["creditor"] == "BB&T Bank"
+    assert wrapped["date_incurred"] == "December 2015"
+    # Control row is unaffected (single-line amount still parses).
+    assert control["amount_range"]["label"] == "$15,001 - $50,000"
+    assert control["liability_type"] == "Mortgage"
+
+
+def test_schedule_d_present_but_unparseable_amount_stays_visible(monkeypatch):
+    # GH-0102 "never silently drop": when the Amount column holds a low bound + dash
+    # but no recoverable high bound, the amount is present-but-unparseable. It must
+    # NOT collapse to amount_range:null with the tokens carved away — the present
+    # amount stays visible in a structured field (liability_type) so a liability
+    # query is not silently unsound, and raw_text carries the verbatim row.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            # Dangling low ("$lo -" followed by a word), no "$hi" anywhere.
+            "Some Bank December 2015 Personal Loan $100,001 - undisclosed",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 1
+    # No fabricated bucket — the unparseable amount is null (degrade, never fake).
+    assert d[0]["amount_range"] is None
+    # But the present amount tokens survive in a structured field, not just
+    # raw_text — the loss is visible, not silent.
+    assert "$100,001 -" in d[0]["liability_type"]
+    assert "$100,001 -" in d[0]["raw_text"]
+
+
 def test_schedule_f_bare_year_leading_date(monkeypatch):
     # Real line shape from filing 10039877: the agreement Date column is a
     # bare year. Before GH-0070 no row anchored and date stayed None.
