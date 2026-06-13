@@ -7,22 +7,28 @@ filings** — annual Financial Disclosure statements and STOCK Act Periodic
 Transaction Reports — from the Office of the Clerk, into normalized JSON you
 can actually ask questions of.
 
-> **Status: pre-v1.** The design is fully specified and verified against live
-> Clerk data ([SPEC.md](./SPEC.md)); implementation is underway. Nothing below
-> works yet — this README previews where it's going.
+> **Status: pre-v1.** The three verbs (`pull` / `parse` / `read`) work end to
+> end; the parsed schema is not yet frozen, so a version bump can mean a
+> re-parse rather than a migration. Design contract: [SPEC.md](./SPEC.md).
 
-## What it will do
+## What it does
 
 A three-command pipeline plus an accuracy-review tool, over one data directory:
 
 ```sh
-openhouse pull 2024          # fetch the year's filing index + every PDF (resumable, polite)
+openhouse pull 2024 --contact "Jane Doe <jane@example.com>"
+                             # network: fetch the year's index + every PDF (resumable, polite)
 openhouse parse 2024         # offline: PDFs + index → normalized JSON, nothing dropped
 openhouse read trades 2024 --ticker NVDA --table
                              # offline: ask the parsed data a question
 openhouse inspect 2024 --sample 0.05
                              # offline: review a sample beside the PDFs, score accuracy
 ```
+
+`pull` **requires** a `--contact "Name <email>"` (or the `OPENHOUSE_CONTACT`
+env var): it goes into the User-Agent so the Clerk can identify the operator.
+The Clerk 403s anonymous shared clients, so without it `pull` errors out before
+making a request. Full flag reference is in [Usage](#usage).
 
 - **`pull`** is the only network step. Idempotent and Ctrl-C-safe — re-runs
   fetch only what's missing. Multi-year ranges (`openhouse pull 2019-2024`)
@@ -36,7 +42,9 @@ openhouse inspect 2024 --sample 0.05
   years, per-year summaries. Every query tells you which way to trust it:
   whether its results are exhaustive (an upper bound — "at most these") or a
   floor (a lower bound — "at least these"), so a zero-result answer is never
-  ambiguous. JSON to stdout for machines and `jq`; `--table` for humans.
+  ambiguous. It also fails loudly when the data dir is empty or unparsed —
+  "nothing here to query" is an error, never silently returned as "no matches."
+  JSON to stdout for machines and `jq`; `--table` for humans.
 - **`inspect`** measures whether the parse is *right*, not just whether it ran.
   It samples a reproducible, stratified slice of the `ok` filings, opens a small
   local web app showing each one beside its source PDF, and records a
@@ -59,16 +67,92 @@ look at one filing. The [House Committee on
 Ethics](https://ethics.house.gov/financial-disclosure) oversees the disclosure
 program and documents the filing requirements.
 
-## What's coming, roughly in order
+## Usage
 
-1. The three commands above, end to end, for any year range since 2008.
-2. Stable filer identity via a CC0 `congress-legislators` bioguide join, with a
-   `name:`-key fallback and explicit warnings whenever a filer is name-keyed only
-   (see [Caveats](#caveats)).
-3. A Claude Code agent skill, so an AI agent can drive `pull`/`parse`/`read`
-   directly.
-4. OCR for the scanned/handwritten backlog (already detected and catalogued by
-   `parse`).
+Three verbs over one data directory. `pull` is the only one that touches the
+network; `parse` and `read` are offline and deterministic.
+
+**Data directory** (precedence, highest first): the `--data-dir` flag, then the
+`$OPENHOUSE_DATA_DIR` env var, then the `~/.openhouse` default. All three verbs
+honour the same precedence; `raw/` lives under it after `pull`, `parsed/` after
+`parse`.
+
+**Environment variables:**
+
+- `OPENHOUSE_CONTACT` — your `Name <email>` for `pull`'s User-Agent; saves
+  repeating `--contact`. Required for `pull` one way or the other.
+- `OPENHOUSE_DATA_DIR` — the data directory, overridden only by `--data-dir`.
+
+### pull (network)
+
+Fetches the annual index ZIP and per-filing PDFs into `<data>/raw/`. Polite by
+default (sequential, 2.5 s between requests, identifiable User-Agent); re-runs
+skip what's already on disk. Years are `YYYY` or `YYYY-YYYY`.
+
+```sh
+openhouse pull 2024 --contact "Jane Doe <jane@example.com>"
+openhouse pull 2020-2024 --types ptr        # only PTRs, five years
+openhouse pull 2024 --index-only            # index metadata, no PDF bodies
+openhouse pull 2024 --member Pelosi         # only that filer's PDFs (substring match)
+openhouse pull 2024 --doc-id 20024277       # one filing's PDF (requires a single year)
+openhouse pull 2020-2024 --newest-first     # process 2024 first, 2020 last
+```
+
+`--member` and `--doc-id` are mutually exclusive. By default `pull` also makes a
+one-time CC0 `congress-legislators` fetch into `raw/reference/` so `parse` can
+pin verified bioguide identities; `--no-reference` skips it (every filer then
+falls back to a name-only key, and `read --bioguide` finds nothing).
+
+### parse (offline)
+
+Turns the raw artifacts into normalized JSON under `<data>/parsed/`. Classifies
+each PDF, extracts metadata and PTR transactions, joins filer identity, and
+writes a parse-manifest recording what did and didn't parse — never a silent
+gap. Re-parsing is cheap by design.
+
+```sh
+openhouse parse 2024
+openhouse parse 2020-2024 --types ptr
+openhouse parse 2024 --strict               # non-zero exit if any filing errors
+```
+
+### read (offline)
+
+Queries the parsed JSON. JSON to stdout (one object per line for lists,
+`jq`-composable); `--table` for a human-readable view. Four sub-verbs:
+
+```sh
+openhouse read filings 2024 --type ptr --state NY     # matching filing-metadata records
+openhouse read filing 20024001                        # one filing: metadata + body
+openhouse read trades 2024 --ticker NVDA --table      # PTR transactions, filer attached
+openhouse read summary 2020-2024                       # per-year roll-up from the manifests
+```
+
+Identity filters on `filings` and `trades`:
+
+- `--member <substring>` — case-insensitive substring over the filer id and raw
+  names. Fuzzy name matching, **not** verified identity (SPEC §6.2).
+- `--bioguide <id>` — exact, case-insensitive match on the verified
+  `bioguide_id`. A sound query (no false positives); the precise alternative to
+  `--member`. Needs reference-enriched data, so it only matches filings parsed
+  from a pull made *without* `--no-reference`.
+
+On `trades`, `--ticker` is a sound query (no false positives — exact symbol
+match) while `--asset` leans toward completeness (substring over the verbatim
+asset text, no false negatives). `read` errors with a non-zero exit when the
+target years aren't parsed under the data dir, so an empty result is never
+mistaken for "no matches" (run `parse` first).
+
+## What's coming
+
+The three verbs ship end to end for any year range since 2008; stable filer
+identity via the CC0 `congress-legislators` bioguide join (with the name-key
+fallback and warnings described in [Caveats](#caveats)) is in place, and a
+Claude Code [agent skill](./openhouse/skill/SKILL.md) lets an AI agent drive
+`pull`/`parse`/`read` directly. Still pending:
+
+- **OCR for the scanned/handwritten backlog** ([#15](https://github.com/jswest/openhouse/issues/15)),
+  already detected and catalogued by `parse` so nothing is lost in the meantime.
 
 ## Caveats
 
