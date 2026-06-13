@@ -681,9 +681,24 @@ def _collect_trades(data_dir: Path, years: list[int], args) -> list[dict]:
     return trades
 
 
+def _filer_name(filer: dict | None) -> str:
+    """Render a filer as ``"Last, First"`` for the human table.
+
+    Prefix/suffix are omitted to keep the column compact. If either name part is
+    missing, fall back to whatever is present; never crash on ``None``.
+    """
+    if not filer:
+        return ""
+    last = (filer.get("last") or "").strip()
+    first = (filer.get("first") or "").strip()
+    if last and first:
+        return f"{last}, {first}"
+    return last or first
+
+
 def _trades_table(trades: list[dict]):
     headers = [
-        "doc_id", "filer_id", "owner", "ticker", "asset",
+        "doc_id", "filer_id", "filer", "owner", "ticker", "asset",
         "type", "txn_date", "amount",
     ]
     rows = []
@@ -694,6 +709,7 @@ def _trades_table(trades: list[dict]):
             [
                 t.get("doc_id", ""),
                 t.get("filer_id") or "",
+                _filer_name(t.get("filer")),
                 txn.get("owner") or "",
                 txn.get("ticker") or "",
                 (txn.get("asset") or "")[:48],
