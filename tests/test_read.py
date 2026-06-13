@@ -410,6 +410,43 @@ def test_partial_range_reports_skipped_year(capsys):
     assert "not parsed" in captured.err
 
 
+def test_empty_data_dir_fails_loudly(tmp_path, capsys):
+    # #79: a range query against a dir with NO parsed years must fail loudly —
+    # non-zero exit + error on stderr naming the resolved data dir — not return a
+    # misleading exit-0 empty result that bounds nothing.
+    dd = tmp_path / "data"  # no parsed/ tree at all
+    for sub in ("filings", "trades", "summary"):
+        rc = run([sub, "2021"], data_dir=dd)
+        captured = capsys.readouterr()
+        assert rc != 0, f"{sub} should fail loudly on an empty data dir"
+        assert captured.out == "", f"{sub} must emit no JSON to stdout on failure"
+        assert "error:" in captured.err
+        assert str(dd) in captured.err
+        assert "NOT an empty match" in captured.err
+
+
+def test_all_requested_years_unparsed_fails_loudly(capsys):
+    # Every requested year is absent from the fixtures (2098-2099) → loud failure,
+    # not a quiet "answered from the parsed years only" with an empty result.
+    rc = run(["trades", "2098-2099"])
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert captured.out == ""
+    assert "error:" in captured.err
+
+
+def test_real_zero_match_over_parsed_data_stays_exit_0(capsys):
+    # #79 guard: a query that DID scan parsed data (2021 is parsed) and simply
+    # matched nothing is a legitimate sound zero — it must stay exit 0 with an
+    # empty JSON array and the normal residual line, NOT become an error.
+    rc = run(["trades", "2021", "--ticker", "ZZZZNOSUCH"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert json.loads(captured.out) == []
+    assert "residual" in captured.err
+    assert "error:" not in captured.err
+
+
 def test_range_residual_aggregates_over_present_years(capsys):
     run(["summary", "2021-2022"])
     err = capsys.readouterr().err
