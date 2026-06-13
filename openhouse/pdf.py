@@ -1404,12 +1404,58 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
     return items
 
 
+# Schedule C income-Type vocabulary (GH-0101). The Type column is a small,
+# closed set of phrases on the live form; these are the values attested on the
+# committed fixtures (Thompson: ``Retirement Plan``, ``Pension``, ``Annuity
+# Plan``; Hackett candidate: ``Salary``) and in the issue's cited filings
+# (``Spouse Salary``, ``Professional Services``, ``Spouse Pension``). Longest
+# phrases must precede their prefixes so the alternation is greedy-correct
+# (``Retirement Plan`` before ``Pension``/``Salary``). An UNKNOWN Type is *not*
+# in this list — the caller then falls back to the single-token split so the row
+# still divides (and ``raw_text`` keeps it whole regardless): never dropped.
+_FD_C_TYPE_PHRASES = (
+    "Retirement Plan",
+    "Annuity Plan",
+    "Professional Services",
+    "Salary",
+    "Pension",
+    "Annuity",
+    "Bonus",
+    "Commission",
+    "Director Fees",
+    "Director's Fees",
+    "Fees",
+    "Honoraria",
+    "Partnership Income",
+    "Severance",
+)
+# An optional owner token (the owner column renders folded in front of the Type:
+# ``Member Retirement Plan`` / ``Spouse Pension`` — issue example Davis is
+# ``Spouse Salary``) then one vocabulary phrase, anchored to the head's end so it
+# only claims the trailing Type column, never a phrase buried in the source name.
+_FD_C_TYPE_RE = re.compile(
+    r"\s((?:(?:Member|Spouse|SP|DC|JT)\s+)?(?:"
+    + "|".join(re.escape(p) for p in _FD_C_TYPE_PHRASES)
+    + r"))\s*$"
+)
+
+
 def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
     """Schedule C (earned income) → structured items + raw_text.
 
     Columns are ``Source | Type | Amount [| Preceding-year amount]``. Each row is
     one physical line; the trailing money/``N/A`` token(s) are the amount, the
-    word before them the income type, the remainder the source.
+    ``Type`` phrase before them the income type, the remainder the source.
+
+    The Type column is *multi-word* on real forms (``Retirement Plan``, ``Annuity
+    Plan``, ``Professional Services``) and may carry the owner column folded in
+    front of it (``Spouse Pension``, ``Member Retirement Plan``). A naive
+    last-whitespace split bleeds the Type's leading word(s) into ``source`` and
+    truncates ``income_type`` to its final word (GH-0101). We match the Type from
+    a small vocabulary of phrases attested on the committed fixtures / the issue,
+    longest-first, optionally prefixed by an owner token — and fall back to the
+    single-token split for an *unknown* Type so it still divides somewhere rather
+    than being dropped (the verbatim ``raw_text`` carries the whole row either way).
     """
     items: list[ScheduleCItem] = []
     for raw in _group_items(lines, starts_item=lambda s: True):
@@ -1420,13 +1466,18 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
         )
         amount = amt_m.group(1).strip() if amt_m else None
         head = raw[: amt_m.start()].strip() if amt_m else raw.strip()
-        # The income type is the last whitespace-token of the head (Salary,
-        # Pension, Annuity, …); the rest is the source.
-        parts = head.rsplit(" ", 1)
-        if len(parts) == 2 and parts[1]:
-            source, income_type = parts[0].strip(), parts[1].strip()
+        # Prefer a known multi-word Type phrase (with any owner prefix) at the
+        # tail; only when none is attested do we fall back to the last token.
+        type_m = _FD_C_TYPE_RE.search(head)
+        if type_m:
+            source = head[: type_m.start()].strip()
+            income_type = type_m.group(1).strip()
         else:
-            source, income_type = head, None
+            parts = head.rsplit(" ", 1)
+            if len(parts) == 2 and parts[1]:
+                source, income_type = parts[0].strip(), parts[1].strip()
+            else:
+                source, income_type = head, None
         items.append(
             ScheduleCItem(
                 source=_scrub_field(source) or _scrub_field(raw),
