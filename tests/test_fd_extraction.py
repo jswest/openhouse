@@ -175,9 +175,51 @@ def test_schedule_c_items():
     body = extract_fd_schedules(THOMPSON)
     c = body.schedules["C"]
     assert len(c) == 4
-    miss = next(i for i in c if i["source"].startswith("State of Mississippi Member"))
+    miss = next(i for i in c if i["raw_text"].startswith("State of Mississippi Member"))
     assert miss["amount"] == "$11,195.00"
     assert miss["raw_text"].startswith("State of Mississippi Member Retirement")
+
+
+def test_schedule_c_multiword_type_does_not_bleed_into_source():
+    # GH-0101: the Type column is multi-word on the real form and folds the owner
+    # column in front of it. A last-whitespace split bled the Type's leading
+    # word(s) into ``source`` and truncated ``income_type`` to its final word.
+    # The vocabulary split must keep the full Type out of the source. Asserted on
+    # the committed Thompson fixture (real-fixture reproduction, not synthetic).
+    c = extract_fd_schedules(THOMPSON).schedules["C"]
+
+    # "State of Mississippi Member Retirement Plan $11,195.00": pre-fix source
+    # gained "Member Retirement", income_type was truncated to "Plan".
+    member = next(i for i in c if i["raw_text"].startswith("State of Mississippi Member"))
+    assert member["source"] == "State of Mississippi"
+    assert member["income_type"] == "Member Retirement Plan"
+
+    # "... Benefit Payment Services Spouse Pension N/A": pre-fix source gained
+    # "Spouse", income_type was just "Pension".
+    pension = next(i for i in c if "Benefit Payment Services" in i["raw_text"])
+    assert pension["source"] == "The Northern Trust Company, Benefit Payment Services"
+    assert pension["income_type"] == "Spouse Pension"
+
+    # "AXA Equitable Annuity Spouse Annuity Plan N/A": "Annuity" also appears in
+    # the SOURCE (company name) — the tail-anchored Type must not swallow it.
+    annuity = next(i for i in c if i["raw_text"].startswith("AXA"))
+    assert annuity["source"] == "AXA Equitable Annuity"
+    assert annuity["income_type"] == "Spouse Annuity Plan"
+
+
+def test_schedule_c_unknown_multiword_type_degrades_safely(monkeypatch):
+    # An UNKNOWN Type (not in the vocabulary) falls back to the single-token
+    # split rather than being dropped — and the verbatim row survives in
+    # raw_text either way (CLAUDE.md: never silently drop).
+    from openhouse.pdf import _parse_schedule_c
+
+    rows = _parse_schedule_c(["Weird Co Mystery Compensation $5.00"])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.amount == "$5.00"
+    assert row.income_type == "Compensation"  # last-token fallback
+    assert row.source == "Weird Co Mystery"
+    assert row.raw_text == "Weird Co Mystery Compensation $5.00"
 
 
 # --- Schedules E–J: structured columns, every item keeps verbatim raw_text ----
