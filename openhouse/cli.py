@@ -20,6 +20,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from . import __version__
 from . import parse as parse_mod
 from . import pull as pull_mod
 from . import read as read_mod
@@ -149,18 +150,63 @@ def parse_types(arg: str) -> list[str]:
     return [t for t in VALID_PDF_TYPES if t in families]
 
 
+_TOP_EPILOG = """\
+typical workflow:
+  openhouse pull 2024 --contact "Jane Doe <jane@example.com>"   # network: fetch
+  openhouse parse 2024                                          # offline: normalize
+  openhouse read trades --ticker AAPL 2024                      # offline: query
+
+stages:
+  pull     network — download the index + PDFs into <data>/raw/
+  parse    offline — normalize raw artifacts into <data>/parsed/ JSON
+  read     offline — query the parsed JSON (JSON to stdout; --table for humans)
+  inspect  offline — sample parsed filings for human accuracy review in a browser
+  ready    offline — install the agent skill into ~/.claude/skills/openhouse
+
+data directory (precedence): --data-dir, then $OPENHOUSE_DATA_DIR, then ./data
+environment: $OPENHOUSE_CONTACT (pull's User-Agent), $OPENHOUSE_DATA_DIR
+coverage: annual FDs from 2008; PTRs (STOCK Act) from 2012.
+
+Run `openhouse <command> --help` for a command's own options."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openhouse",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Pull, parse, and query U.S. House financial disclosures from the "
             "Office of the Clerk. " + _LEGAL_NOTICE
         ),
+        epilog=_TOP_EPILOG,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"openhouse {__version__}",
+        help="print the installed openhouse version and exit",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     pull_p = subparsers.add_parser(
-        "pull", help="acquire raw artifacts from the Clerk (network)"
+        "pull",
+        help="acquire raw artifacts from the Clerk (network)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Acquire raw artifacts from the Clerk over the network: the annual\n"
+            "index ZIP and the per-filing PDF bodies, written under <data>/raw/.\n"
+            "This is the only networked stage and the only one that needs a\n"
+            "--contact. It is polite by default (sequential, throttled, with an\n"
+            "identifiable User-Agent); those defaults are load-bearing, not\n"
+            "performance knobs to strip. Re-runs skip an index already on disk\n"
+            "unless --force is given."
+        ),
+        epilog=(
+            "examples:\n"
+            '  openhouse pull 2024 --contact "Jane Doe <jane@example.com>"\n'
+            "  openhouse pull 2020-2024 --types ptr     # only PTRs, five years\n"
+            "  openhouse pull 2024 --index-only         # index metadata, no PDFs"
+        ),
     )
     pull_p.add_argument("years", help="YYYY or YYYY-YYYY")
     pull_p.add_argument(
@@ -231,7 +277,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parse_p = subparsers.add_parser(
-        "parse", help="transform raw artifacts into normalized JSON (offline)"
+        "parse",
+        help="transform raw artifacts into normalized JSON (offline)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Transform the raw artifacts from `pull` into normalized JSON under\n"
+            "<data>/parsed/. Fully offline and deterministic: it classifies each\n"
+            "PDF, extracts filing metadata and PTR transactions, joins filer\n"
+            "identity, and writes a parse-manifest recording what did and did not\n"
+            "parse — no filing is ever silently dropped. Re-parsing is cheap by\n"
+            "design; a schema change means re-run, not migrate."
+        ),
+        epilog=(
+            "examples:\n"
+            "  openhouse parse 2024\n"
+            "  openhouse parse 2020-2024 --types ptr\n"
+            "  openhouse parse 2024 --strict     # non-zero exit if any filing errors"
+        ),
     )
     parse_p.add_argument("years", help="YYYY or YYYY-YYYY")
     parse_p.add_argument(
@@ -256,6 +318,19 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_p = subparsers.add_parser(
         "inspect",
         help="human accuracy review of parsed filings in a local web app (offline)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Sample already-parsed filings for a single year and serve them in a\n"
+            "local web app for human accuracy review (precision/recall verdicts).\n"
+            "Fully offline; reads <data>/parsed/ and never touches the network.\n"
+            "The sample is reproducible: the same year/sample/seed draws the same\n"
+            "set."
+        ),
+        epilog=(
+            "examples:\n"
+            "  openhouse inspect 2024 --sample 0.1\n"
+            "  openhouse inspect 2024 --sample 0.25 --seed 7"
+        ),
     )
     inspect_p.add_argument("year", help="a single coverage year, YYYY")
     inspect_p.add_argument(
@@ -295,6 +370,18 @@ def build_parser() -> argparse.ArgumentParser:
     ready_p = subparsers.add_parser(
         "ready",
         help="install the agent skill into ~/.claude/skills/openhouse (offline)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Install (or refresh) the packaged agent skill into\n"
+            "~/.claude/skills/openhouse so an agent can drive these verbs. Fully\n"
+            "offline. Use --check to report up-to-date / stale / hand-edited\n"
+            "without writing anything."
+        ),
+        epilog=(
+            "examples:\n"
+            "  openhouse ready\n"
+            "  openhouse ready --check     # report status, install nothing"
+        ),
     )
     ready_p.add_argument(
         "--check",

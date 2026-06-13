@@ -790,7 +790,23 @@ def build_read_parser() -> argparse.ArgumentParser:
     )
     parser = argparse.ArgumentParser(
         prog="openhouse read",
-        description="Query parsed House financial disclosures (offline, read-only).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Query the normalized JSON produced by `parse` (offline, read-only).\n"
+            "Emits JSON to stdout by default — jq-composable, one object per line\n"
+            "for list results; pass --table for a human-readable view. Member\n"
+            "matching is name-string matching, not true identity (SPEC §6.2); on\n"
+            "trades, --ticker is a sound query (no false positives) while --asset\n"
+            "leans toward completeness (no false negatives) — see each flag's help."
+        ),
+        epilog=(
+            "examples:\n"
+            "  openhouse read filings 2024 --type ptr --state NY\n"
+            "  openhouse read filing 20024001\n"
+            "  openhouse read trades 2024 --ticker AAPL\n"
+            "  openhouse read trades 2020-2024 --asset tesla --table\n"
+            "  openhouse read summary 2020-2024"
+        ),
         parents=[common],
     )
     sub = parser.add_subparsers(dest="subcommand", required=True)
