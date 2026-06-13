@@ -122,4 +122,41 @@ Python 3.12+, managed with [`uv`](https://docs.astral.sh/uv/):
 uv run pytest        # tests
 ```
 
+## Releasing
+
+Versions are `v0.<SCHEMA_VERSION>.<patch>` — the minor **is** `SCHEMA_VERSION`,
+the integer parsed-schema generation in
+[`openhouse/schemas.py`](./openhouse/schemas.py). Patch increments at the same
+schema and resets to `0` when the schema bumps; the package version is derived
+from the git tag by `hatch-vcs`, so cutting a release writes only the tag. The
+release script computes the number from `SCHEMA_VERSION` + the last tag — never
+pass a version by hand.
+
+Cut a release from a clean, synced `main`:
+
+```sh
+# dry run — prints last tag, schema, the computed next version, and notes
+uv run python .claude/skills/release/release.py
+
+# publish — annotated tag + push + GitHub Release (after the dry run looks right)
+uv run python .claude/skills/release/release.py --tag --push
+```
+
+A schema bump means existing `parsed/` data must be re-parsed — re-run
+`openhouse parse <years>`; the dry run says so when it applies.
+
+## Refreshing a local install
+
+After pulling `main` or cutting a release:
+
+```sh
+openhouse ready                       # re-press the agent skill if SKILL.md changed
+uv tool install --force --editable .  # refresh the CLI and its --version string
+openhouse parse <years>               # re-parse only if SCHEMA_VERSION moved
+```
+
+A bare editable install already runs current code; the reinstall is mainly to
+refresh the cached `--version`. The data directory defaults to `~/.openhouse`
+(override with `--data-dir` or `OPENHOUSE_DATA_DIR`).
+
 Design contract: [SPEC.md](./SPEC.md). License: [MIT](./LICENSE.txt).
