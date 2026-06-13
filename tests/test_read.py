@@ -109,6 +109,64 @@ def test_member_matches_raw_name(capsys):
     assert {f["doc_id"] for f in out} == {"20100002"}
 
 
+# --- bioguide exact match (precise, no substring fuzzing) -------------------
+
+
+def test_filings_bioguide_exact_match(capsys):
+    # --bioguide is exact on the verified bioguide_id field: A000001 → Anders only.
+    run(["filings", "2021", "--bioguide", "A000001"])
+    out = json.loads(capsys.readouterr().out)
+    assert {f["doc_id"] for f in out} == {"20100001"}
+
+
+def test_filings_bioguide_is_case_insensitive(capsys):
+    run(["filings", "2021", "--bioguide", "a000001"])
+    out = json.loads(capsys.readouterr().out)
+    assert {f["doc_id"] for f in out} == {"20100001"}
+
+
+def test_filings_bioguide_no_substring_fuzzing(capsys):
+    # A substring/prefix of a real id must NOT match (exact-only, unlike --member).
+    run(["filings", "2021", "--bioguide", "A0000"])
+    out = json.loads(capsys.readouterr().out)
+    assert out == []
+
+
+def test_filings_bioguide_unmatched_id_returns_nothing(capsys):
+    # A different, valid-looking id matches no record (no false positives).
+    run(["filings", "2021", "--bioguide", "Z999999"])
+    out = json.loads(capsys.readouterr().out)
+    assert out == []
+
+
+def test_filings_bioguide_and_member_are_anded(capsys):
+    # Both filters passed → AND. A000001 (Anders) with a --member that matches
+    # Anders keeps the record; with one that matches Bell it drops to empty.
+    run(["filings", "2021", "--bioguide", "A000001", "--member", "anders"])
+    out = json.loads(capsys.readouterr().out)
+    assert {f["doc_id"] for f in out} == {"20100001"}
+
+    run(["filings", "2021", "--bioguide", "A000001", "--member", "bell"])
+    out = json.loads(capsys.readouterr().out)
+    assert out == []
+
+
+def test_trades_bioguide_exact_match(capsys):
+    # On trades, --bioguide filters on the filer's bioguide_id. A000001 (Anders)
+    # owns the 4-transaction body in 20100001.
+    run(["trades", "2021", "--bioguide", "A000001"])
+    out = json.loads(capsys.readouterr().out)
+    assert {t["doc_id"] for t in out} == {"20100001"}
+    assert len(out) == 4
+
+
+def test_trades_bioguide_and_member_are_anded(capsys):
+    # AND semantics on trades too: A000001 (Anders) + a --member matching Bell → none.
+    run(["trades", "2021", "--bioguide", "A000001", "--member", "bell"])
+    out = json.loads(capsys.readouterr().out)
+    assert out == []
+
+
 # --- filing <doc_id> -------------------------------------------------------
 
 
@@ -279,7 +337,8 @@ def test_min_amount_treats_exact_value_as_its_own_point():
     def _args(min_amount):
         return Namespace(
             ticker=None, asset=None, owner=None, type=None,
-            since=None, until=None, member=None, min_amount=min_amount,
+            since=None, until=None, member=None, bioguide=None,
+            min_amount=min_amount,
         )
 
     # The exact $894.97 clears 500 but not 1000 (point, not a half-open range).
