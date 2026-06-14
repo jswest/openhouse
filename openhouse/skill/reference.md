@@ -42,9 +42,14 @@ filer_id = lower(state) "." slug(Last) "." slug(first_token(First)) ["." slug(Su
 `slug()` lowercases, strips punctuation/diacritics, collapses whitespace to `-`.
 Only the **first token** of the first name participates; suffix is included when
 present (distinguishes Jr/Sr). Empty state → segment `unk`. Because it is a
-name-string key, `read --member` is substring matching, not identity resolution;
-`parse` emits `identity_warnings` when one `filer_id` may cover two people
-(different districts in a year, or a slug collision by suffix / last name).
+name-string key, `read --member` is substring matching, not identity resolution.
+A filer that matches a House seat in the CC0 reference roster gets a stable
+`bioguide:<id>` instead; an unmatched filer stays `name:`-keyed, and `parse`
+records it in `identity_warnings` with a classified `reason` (`candidate`,
+`no_district`, `unknown_seat`, `ambiguous_seat`, or `suspicious`). Only
+`suspicious` — a seat that IS held by a known rep but whose holder's name didn't
+match the filer — is surfaced per-name on stderr; the rest collapse into a
+one-line per-year summary (`match_summary` in the manifest).
 
 ### Filing bodies
 
@@ -76,9 +81,10 @@ Parse preserves the **raw code** so an unrecognized letter never drops a filing.
 - `pull-manifest.json` (per year, in `raw/<year>/`) — per DocID: URL, HTTP
   status, byte size, sha256, fetched-at.
 - `parse-manifest.json` (per year, in `parsed/<year>/`) — counts by filing type,
-  `efiled` vs `scanned` vs `missing`, ok vs error, `identity_warnings`, and the
-  **integer schema generation** it was produced at. If your installed openhouse
-  reports a newer generation, re-run `parse`.
+  `efiled` vs `scanned` vs `missing`, ok vs error, `identity_warnings` (each with
+  its `reason`), a `match_summary` (matched / unmatched-by-reason / `suspicious`
+  filer_ids), and the **integer schema generation** it was produced at. If your
+  installed openhouse reports a newer generation, re-run `parse`.
 - `unparsed-manifest.json` — every not-fully-parsed filing with `doc_id`,
   `filer_id`, and a `reason` (`scanned`, `missing`, `extract_failed`,
   `unknown_type`, `validation_error`) — the OCR / follow-up backlog.

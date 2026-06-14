@@ -58,4 +58,30 @@ def test_missing_reference_files_yield_empty_index(tmp_path):
     # No reference cached → empty index, matches nothing (the join is optional).
     idx = load_legislator_index(tmp_path)
     assert idx.by_seat == {}
+    assert idx.by_district == {}
     assert idx.match(last="Allen", state="GA", district=12) is None
+
+
+# --- GH-0122: the occupancy half (by_district / classify_seat) -------------
+
+
+def test_seat_holders_lists_every_rep_on_record(tmp_path):
+    idx = load_legislator_index(_seed(tmp_path))
+    assert idx.seat_holders("GA", 12) == (("Allen", "A000372"),)
+    # An ambiguous seat keeps BOTH holders (occupancy ≠ identity).
+    assert sorted(idx.seat_holders("TX", 5)) == [("Smith", "S000001"), ("Smith", "S000002")]
+    # Unknown / seatless → empty, never an error.
+    assert idx.seat_holders("WY", 1) == ()
+    assert idx.seat_holders(None, None) == ()
+
+
+def test_classify_seat_distinguishes_suspicious_from_expected(tmp_path):
+    idx = load_legislator_index(_seed(tmp_path))
+    # Seat held by Allen but the filer's name didn't match → the actionable signal.
+    assert idx.classify_seat(last="Allenn", state="GA", district=12) == "suspicious"
+    # Exact seat key nulled by two Smiths → ambiguous, not suspicious.
+    assert idx.classify_seat(last="Smith", state="TX", district=5) == "ambiguous_seat"
+    # A valid seat no rep on record holds → unknown_seat (honest, not suspicious).
+    assert idx.classify_seat(last="Nobody", state="WY", district=1) == "unknown_seat"
+    # No seat key possible.
+    assert idx.classify_seat(last="Doe", state=None, district=None) == "no_district"

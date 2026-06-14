@@ -499,13 +499,34 @@ A `name:` key is a **bounded, unverified name-string claim**, not an identity:
 two different people can share one. The middle `fec:` tier was considered and
 **rejected** as scope creep — the ladder is bioguide-or-name, nothing between.
 
-**Identity warning (in `parse`):** the actionable signal is *unmatched* identity.
-`parse` emits one `identity_warnings` entry (and a stderr line) per distinct
-`name:`-keyed `filer_id` — those that matched **no** bioguide — carrying its
-distinct raw names, DocIDs, and districts (`reason: "unmatched_no_bioguide"`), so
-`read --member` users know the match is an unverified name-string claim. A
-`bioguide:`-matched filer is never warned (it is pinned to a real member,
-however many times it filed).
+**Identity report (in `parse`, GH-0122):** the matcher fails for several
+reasons, most of them *expected by design* — so a per-name warning for every
+unmatched filer (the pre-0122 behavior) buried the one case that matters. `parse`
+emits one `identity_warnings` entry per distinct `name:`-keyed `filer_id` (those
+that matched **no** bioguide), carrying its distinct raw names, DocIDs, districts,
+and a classified `reason`:
+
+- `candidate` — a `FilingType C` report (a challenger must not be pinned to the
+  incumbent — §6.2); demoted by design, expected.
+- `no_district` — no `StateDst`, so no seat key was even possible.
+- `unknown_seat` — a valid seat no rep in the reference roster ever held (a
+  delegate/territory we don't index, a new district, or a data gap).
+- `ambiguous_seat` — the exact seat key is on record but nulled (two bioguides
+  share it; we declined to guess).
+- `suspicious` — the seat **is** occupied by a known rep, but this filer's last
+  name didn't match it: a likely name variant/typo or roster gap. The one
+  actionable bucket. Its entry also carries the occupied `seats[]` and their
+  roster `holders` (`{bioguide, last}`).
+
+To stderr `parse` prints **two tiers**: one collapsed summary line per year
+(`<year>: identity — N matched, M unmatched (… per reason)`) plus a per-name
+`SUSPICIOUS` line for the `suspicious` filers **only**. A `bioguide:`-matched
+filer is never listed (pinned to a real member, however many times it filed).
+
+The classification needs no fuzzy matching — only an occupancy index
+(`(state, district) → holders`) beside the exact seat join (§6.2), answering "is
+anyone on record for this seat?". The exact join is unchanged (still no false
+positives).
 
 ### 6.3 Bodies
 
@@ -620,8 +641,14 @@ being shadowed; it does not auto-migrate or read from `./data`.
 - `pull-manifest.json` — per DocID: URL, HTTP status, byte size, sha256, fetched-at
   (timestamp injected by the tool, since scripts have no clock — see §9).
 - `parse-manifest.json` — counts by filing type, `efiled` vs `scanned` vs `missing`,
-  ok vs error, `identity_warnings` (§6.2), and the schema version used (the integer
-  parsed-schema generation — the minor of `v0.<gen>.<patch>`; see GH-0037).
+  ok vs error, `identity_warnings` (§6.2 — the complete per-filer record, each with
+  its classified `reason`), a `match_summary` (GH-0122: identity-level
+  `matched` / `unmatched` / `by_reason` breakdown / `suspicious` filer_id list — the
+  full seat detail stays on the `identity_warnings` entries, not duplicated here),
+  and the schema version used (the integer parsed-schema generation — the minor of
+  `v0.<gen>.<patch>`; see GH-0037). `match_summary` is manifest-only diagnostics
+  (`read` doesn't consume it), so adding it did **not** bump the schema version —
+  `filings.json` records are byte-identical.
 - `unparsed-manifest.json` — every filing not fully parsed, with `doc_id`,
   `filer_id` (so a no-DocID row stays joinable), and a `reason`
   (`scanned`, `missing`, `extract_failed`, `unknown_type`, `validation_error`,

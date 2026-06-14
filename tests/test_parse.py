@@ -134,9 +134,12 @@ def test_unmatched_filer_falls_back_to_name_key_and_warns(tmp_path):
     # No StateDst → no seat → no bioguide; last-resort name: key + a warning.
     assert doe.bioguide_id is None
     assert doe.filer_id == "name:unk.doe.maryam"
-    warnings = {w["filer_id"]: w for w in _detect_identity_warnings(records)}
+    warnings = {
+        w["filer_id"]: w for w in _detect_identity_warnings(records, _fixture_legislators(tmp_path))
+    }
     assert "name:unk.doe.maryam" in warnings
-    assert warnings["name:unk.doe.maryam"]["reason"] == "unmatched_no_bioguide"
+    # No StateDst → no seat key was even possible → no_district (GH-0122).
+    assert warnings["name:unk.doe.maryam"]["reason"] == "no_district"
 
 
 def test_matched_filer_never_warns(tmp_path):
@@ -201,6 +204,95 @@ def test_no_reference_index_keeps_everyone_name_keyed():
     assert "name:nc.adams.alma" in warned
 
 
+# --- GH-0122: suspicious vs expected non-matches --------------------------
+
+
+def test_suspicious_when_seat_occupied_but_name_mismatched(tmp_path):
+    # GA-12 is held by Allen (A000372). A filer at GA-12 whose last name is a
+    # variant/typo ("Allenn") matches no seat key, but the seat IS on record —
+    # the actionable "we likely missed a real member" signal (GH-0122).
+    legislators = _fixture_legislators(tmp_path)
+    xml = (
+        "<FinancialDisclosure><Member>"
+        "<Last>Allenn</Last><First>Rick</First><Suffix></Suffix>"
+        "<FilingType>O</FilingType><StateDst>GA12</StateDst>"
+        "<DocID>6001</DocID></Member></FinancialDisclosure>"
+    )
+    path = tmp_path / "s.xml"
+    path.write_text(xml)
+    records = build_filing_records(path, 2024, legislators)
+    assert records[0].bioguide_id is None
+    warnings = {
+        w["filer_id"]: w for w in _detect_identity_warnings(records, legislators)
+    }
+    w = warnings["name:ga.allenn.rick"]
+    assert w["reason"] == "suspicious"
+    # Carries the occupied seat + its roster holder so an operator can eyeball it.
+    assert w["seats"] == [
+        {
+            "state": "GA",
+            "district": 12,
+            "holders": [{"bioguide": "A000372", "last": "Allen"}],
+        }
+    ]
+
+
+def test_unmatched_reasons_classify_each_bucket(tmp_path):
+    # One filer per non-suspicious bucket, all unmatched, classified distinctly.
+    legislators = _fixture_legislators(tmp_path)
+    member = (
+        "<Member><Last>{last}</Last><First>{first}</First><Suffix></Suffix>"
+        "<FilingType>{t}</FilingType><StateDst>{sd}</StateDst><DocID>{d}</DocID></Member>"
+    )
+    xml = (
+        "<FinancialDisclosure>"
+        # candidate at an occupied seat → expected (candidate), never suspicious.
+        + member.format(last="Allen", first="Rick", t="C", sd="GA12", d="7001")
+        # two John Smiths share TX-5 → the seat key is nulled → ambiguous_seat.
+        + member.format(last="Smith", first="John", t="O", sd="TX05", d="7002")
+        # a seat no fixture rep holds → unknown_seat.
+        + member.format(last="Nobody", first="Nora", t="O", sd="WY01", d="7003")
+        + "</FinancialDisclosure>"
+    )
+    path = tmp_path / "r.xml"
+    path.write_text(xml)
+    records = build_filing_records(path, 2024, legislators)
+    reasons = {w["filer_id"]: w["reason"] for w in _detect_identity_warnings(records, legislators)}
+    assert reasons["name:ga.allen.rick"] == "candidate"
+    assert reasons["name:tx.smith.john"] == "ambiguous_seat"
+    assert reasons["name:wy.nobody.nora"] == "unknown_seat"
+    # None of these expected non-matches carry a seats detail (only suspicious does).
+    assert all("seats" not in w for w in _detect_identity_warnings(records, legislators))
+
+
+def test_identity_report_warns_only_on_suspicious(tmp_path, capsys):
+    # End-to-end: a suspicious filer (GA-12, name variant) alongside an expected
+    # one (no district). The summary line tallies both; only the suspicious one is
+    # named per-line on stderr (GH-0122).
+    _seed_reference(tmp_path)
+    xml = (
+        "<FinancialDisclosure>"
+        "<Member><Last>Allenn</Last><First>Rick</First><Suffix></Suffix>"
+        "<FilingType>O</FilingType><StateDst>GA12</StateDst><DocID>8001</DocID></Member>"
+        "<Member><Last>Doe</Last><First>Maryam</First><Suffix></Suffix>"
+        "<FilingType>O</FilingType><StateDst></StateDst><DocID>8002</DocID></Member>"
+        "</FinancialDisclosure>"
+    )
+    raw = tmp_path / "raw" / "2024"  # no PDFs → both filings classify missing
+    raw.mkdir(parents=True, exist_ok=True)
+    (raw / "2024FD.xml").write_text(xml)
+    parse_year(2024, data_dir=tmp_path, fetched_at=FETCHED_AT)
+    err = capsys.readouterr().err
+    # One collapsed summary line carrying the per-reason breakdown.
+    assert "2024: identity — 0 matched, 2 unmatched" in err
+    assert "1 suspicious" in err
+    # The suspicious filer is named; the expected (no_district) one is not.
+    assert "SUSPICIOUS identity" in err
+    assert "name:ga.allenn.rick" in err
+    assert "GA-12" in err and "Allen (A000372)" in err
+    assert "name:unk.doe.maryam" not in err
+
+
 # --- parse_year / parse end-to-end ----------------------------------------
 
 
@@ -228,18 +320,31 @@ def test_parse_year_writes_filings_and_manifest(tmp_path):
     assert manifest["counts"]["by_filing_type"]["X"] == 1
     assert manifest["counts"]["by_filing_type"]["W"] == 1
     # No legislators reference seeded in this tmp data_dir → every filer is
-    # name-keyed and warned as "matched no bioguide". The distinct name keys are
-    # the four people in the fixture (Adams files 3x but shares one key).
-    warned = {w["filer_id"] for w in manifest["identity_warnings"]}
-    assert warned == {
+    # name-keyed. The distinct name keys are the four people in the fixture (Adams
+    # files 3x but shares one key).
+    by_filer = {w["filer_id"]: w for w in manifest["identity_warnings"]}
+    assert set(by_filer) == {
         "name:nc.adams.alma",
         "name:tx.smith.john",
         "name:fl.jones.robert",
         "name:unk.doe.maryam",
     }
-    assert all(
-        w["reason"] == "unmatched_no_bioguide" for w in manifest["identity_warnings"]
-    )
+    # With no reference index loaded, a seatless filer is no_district; a real seat
+    # reads as unknown_seat (no known holder), never suspicious (GH-0122).
+    assert by_filer["name:unk.doe.maryam"]["reason"] == "no_district"
+    assert by_filer["name:nc.adams.alma"]["reason"] == "unknown_seat"
+    # match_summary rolls the per-filer reasons up to an identity-level tally.
+    ms = manifest["match_summary"]
+    assert ms["matched"] == 0
+    assert ms["unmatched"] == 4
+    assert ms["by_reason"] == {
+        "candidate": 0,
+        "no_district": 1,
+        "unknown_seat": 3,
+        "ambiguous_seat": 0,
+        "suspicious": 0,
+    }
+    assert ms["suspicious"] == []
 
 
 def test_parse_year_is_deterministic(tmp_path):
