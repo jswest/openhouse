@@ -85,8 +85,9 @@ Parse preserves the **raw code** so an unrecognized letter never drops a filing.
 
 ## Query recipes
 
-All examples assume `--data-dir ./data`. Pipe stdout to `jq`; watch stderr for
-the residual line.
+Examples omit `--data-dir`, so they use the default store `~/.openhouse`
+(override with `--data-dir` or `$OPENHOUSE_DATA_DIR`). Pipe stdout to `jq`;
+watch stderr for the residual line.
 
 **Every PTR a member filed in a year:**
 ```

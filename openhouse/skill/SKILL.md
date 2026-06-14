@@ -106,7 +106,7 @@ the residual before trusting a count.**
 
 ## Data layout
 
-`--data-dir` defaults to `./data`:
+`--data-dir` defaults to `~/.openhouse` (precedence: `--data-dir`, then `$OPENHOUSE_DATA_DIR`, then `~/.openhouse`):
 
 ```
 <data-dir>/
