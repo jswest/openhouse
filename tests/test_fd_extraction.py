@@ -494,6 +494,34 @@ def test_schedule_b_partial_sale_marker_survives(monkeypatch):
     assert b[0]["transaction_type"] == "S(partial)"
 
 
+def test_schedule_b_transposed_year_date_is_flagged_not_accepted(monkeypatch):
+    # GH-0113 on Schedule B: a transposed-digit year (``2202``) in the Date column
+    # is rejected by the sanity range — structured ``transaction_date`` None, raw
+    # string preserved on ``transaction_date_raw`` — while the rest of the row (the
+    # type, amount, asset) is intact. ``max_year`` is the entry year + 1, threaded
+    # down; a fixed offline value here, never wall-clock.
+    page = "\n".join(
+        [
+            "ScheDule B: tranSactionS",
+            "asset owner Date tx. amount cap.",
+            "UBS Account (XYZ) [ST] ⇒ SP 09/19/2202 S $1,001 - $15,000 gfedc",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"), max_year=2026)
+    b = body.schedules["B"]
+    assert len(b) == 1
+    # NOT emitted as a valid year-2202 date.
+    assert b[0]["transaction_date"] is None
+    # Raw string preserved as the per-row anomaly flag.
+    assert b[0]["transaction_date_raw"] == "09/19/2202"
+    # The rest of the row is intact — never dropped over one bad date.
+    assert b[0]["transaction_type"] == "S"
+    assert b[0]["owner"] == "SP"
+    assert b[0]["amount_range"]["low"] == 1001
+
+
 def test_schedule_d_pre_anchor_row_is_not_dropped(monkeypatch):
     # A Schedule D liability row whose "Date incurred" is blank does NOT match the
     # date item-start anchor. Before the fix it (and its wrapped amount line) were
@@ -948,7 +976,7 @@ def test_parse_extension_writes_no_fd_body(tmp_path, monkeypatch):
     # classify → efiled; extract_fd_schedules → NotAnFdBody (no headings).
     monkeypatch.setattr("openhouse.parse.classify", lambda _p: "efiled")
 
-    def _raise_not_fd(_p):
+    def _raise_not_fd(_p, **_kw):
         raise NotAnFdBody("no headings")
 
     monkeypatch.setattr("openhouse.parse.extract_fd_schedules", _raise_not_fd)
@@ -982,7 +1010,7 @@ def test_parse_annual_fd_with_lost_headings_is_extract_failed(tmp_path, monkeypa
 
     monkeypatch.setattr("openhouse.parse.classify", lambda _p: "efiled")
 
-    def _raise_not_fd(_p):
+    def _raise_not_fd(_p, **_kw):
         raise NotAnFdBody("headings lost")
 
     monkeypatch.setattr("openhouse.parse.extract_fd_schedules", _raise_not_fd)

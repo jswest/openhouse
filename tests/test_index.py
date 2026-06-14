@@ -61,3 +61,22 @@ def test_index_target_family_property():
     assert IndexTarget("x", "P", 2024).family == "ptr"
     assert IndexTarget("x", "O", 2024).family == "fd"
     assert IndexTarget("x", "", 2024).family == "fd"
+
+
+def test_filing_date_sanity_range_rejects_impossible_year():
+    # GH-0113: a FilingDate with a transposed-digit year parses via strptime but is
+    # an extraction artifact, not a real date — the sanity range degrades it to
+    # None rather than emitting a valid year-3031 date. ``max_year`` is the
+    # entry-year-relative bound (here a fixed offline value, never wall-clock).
+    from datetime import date
+
+    from openhouse.index import _parse_filing_date
+
+    # In range → kept.
+    assert _parse_filing_date("4/29/2025", max_year=2026) == date(2025, 4, 29)
+    # Out of range (transposed year) → None, never a valid year-3031 date.
+    assert _parse_filing_date("4/30/3031", max_year=2026) is None
+    # Below the 1990 floor → None.
+    assert _parse_filing_date("1/1/1980", max_year=2026) is None
+    # Empty stays None.
+    assert _parse_filing_date("", max_year=2026) is None
