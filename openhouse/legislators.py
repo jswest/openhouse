@@ -64,6 +64,11 @@ def _seat_key(last: str, state: str, district: int) -> tuple[str, str, int]:
     return (_norm_name(last), (state or "").upper(), district)
 
 
+def _district_key(state: str, district: int) -> tuple[str, int]:
+    """The seat-occupancy key: (upper state, district) — name dropped."""
+    return ((state or "").upper(), district)
+
+
 @dataclass(frozen=True)
 class LegislatorIndex:
     """An offline (seat → bioguide) index built from the CC0 bulk files.
@@ -71,9 +76,19 @@ class LegislatorIndex:
     ``by_seat`` maps a ``(norm_last, state, district)`` House-seat key to a
     bioguide id, or to ``None`` when two+ distinct bioguides share that seat key
     (an ambiguous key matches nothing — we never guess between two people).
+
+    ``by_district`` drops the name from the key: ``(state, district)`` →
+    ``((last, bioguide), …)`` for every rep who has held that seat. It answers a
+    different question than ``by_seat`` — "is *anyone* on record for this seat?" —
+    which is what distinguishes an *expected* non-match (a seat no rep we know of
+    ever held) from a *suspicious* one (a seat that is occupied, but whose holder's
+    name didn't match the filer — a likely name variant or typo). It is the
+    occupied-seat half of GH-0122's two-tier identity report; it never feeds
+    ``match`` (which stays exact on ``by_seat`` — no false positives).
     """
 
     by_seat: dict[tuple[str, str, int], Optional[str]]
+    by_district: dict[tuple[str, int], tuple[tuple[str, str], ...]]
 
     def match(self, *, last: str, state: Optional[str], district: Optional[int]) -> Optional[str]:
         """Return the ``bioguide`` for this filer's House seat, or ``None``.
@@ -86,15 +101,57 @@ class LegislatorIndex:
             return None
         return self.by_seat.get(_seat_key(last, state, district))
 
+    def seat_holders(
+        self, state: Optional[str], district: Optional[int]
+    ) -> tuple[tuple[str, str], ...]:
+        """``((last, bioguide), …)`` for every rep on record for this seat.
 
-def _index_records(records: list[dict], by_seat: dict) -> None:
-    """Fold one bulk file's legislator records into the seat index (in place).
+        Empty when the seat is unknown or either coordinate is missing. Used to
+        annotate a *suspicious* unmatched filer with who actually holds the seat it
+        names, so the operator can eyeball the likely variant/typo.
+        """
+        if state is None or district is None:
+            return ()
+        return self.by_district.get(_district_key(state, district), ())
+
+    def classify_seat(
+        self, *, last: str, state: Optional[str], district: Optional[int]
+    ) -> str:
+        """Why didn't an **unmatched** filer's seat match? (GH-0122.)
+
+        Called only for a filer that already failed ``match`` and is *not* a
+        candidate report (candidates are demoted by design — see
+        ``index.build_filing_records``). Returns one of:
+
+        - ``"no_district"`` — no seat key was even possible (missing state/district).
+        - ``"ambiguous_seat"`` — the exact seat key is on record but nulled (two
+          bioguides share it); we declined to guess between them.
+        - ``"suspicious"`` — the seat *is* occupied by a known rep, but this filer's
+          last name didn't match it. The actionable signal: a likely name variant,
+          typo, or roster gap worth a human's eye.
+        - ``"unknown_seat"`` — a valid seat that no rep in our roster ever held (a
+          delegate/territory we don't index, a brand-new district, or a data gap).
+        """
+        if state is None or district is None:
+            return "no_district"
+        key = _seat_key(last, state, district)
+        if key in self.by_seat and self.by_seat[key] is None:
+            return "ambiguous_seat"
+        if _district_key(state, district) in self.by_district:
+            return "suspicious"
+        return "unknown_seat"
+
+
+def _index_records(records: list[dict], by_seat: dict, by_district: dict) -> None:
+    """Fold one bulk file's legislator records into both seat indexes (in place).
 
     Each legislator has ``id.bioguide``, ``name.last`` (+ ``name.official_full``),
     and ``terms[]``. Only ``type == "rep"`` terms pin a ``(state, district)``
     House seat; we index every distinct seat a rep has held. A seat key already
-    pointing at a *different* bioguide is marked ambiguous (``None``) so it can
-    never produce a false-positive match.
+    pointing at a *different* bioguide is marked ambiguous (``None``) in
+    ``by_seat`` so it can never produce a false-positive match; the same seat is
+    also folded into ``by_district`` (keyed on (state, district) only) so the
+    occupancy half keeps every holder regardless of name (GH-0122).
     """
     for rec in records:
         bioguide = (rec.get("id") or {}).get("bioguide")
@@ -119,6 +176,14 @@ def _index_records(records: list[dict], by_seat: dict) -> None:
                 # Two distinct people share this (last, state, district) key —
                 # mark it ambiguous so the join never picks one (no false positive).
                 by_seat[key] = None
+            # Occupancy half (GH-0122): record every holder of the *seat* regardless
+            # of name, deduped by bioguide in first-seen order. Unlike by_seat this
+            # keeps both people for an ambiguous seat — it answers "is anyone here?",
+            # not "who exactly?". Original-case ``last`` so the warning reads cleanly.
+            dkey = _district_key(state, int(district))
+            holders = by_district.setdefault(dkey, [])
+            if bioguide not in (b for _, b in holders):
+                holders.append((last, bioguide))
 
 
 def load_legislator_index(data_dir: Path) -> LegislatorIndex:
@@ -131,6 +196,7 @@ def load_legislator_index(data_dir: Path) -> LegislatorIndex:
     Pure + offline + deterministic.
     """
     by_seat: dict[tuple[str, str, int], Optional[str]] = {}
+    by_district: dict[tuple[str, int], list[tuple[str, str]]] = {}
     ref_dir = data_dir / REFERENCE_SUBDIR
     for name in LEGISLATORS_FILES:
         path = ref_dir / name
@@ -152,5 +218,8 @@ def load_legislator_index(data_dir: Path) -> LegislatorIndex:
             )
             continue
         if isinstance(records, list):
-            _index_records(records, by_seat)
-    return LegislatorIndex(by_seat=by_seat)
+            _index_records(records, by_seat, by_district)
+    # Freeze the holder lists to tuples so the index is hashable-shaped and
+    # deterministic (it never mutates after load).
+    frozen_district = {k: tuple(v) for k, v in by_district.items()}
+    return LegislatorIndex(by_seat=by_seat, by_district=frozen_district)
