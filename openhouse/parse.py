@@ -31,6 +31,7 @@ from tqdm import tqdm
 from .index import build_filing_records
 from .legislators import load_legislator_index
 from .pdf import (
+    FALLBACK_MAX_YEAR,
     NotAnFdBody,
     PdfExtractError,
     classify,
@@ -179,6 +180,18 @@ def _write_fd_body(parsed_dir: Path, doc_id: str, fd_body) -> None:
     )
 
 
+def _date_anomaly(body_dicts: list[dict]) -> bool:
+    """True if any extracted row carries a preserved out-of-range date string.
+
+    The per-row anomaly flag (GH-0113) is a set ``*_raw`` date field: the
+    structured date was rejected by the sanity range and the verbatim string kept
+    in its place. One such row makes the whole filing carry a ``date_out_of_range``
+    residual entry — the filing is never dropped, just flagged.
+    """
+    keys = ("date_raw", "notification_date_raw", "transaction_date_raw")
+    return any(row.get(k) for row in body_dicts for k in keys)
+
+
 def _classify_records(
     records: list[FilingMetadata],
     *,
@@ -186,6 +199,7 @@ def _classify_records(
     types: list[str],
     year: int,
     parsed_dir: Path,
+    max_year: int = FALLBACK_MAX_YEAR,
 ) -> list[dict]:
     """Classify each record's on-disk PDF, mutating ``pdf_class``/``parse_status``.
 
@@ -254,10 +268,12 @@ def _classify_records(
                 # headings (an extension cover sheet) is *not* a failure: it
                 # stays efiled/ok with no body.
                 if pdf_class == "efiled" and family == "ptr":
-                    transactions = extract_ptr_transactions(pdf_path)
+                    transactions = extract_ptr_transactions(
+                        pdf_path, max_year=max_year
+                    )
                 elif pdf_class == "efiled" and family == "fd":
                     try:
-                        fd_body = extract_fd_schedules(pdf_path)
+                        fd_body = extract_fd_schedules(pdf_path, max_year=max_year)
                     except NotAnFdBody:
                         # No schedule headings. Benign for a cover-sheet/extension
                         # type (legitimately no body); but on an annual-report type
@@ -281,8 +297,19 @@ def _classify_records(
                 rec.parse_status = "ok"
                 if transactions is not None:
                     _write_ptr_body(parsed_dir, rec.doc_id, transactions)
+                    # An out-of-range date in any row is flagged in place (the row
+                    # keeps its raw string, the structured date is None) — the
+                    # filing is sound otherwise, so it stays ok with a residual
+                    # entry rather than being dropped (GH-0113 / CLAUDE.md).
+                    if _date_anomaly(
+                        [t.model_dump(mode="json") for t in transactions]
+                    ):
+                        unparsed.append(_unparsed_entry(rec, "date_out_of_range"))
                 elif fd_body is not None:
                     _write_fd_body(parsed_dir, rec.doc_id, fd_body)
+                    b_items = fd_body.schedules.get("B", [])
+                    if _date_anomaly(b_items):
+                        unparsed.append(_unparsed_entry(rec, "date_out_of_range"))
                 else:
                     # No body this run for either family (scanned/missing PDF,
                     # bodyless cover sheet, empty outcome) — drop any stale one
@@ -300,7 +327,12 @@ def _classify_records(
 
 
 def parse_year(
-    year: int, *, data_dir: Path, types: Optional[list[str]] = None, fetched_at: str
+    year: int,
+    *,
+    data_dir: Path,
+    types: Optional[list[str]] = None,
+    fetched_at: str,
+    entry_year: int = FALLBACK_MAX_YEAR - 1,
 ) -> Optional[dict]:
     """Parse one year's index into ``parsed/<year>/`` (SPEC §4). Offline.
 
@@ -331,10 +363,16 @@ def parse_year(
         )
         return None
 
+    # Date sanity-range upper bound (GH-0113): the command-entry year + 1, NOT a
+    # wall-clock read (SPEC §9 / CLAUDE.md — one timestamp captured at entry,
+    # threaded down). A disclosure date whose year exceeds it (or falls below
+    # 1990) is an extraction artifact, flagged in place rather than emitted valid.
+    max_year = entry_year + 1
+
     # Offline CC0 congress-legislators join (#16): attach bioguide where the
     # House seat matches; a missing reference cache simply matches nothing.
     legislators = load_legislator_index(data_dir)
-    records = build_filing_records(xml_path, year, legislators)
+    records = build_filing_records(xml_path, year, legislators, max_year=max_year)
 
     by_filing_type: dict[str, int] = defaultdict(int)
     for rec in records:
@@ -348,7 +386,12 @@ def parse_year(
     # pdf_class / parse_status and collecting the unparsed-manifest entries.
     # E-filed PTR bodies are extracted and written here (parsed/<year>/ptr/).
     unparsed = _classify_records(
-        records, data_dir=data_dir, types=types, year=year, parsed_dir=parsed_dir
+        records,
+        data_dir=data_dir,
+        types=types,
+        year=year,
+        parsed_dir=parsed_dir,
+        max_year=max_year,
     )
 
     by_pdf_class: dict[str, int] = defaultdict(int)
@@ -449,6 +492,7 @@ def parse(
     types: list[str],
     strict: bool,
     fetched_at: str,
+    entry_year: int = FALLBACK_MAX_YEAR - 1,
 ) -> int:
     """Run ``openhouse parse`` for ``years`` (SPEC §4). Returns a process exit code.
 
@@ -460,7 +504,9 @@ def parse(
     ``types`` restricts which PDF families are classified (out-of-scope filings
     stay ``pdf_class=None`` but still count toward the total). ``fetched_at`` is
     the single entry-time timestamp threaded into the manifest (SPEC §9: no
-    wall-clock in core logic).
+    wall-clock in core logic); ``entry_year`` is that same timestamp's year,
+    threaded down to bound the date sanity range (GH-0113) — ``entry_year + 1``
+    is the upper bound, again never a fresh wall-clock read.
 
     Emits one compact JSON summary object (the per-year results) to **stdout**
     (machine-composable, CLAUDE.md "JSON to stdout"); progress / warnings go to
@@ -483,7 +529,11 @@ def parse(
     skipped: list[int] = []
     for year in years:
         summary = parse_year(
-            year, data_dir=data_dir, types=types, fetched_at=fetched_at
+            year,
+            data_dir=data_dir,
+            types=types,
+            fetched_at=fetched_at,
+            entry_year=entry_year,
         )
         if summary is None:
             skipped.append(year)

@@ -48,6 +48,20 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 # (``ST``/``sT``/``Cs``/``gS``), so every consumer had to defensively upper() it.
 # The verbatim tag is preserved beside it in a new ``asset_type_raw`` field
 # (raw alongside normalized — CLAUDE.md). Re-parse from ``raw/`` required.
+# Generation 7 also adds a **parse-time date sanity range** (GH-0113): a
+# disclosure date whose year falls outside ``1990 ≤ year ≤ entry_year + 1`` (the
+# upper bound derived from the single command-entry timestamp, never the wall
+# clock in core logic) is an extraction artifact — a transposed-digit year like
+# ``3031`` parses as readily as ``2024``. Such a date is **rejected**, never
+# emitted as a valid ``date``: the structured field is ``None`` and the raw
+# ``M/D/YYYY`` string is preserved in a sibling ``*_raw`` field (``date_raw`` /
+# ``notification_date_raw`` on ``PtrTransaction``, ``transaction_date_raw`` on
+# ``ScheduleBItem``). A set ``*_raw`` is the per-row anomaly flag; ``parse``
+# surfaces it in ``unparsed-manifest.json`` (reason ``date_out_of_range``)
+# without dropping the otherwise-good filing (raw alongside normalized, never a
+# silent gap — CLAUDE.md). ``PtrTransaction.transaction_date`` /
+# ``notification_date`` therefore become ``Optional``. Re-parse from ``raw/``
+# required.
 SCHEMA_VERSION = 7
 
 # ---------------------------------------------------------------------------
@@ -228,7 +242,15 @@ class PtrTransaction(BaseModel):
       (CLAUDE.md). ``None`` exactly when ``asset_type`` is.
     - ``transaction_type`` — ``P`` | ``S`` | ``S(partial)`` | ``E`` (the form
       prints ``S (partial)``; normalized to ``S(partial)``).
-    - ``transaction_date`` / ``notification_date`` — ISO ``YYYY-MM-DD``.
+    - ``transaction_date`` / ``notification_date`` — ISO ``YYYY-MM-DD``, or
+      ``None`` when the date failed the parse-time sanity range (year outside
+      ``1990 … entry_year+1`` — an extraction artifact such as a transposed-digit
+      year). When ``None`` for that reason the raw ``M/D/YYYY`` string is kept in
+      ``date_raw`` / ``notification_date_raw`` (GH-0113); ``parse`` then records
+      the anomaly in ``unparsed-manifest.json`` rather than dropping the filing.
+    - ``date_raw`` / ``notification_date_raw`` — the verbatim out-of-range date
+      string, set **only** when the corresponding structured date was rejected;
+      ``None`` on every sound row.
     - ``amount_range`` — the parsed amount: a ``{low, high, label}`` bucket, or
       an ``{exact, label}`` point when the row discloses a single exact dollar
       value instead of a range (GH-0049).
@@ -248,8 +270,10 @@ class PtrTransaction(BaseModel):
     asset_type: Optional[str] = None
     asset_type_raw: Optional[str] = None
     transaction_type: str
-    transaction_date: date
-    notification_date: date
+    transaction_date: Optional[date] = None
+    date_raw: Optional[str] = None
+    notification_date: Optional[date] = None
+    notification_date_raw: Optional[str] = None
     amount_range: AmountRange
     cap_gains_over_200: Optional[bool] = None
     description: Optional[str] = None
@@ -303,6 +327,9 @@ class ScheduleBItem(BaseModel):
     asset_type: Optional[str] = None
     asset_type_raw: Optional[str] = None
     transaction_date: Optional[date] = None
+    # The verbatim date string, set only when ``transaction_date`` was rejected
+    # by the parse-time sanity range (GH-0113); ``None`` on every sound row.
+    transaction_date_raw: Optional[str] = None
     transaction_type: Optional[str] = None
     amount_range: Optional[AmountRange] = None
     cap_gains_over_200: Optional[bool] = None
