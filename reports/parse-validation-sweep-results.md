@@ -2,19 +2,21 @@
 
 A running, hand-maintained record of what each
 [parse-validation sweep](../docs/parse-validation-sweep.md) found. The per-run
-JSONL/MD artifacts (`reports/inspect-sample-<date>.*`,
-`reports/parse-validation-full-<date>.*`) are git-ignored and regenerable; this
-file is the durable, tracked summary. **Append a new dated section after every
-run** — newest first. Keep each entry brief: scope, verdict roll-up, and the
-distinct *root-cause* issues (not per-example), with novel / known-open /
-regression status and any referenced GH issue.
+artifacts live under a git-ignored `reports/run-<YYYYMMDDHHMM>/` directory
+(regenerable); this file is the durable, tracked summary. **Append a new
+`run-<YYYYMMDDHHMM>` section after every run** — newest first. Keep each entry
+brief: scope, verdict roll-up, and the distinct *root-cause* issues (not
+per-example), with novel / known-open / regression status and any referenced GH
+issue.
 
 ---
 
-## 2026-06-13
+## run-202606130927 (2026-06-13)
 
-First sweep. Calibration batch (10 filings) then a fuller pass (62 filings,
-2020–2024). E-filed PTRs came through clean; e-filed annual FDs (schedule
+First sweep — pre-nomenclature, flat-file artifacts
+(`inspect-sample-2026-06-13.*`, `parse-validation-full-2026-06-13.*`). Run-id
+back-derived from the session's earliest transcript (09:27). Calibration batch
+(10 filings) then a fuller pass (62 filings, 2020–2024). E-filed PTRs came through clean; e-filed annual FDs (schedule
 extraction) were systematically buggy; scanned filings correctly deferred
 (`body: null`, no OCR pre-v1).
 
