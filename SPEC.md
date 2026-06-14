@@ -516,7 +516,8 @@ however many times it filed).
   "owner": "SP",                      // SP | DC | JT | self  (spouse/dependent/joint/self)
   "asset": "Albemarle Corporation",
   "ticker": "ALB",
-  "asset_type": "ST",                 // the bracketed tag, e.g. [ST] stock — preserve raw
+  "asset_type": "ST",                 // bracketed [TYPE] tag, NORMALIZED (uppercased, trimmed)
+  "asset_type_raw": "sT",             // the same tag VERBATIM (Clerk casing drifts: sT/Cs/gS) — #114
   "transaction_type": "P",            // P purchase | S sale | S(partial) | E exchange
   "transaction_date": "2023-12-21",
   "notification_date": "2024-01-08",

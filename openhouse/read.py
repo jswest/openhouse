@@ -638,7 +638,9 @@ def _null_ticker_residual(data_dir: Path, years: list[int], args) -> int:
             for txn in body.get("transactions", []):
                 if txn.get("ticker"):
                     continue
-                if (txn.get("asset_type") or "").upper() not in _TICKERED_ASSET_TYPES:
+                # ``asset_type`` is normalized (uppercased) at parse time since
+                # schema generation 7 (GH-0114), so no defensive upper() here.
+                if (txn.get("asset_type") or "") not in _TICKERED_ASSET_TYPES:
                     continue
                 if not _date_in_range(
                     txn.get("transaction_date"), args.since, args.until
