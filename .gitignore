@@ -40,3 +40,9 @@ node_modules/
 
 # Playwright MCP scratch output (browser console logs + page snapshots)
 .playwright-mcp/
+
+# Parse-validation sweep outputs are bulky and regenerable — ignore them, but
+# keep the hand-maintained per-run results log (brief summaries, see
+# docs/parse-validation-sweep.md).
+reports/*
+!reports/parse-validation-sweep-results.md
