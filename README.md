@@ -231,18 +231,24 @@ A schema bump means existing `parsed/` data must be re-parsed — re-run
 
 ## Refreshing a local install
 
-After pulling `main` or cutting a release:
+Rebuild the installed CLI and re-press the agent skill:
 
 ```sh
-openhouse ready                       # re-press the agent skill if SKILL.md changed
-uv tool install --force --no-cache --editable .  # rebuild the CLI + refresh --version
-openhouse parse <years>               # re-parse only if SCHEMA_VERSION moved
+# after cutting a release (tag exists) → clean 0.X.Y on --version
+uv tool install --force .
+
+# tracking day-to-day main (past the last tag) → 0.<schema>.<patch+1>.devN
+uv tool install --force --no-cache --editable .
+
+openhouse --version          # confirm the version moved
+openhouse ready              # re-press the skill if SKILL.md changed
+openhouse parse <years>     # re-parse only if SCHEMA_VERSION moved
 ```
 
-A bare editable install already runs current code; the reinstall (with
-`--no-cache`, since uv caches the build and a new tag changes no source file)
-just refreshes `--version` — which reads `0.<schema>.<patch+1>.devN` once `main`
-has moved past a tag. The data directory defaults to `~/.openhouse` (override
-with `--data-dir` or `OPENHOUSE_DATA_DIR`).
+Install **after** tagging — the version comes from the git tag via `hatch-vcs`,
+so a build off an untagged `HEAD` reports `.devN`. `ready --check` reports
+status without writing and exits non-zero on `stale`/`hand-edited`/`absent` —
+a status code, not an error. A *hand-edited* verdict means the installed skill
+diverged from `openhouse/skill/`; diff before letting `ready` overwrite.
 
 Design contract: [SPEC.md](./SPEC.md). License: [MIT](./LICENSE.txt).
