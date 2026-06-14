@@ -380,6 +380,12 @@ def _classify_records(
     in the §2.3 table) is recorded in the unparsed manifest with reason
     ``unknown_type`` — the raw code is preserved on the record, never dropped.
 
+    Two reasons coexist with a fully-written, ``parse_status="ok"`` body — the
+    filing is sound but flagged in place, never dropped: ``date_out_of_range`` (a
+    row's out-of-range date kept as a raw string — GH-0113) and
+    ``schedule_incomplete`` (a Schedule A/B row that fused two assets a wrapped
+    ``[TYPE]`` / ⇒ merge could not separate — GH-0100).
+
     Returns the unparsed-manifest entries (``doc_id`` + ``reason``) in record
     order (deterministic).
     """
@@ -458,6 +464,13 @@ def _classify_records(
                     b_items = fd_body.schedules.get("B", [])
                     if _date_anomaly(b_items):
                         unparsed.append(_unparsed_entry(rec, "date_out_of_range"))
+                    # A Schedule A/B row that fused two assets (a wrapped-[TYPE] /
+                    # ⇒ merge no anchor could separate — GH-0100) keeps the body
+                    # and parse_status ok, but flags the schedule as incomplete so
+                    # the buried row is loud, not a silent drop (like the date
+                    # residual above).
+                    if fd_body.incomplete_schedules:
+                        unparsed.append(_unparsed_entry(rec, "schedule_incomplete"))
                 else:
                     # No body this run for either family (scanned/missing PDF,
                     # bodyless cover sheet, empty outcome) — drop any stale one
@@ -593,11 +606,12 @@ def parse_year(
     )
 
     # Every filing not fully usable as an e-filed body, each with a reason (SPEC
-    # §6.5). Two e-filed paths can appear here: an efiled PTR whose body extraction
-    # failed (``extract_failed``), and a filing with a written body but an
-    # out-of-range date flagged in place (``date_out_of_range``). The latter keeps
-    # ``parse_status: ok`` and a body, so it is the one reason that coexists with a
-    # fully parsed filing (GH-0113); otherwise e-filed filings are not listed.
+    # §6.5). An efiled PTR/FD whose body extraction failed appears as
+    # ``extract_failed``; otherwise a written body can still carry a flagged-in-
+    # place residual that keeps ``parse_status: ok`` and the body — an out-of-range
+    # date (``date_out_of_range``, GH-0113) or an un-split Schedule A/B merge
+    # (``schedule_incomplete``, GH-0100). Those two are the reasons that coexist
+    # with a fully parsed filing; otherwise e-filed filings are not listed.
     # Order is deterministic (record order).
     unparsed_manifest = {
         "schema_version": SCHEMA_VERSION,

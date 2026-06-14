@@ -168,6 +168,161 @@ def test_every_schedule_a_item_has_raw_text():
         assert item["raw_text"].strip(), "every line item carries verbatim raw_text"
 
 
+# --- GH-0100: wrapped-[TYPE] / ⇒-subholding rows are not silently dropped ------
+# Each fixture mirrors a real drop from the 2026-06-13 parse-validation sweep,
+# glyphless as on the Candidate/New-Filer forms where the row's value line carries
+# no checkbox to anchor on.
+
+
+def test_schedule_a_wrapped_type_tag_row_anchors_separately(monkeypatch):
+    # The asset name + [TYPE] tag wraps so the value prints on the first physical
+    # line and the tag (``[GS]``) on the next; the row must anchor on its own value
+    # low, not fold into the row above (Pascrell 10046898 PASSAIC bond — a #70
+    # regression). Before the fix the bond vanished and its $1,001-$15,000 was
+    # mis-captured as the preceding row's income.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "Morgan Stanley [BA] JT $250,001 - Interest $2,501 -",
+            "$500,000 $5,000",
+            "Passaic County Authority Lease JT $1,001 - $15,000 Interest $201 - $1,000",
+            "Refunding Bond [GS]",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    a = extract_fd_schedules(Path("synthetic.pdf")).schedules["A"]
+    assert len(a) == 2
+    ms = next(i for i in a if i["asset"].startswith("Morgan Stanley"))
+    bond = next(i for i in a if "Refunding Bond" in i["asset"])
+    # the bond is its own structured row now, with its own value and type
+    assert bond["asset_type"] == "GS"
+    assert bond["owner"] == "JT"
+    assert bond["value_of_asset"] == {
+        "low": 1001,
+        "high": 15000,
+        "label": "$1,001 - $15,000",
+    }
+    # and its value is NOT mis-captured as Morgan Stanley's income
+    assert ms["value_of_asset"] == {
+        "low": 250001,
+        "high": 500000,
+        "label": "$250,001 - $500,000",
+    }
+    assert ms["income_amount"] == {
+        "low": 2501,
+        "high": 5000,
+        "label": "$2,501 - $5,000",
+    }
+
+
+def test_schedule_a_none_value_wrapped_tag_row_anchors_via_lookahead(monkeypatch):
+    # A None-value row whose [TYPE] tag wrapped carries no ``$lo -`` value low to
+    # anchor on; the one-line lookahead at the wrapped tag-tail (``[MF]``) recovers
+    # it (Harris 10054295's 403b holdings). The row is no longer dropped — its
+    # verbatim text and type survive.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "403b American Century Global Gold [MF] None Tax-Deferred",
+            "403b American Century International Opportunities None Tax-Deferred",
+            "[MF]",
+            "403b CREF Inflation Linked Bond [MF] $100,001 - Tax-Deferred",
+            "$250,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    a = extract_fd_schedules(Path("synthetic.pdf")).schedules["A"]
+    assert len(a) == 3
+    intl = next(i for i in a if "International Opportunities" in i["asset"])
+    assert intl["asset_type"] == "MF"
+    assert "International Opportunities" in intl["asset"]
+    assert "[MF]" in intl["raw_text"]
+
+
+def test_schedule_a_buried_subholding_cluster_reconstructed(monkeypatch):
+    # A ⇒ subholding cluster whose value prints on the umbrella-name line, the
+    # arrow on the next, the subholding's own name on the third, and its [TYPE] tag
+    # on the fourth (Pou 10068928's deferred-comp plan). Each subholding becomes
+    # its own row anchored on its value low — and the pure-name line must NOT split
+    # off on its own (it carries no value column), so the count is exactly two.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "New Jersey State Employees Deferred $15,001 - $50,000 Tax-Deferred",
+            "Compensation Plan ⇒",
+            "BNY Mellon Small Cap Value Fund Class I (STSVX)",
+            "[MF]",
+            "New Jersey State Employees Deferred $1,001 - $15,000 Tax-Deferred",
+            "Compensation Plan ⇒",
+            "DCP Equity Fund [OT]",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    a = extract_fd_schedules(Path("synthetic.pdf")).schedules["A"]
+    assert len(a) == 2
+    bny = next(i for i in a if "BNY Mellon" in i["asset"])
+    assert bny["asset_type"] == "MF"
+    assert bny["value_of_asset"] == {
+        "low": 15001,
+        "high": 50000,
+        "label": "$15,001 - $50,000",
+    }
+    dcp = next(i for i in a if "DCP Equity" in i["asset"])
+    assert dcp["asset_type"] == "OT"
+    assert dcp["value_of_asset"] == {
+        "low": 1001,
+        "high": 15000,
+        "label": "$1,001 - $15,000",
+    }
+
+
+def test_schedule_a_unsplit_merge_flags_residual(monkeypatch):
+    # When two assets fuse into one anchored row that no signal can split (≥2 real
+    # [TYPE] codes in one row), the schedule is flagged ``incomplete_schedules`` so
+    # ``parse`` emits a ``schedule_incomplete`` residual — the buried asset is loud
+    # (its raw_text is intact), never a silent drop.
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "Brokerage Account ⇒ $1,001 - $15,000 None",
+            "First Buried Fund [MF]",
+            "Second Buried Fund [ST]",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    assert body.incomplete_schedules == ["A"]
+    raw = " ".join(i["raw_text"] for i in body.schedules["A"])
+    assert "First Buried Fund" in raw and "Second Buried Fund" in raw
+    assert "[MF]" in raw and "[ST]" in raw
+
+
+def test_schedule_a_ticker_in_name_is_not_a_merge_residual(monkeypatch):
+    # A real second bracket that is a ticker (``[VOO]``) or footnote, not a type
+    # code, must NOT trip the merge residual — only a second *real* asset-type code
+    # means a fused row (GH-0100).
+    page = "\n".join(
+        [
+            'ScheDule a: aSSetS anD "unearneD" income',
+            "asset owner value of asset income income tx. >",
+            "Vanguard S&P 500 [VOO] [MF] $1,001 - $15,000 Dividends $1 - $200",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    assert body.incomplete_schedules == []
+    assert len(body.schedules["A"]) == 1
+
+
 # --- Schedule C: earned income, structured ------------------------------------
 
 
