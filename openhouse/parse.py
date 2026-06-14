@@ -29,7 +29,7 @@ from typing import Optional
 from tqdm import tqdm
 
 from .index import build_filing_records
-from .legislators import load_legislator_index
+from .legislators import LegislatorIndex, load_legislator_index
 from .pdf import (
     FALLBACK_MAX_YEAR,
     NotAnFdBody,
@@ -69,20 +69,104 @@ class ParseError(Exception):
     """A parse failed in a way the user must see (printed to stderr, non-zero exit)."""
 
 
-def _detect_identity_warnings(records: list[FilingMetadata]) -> list[dict]:
+# Reason buckets for an unmatched filer (GH-0122). The matcher fails for several
+# reasons, and most of them are *expected* — only ``suspicious`` (a seat that IS
+# held by a known rep, but whose holder's name didn't match the filer) is an
+# actionable likely-missed-link. The two orderings differ on purpose:
+#   * priority — when a single filer's filings classify differently, surface the
+#     most actionable; ``suspicious`` always wins so it can never hide behind a
+#     candidate filing by the same name key.
+#   * display — fixed left-to-right order for the summary line, expected-first so
+#     the eye lands on the ``suspicious`` punchline at the end.
+_REASON_PRIORITY = (
+    "suspicious",
+    "ambiguous_seat",
+    "unknown_seat",
+    "candidate",
+    "no_district",
+)
+_REASON_ORDER = (
+    "candidate",
+    "no_district",
+    "unknown_seat",
+    "ambiguous_seat",
+    "suspicious",
+)
+
+
+def _classify_unmatched(
+    rec: FilingMetadata, legislators: Optional[LegislatorIndex]
+) -> str:
+    """Why did *this* filing fail to match a bioguide? One of ``_REASON_ORDER``.
+
+    Candidate reports (``FilingType C``) are demoted by design (a challenger must
+    not be pinned to the incumbent — see ``index.build_filing_records``), so they
+    are expected non-matches regardless of seat. Everything else defers to the seat
+    classification; with no reference index loaded no seat is "occupied", so a
+    real seat reads as ``unknown_seat`` (honest — we know of no holder).
+    """
+    if rec.filing_type.code == "C":
+        return "candidate"
+    sd = rec.state_district
+    if sd is None:
+        return "no_district"
+    if legislators is None:
+        return "unknown_seat"
+    return legislators.classify_seat(last=rec.filer.last, state=sd.state, district=sd.district)
+
+
+def _suspicious_seats(
+    group: list[FilingMetadata],
+    reasons: list[str],
+    legislators: Optional[LegislatorIndex],
+) -> list[dict]:
+    """The occupied seats that make a filer suspicious, with their roster holders.
+
+    One entry per distinct ``(state, district)`` whose filing classified
+    ``suspicious``, carrying the rep(s) on record for that seat so an operator can
+    eyeball the likely variant/typo. Deterministic (first-appearance seat order).
+    """
+    seats: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for rec, reason in zip(group, reasons):
+        if reason != "suspicious" or rec.state_district is None:
+            continue
+        sd = rec.state_district
+        key = (sd.state, sd.district)
+        if key in seen:
+            continue
+        seen.add(key)
+        holders = legislators.seat_holders(sd.state, sd.district) if legislators else ()
+        seats.append(
+            {
+                "state": sd.state,
+                "district": sd.district,
+                "holders": [{"bioguide": b, "last": last} for last, b in holders],
+            }
+        )
+    return seats
+
+
+def _detect_identity_warnings(
+    records: list[FilingMetadata],
+    legislators: Optional[LegislatorIndex] = None,
+) -> list[dict]:
     """Surface filers that matched **no** congress-legislators bioguide (#16).
 
     The actionable identity signal since #16 is *unmatched* identity: a filer
     whose ``bioguide_id`` is ``None`` is keyed only by name (``name:<slug>``) — a
-    bounded, unverified claim. The old "two-people share a slug" collision check is
-    retired in favor of this honest "we could not pin this filer to a real member
-    record" signal, which is what a ``read --member`` user actually needs to know.
+    bounded, unverified claim. GH-0122 sharpens it: each unmatched filer carries a
+    classified ``reason`` (``_REASON_ORDER``) so the *expected* non-matches (a
+    candidate, a seatless filer, a seat no rep ever held) can be collapsed to a
+    count and only the ``suspicious`` ones — seat occupied, name didn't match —
+    are surfaced per-name. A ``suspicious`` entry also carries the occupied
+    ``seats`` and their roster holders.
 
-    One warning per *distinct* unmatched ``filer_id`` (the ``name:`` key), in
-    first-appearance order (deterministic), carrying its distinct raw names, the
-    involved ``doc_ids``, and the distinct districts seen. A bioguide-matched
-    filer is never warned — it is pinned to a stable identity, however many times
-    it filed.
+    One entry per *distinct* unmatched ``filer_id`` (the ``name:`` key), in
+    first-appearance order (deterministic), carrying its reason, distinct raw
+    names, the involved ``doc_ids``, and the distinct districts seen. A
+    bioguide-matched filer is never listed — it is pinned to a stable identity,
+    however many times it filed.
     """
     by_filer: dict[str, list[FilingMetadata]] = defaultdict(list)
     order: list[str] = []
@@ -96,6 +180,9 @@ def _detect_identity_warnings(records: list[FilingMetadata]) -> list[dict]:
     warnings: list[dict] = []
     for filer_id in order:
         group = by_filer[filer_id]
+        reasons = [_classify_unmatched(r, legislators) for r in group]
+        # A filer's filings can classify differently; surface the most actionable.
+        reason = next(r for r in _REASON_PRIORITY if r in reasons)
 
         districts = {
             r.state_district.district if r.state_district else None for r in group
@@ -109,16 +196,77 @@ def _detect_identity_warnings(records: list[FilingMetadata]) -> list[dict]:
             if name not in seen_names:
                 seen_names.append(name)
 
-        warnings.append(
-            {
-                "filer_id": filer_id,
-                "reason": "unmatched_no_bioguide",
-                "raw_names": seen_names,
-                "doc_ids": [r.doc_id for r in group],
-                "districts": sorted(d for d in districts if d is not None),
-            }
-        )
+        entry = {
+            "filer_id": filer_id,
+            "reason": reason,
+            "raw_names": seen_names,
+            "doc_ids": [r.doc_id for r in group],
+            "districts": sorted(d for d in districts if d is not None),
+        }
+        if reason == "suspicious":
+            entry["seats"] = _suspicious_seats(group, reasons, legislators)
+        warnings.append(entry)
     return warnings
+
+
+def _match_summary(records: list[FilingMetadata], warnings: list[dict]) -> dict:
+    """Roll the per-filer warnings up into a manifest summary (GH-0122).
+
+    Identity-level (not per-filing): ``matched`` is the count of distinct
+    bioguides pinned, ``unmatched`` the count of distinct ``name:`` keys (==
+    ``len(warnings)``), ``by_reason`` the breakdown over ``_REASON_ORDER``, and
+    ``suspicious`` the list of the suspicious filer_ids (their full seat detail
+    lives on the matching ``identity_warnings`` entry — not duplicated here).
+    """
+    matched = len({r.bioguide_id for r in records if r.bioguide_id is not None})
+    by_reason = {reason: 0 for reason in _REASON_ORDER}
+    for w in warnings:
+        by_reason[w["reason"]] += 1
+    return {
+        "matched": matched,
+        "unmatched": len(warnings),
+        "by_reason": by_reason,
+        "suspicious": [w["filer_id"] for w in warnings if w["reason"] == "suspicious"],
+    }
+
+
+def _format_suspicious_seat(seat: dict) -> str:
+    """``WA-07 held by Smith (S001234)`` — holders capped so the line stays short."""
+    loc = f"{seat['state']}-{seat['district']:02d}"
+    holders = seat["holders"]
+    shown = ", ".join(f"{h['last']} ({h['bioguide']})" for h in holders[:4])
+    if len(holders) > 4:
+        shown += f", +{len(holders) - 4} more"
+    return f"{loc} held by {shown}" if shown else f"{loc} (no roster holder)"
+
+
+def _print_identity_report(
+    year: int, summary: dict, warnings: list[dict]
+) -> None:
+    """The two-tier identity report to stderr (GH-0122).
+
+    One summary line collapses the expected non-matches to a per-reason count;
+    then a per-name line for *only* the ``suspicious`` filers — the ones a human
+    should actually look at. The full per-filer detail is always in the manifest.
+    """
+    counts = summary["by_reason"]
+    breakdown = ", ".join(f"{counts[r]} {r}" for r in _REASON_ORDER)
+    print(
+        f"{year}: identity — {summary['matched']} matched, "
+        f"{summary['unmatched']} unmatched ({breakdown}).",
+        file=sys.stderr,
+    )
+    for w in warnings:
+        if w["reason"] != "suspicious":
+            continue
+        seats = "; ".join(_format_suspicious_seat(s) for s in w.get("seats", []))
+        print(
+            f"{year}: SUSPICIOUS identity — filer {w['filer_id']!r} "
+            f"(names {w['raw_names']}) is unmatched, but its seat is on record: "
+            f"{seats}. Likely a name variant/typo or roster gap — `read --member` "
+            f"on it is an unverified name-string claim.",
+            file=sys.stderr,
+        )
 
 
 def _unparsed_entry(rec: FilingMetadata, reason: str) -> dict:
@@ -425,16 +573,9 @@ def parse_year(
     parse_status_counts = {k: by_parse_status.get(k, 0) for k in ("ok", "error")}
     has_error = parse_status_counts["error"] > 0
 
-    identity_warnings = _detect_identity_warnings(records)
-    for warning in identity_warnings:
-        print(
-            f"{year}: identity warning — filer_id {warning['filer_id']!r} matched "
-            f"no congress-legislators bioguide; it is name-keyed only "
-            f"(names {warning['raw_names']}, docs {warning['doc_ids']}, "
-            f"districts {warning['districts']}) — `read --member` on it is an "
-            f"unverified name-string claim.",
-            file=sys.stderr,
-        )
+    identity_warnings = _detect_identity_warnings(records, legislators)
+    match_summary = _match_summary(records, identity_warnings)
+    _print_identity_report(year, match_summary, identity_warnings)
 
     # JSON-mode dump so dates serialize as ISO strings; sort_keys + trailing
     # newline so two runs from the same raw produce byte-identical files.
@@ -456,6 +597,7 @@ def parse_year(
             "not_classified": not_classified,
             "by_parse_status": parse_status_counts,
         },
+        "match_summary": match_summary,
         "identity_warnings": identity_warnings,
     }
     manifest_path = parsed_dir / "parse-manifest.json"
@@ -486,8 +628,9 @@ def parse_year(
         f"{year}: parsed {len(records)} filings → {filings_path} "
         f"(efiled {pdf_class_counts['efiled']}, scanned "
         f"{pdf_class_counts['scanned']}, missing {pdf_class_counts['missing']}, "
-        f"error {parse_status_counts['error']}; {len(identity_warnings)} identity "
-        f"warning(s); manifests: {manifest_path}, {unparsed_path}).",
+        f"error {parse_status_counts['error']}; {match_summary['unmatched']} "
+        f"unmatched identity, {len(match_summary['suspicious'])} suspicious; "
+        f"manifests: {manifest_path}, {unparsed_path}).",
         file=sys.stderr,
     )
     return {
@@ -498,6 +641,7 @@ def parse_year(
         "not_classified": not_classified,
         "by_parse_status": parse_status_counts,
         "identity_warnings": len(identity_warnings),
+        "suspicious": len(match_summary["suspicious"]),
         "has_error": has_error,
     }
 
