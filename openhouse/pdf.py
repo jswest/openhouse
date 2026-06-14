@@ -15,8 +15,9 @@ Everything here is offline and deterministic: it opens only files already on dis
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from typing import Optional
 
 import pdfplumber
 
@@ -47,6 +48,43 @@ from .schemas import (
 # below any real e-filed body. We count non-whitespace chars (not raw length) so
 # layout whitespace never inflates a near-empty page toward the threshold.
 EFILED_MIN_NONWS_CHARS = 20
+
+# Lower bound of the parse-time date sanity range (GH-0113). The STOCK Act
+# (which created the PTR) and the modern e-filed FD predate nothing earlier than
+# this; a disclosure date with a year below 1990 is an extraction artifact, not a
+# real trade. The *upper* bound is data, not wall-clock — ``entry_year + 1``,
+# derived from the single command-entry timestamp threaded into ``parse`` (SPEC
+# §9 / CLAUDE.md: no ``date.today()`` in core logic).
+MIN_DISCLOSURE_YEAR = 1990
+
+# Static fallback upper bound, used ONLY when a caller does not thread the real
+# command-entry year down (direct API/test use, and the date-agnostic
+# ``pull.doc_ids_for_member`` path). It is a fixed constant, never a wall-clock
+# read — the production ``parse`` path always passes the real ``entry_year + 1``
+# (SPEC §9 / CLAUDE.md: no ``date.today()`` in core logic). Generous so it never
+# rejects a real near-future date, while still catching transposed-digit years.
+FALLBACK_MAX_YEAR = 2100
+
+
+def parse_disclosure_date(raw: str, *, max_year: int) -> Optional[date]:
+    """Parse a ``M/D/YYYY`` disclosure date, or ``None`` if implausible (GH-0113).
+
+    Returns the :class:`date` only when it both parses and its year falls in the
+    sanity range ``MIN_DISCLOSURE_YEAR ≤ year ≤ max_year`` (``max_year`` is the
+    entry year + 1, threaded down from the command-entry timestamp — never the
+    wall clock). A transposed-digit year (``3031``, ``2202``) parses as readily as
+    ``2024`` via ``strptime`` but is rejected here as the extraction artifact it
+    is. ``None`` on either an unparseable string or an out-of-range year; the
+    caller preserves the raw string and flags the anomaly (never a silent valid
+    date — CLAUDE.md).
+    """
+    try:
+        parsed = datetime.strptime(raw, "%m/%d/%Y").date()
+    except ValueError:
+        return None
+    if MIN_DISCLOSURE_YEAR <= parsed.year <= max_year:
+        return parsed
+    return None
 
 
 class PdfExtractError(Exception):
@@ -298,10 +336,30 @@ def _ticker_from_asset(asset: str) -> str | None:
     return parens[-1].strip().upper() if parens else None
 
 
-def _asset_type_from_asset(asset: str) -> str | None:
-    """The bracketed ``[ST]``-style tag, preserved raw (without brackets)."""
+def _asset_type_raw_from_asset(asset: str) -> str | None:
+    """The bracketed ``[ST]``-style tag, verbatim (without brackets).
+
+    Casing is **not** touched here — the Clerk's PDFs render the tag with
+    inconsistent casing (``ST``/``sT``/``Cs``/``gS`` all occur), and this is the
+    raw value preserved beside the normalized one (CLAUDE.md: raw alongside
+    normalized). Use :func:`_normalize_asset_type` for the clean, comparable
+    value.
+    """
     match = _ASSET_TYPE_RE.search(asset)
     return match.group(1).strip() if match else None
+
+
+def _normalize_asset_type(raw: str | None) -> str | None:
+    """Uppercased, trimmed asset-type tag — the convenient default value.
+
+    ``None`` in, ``None`` out (no tag on the row). Defeats the small-caps glyph
+    artifact and per-form casing drift so consumers need not defensively
+    ``upper()`` the field (GH-0114).
+    """
+    if raw is None:
+        return None
+    normalized = raw.strip().upper()
+    return normalized or None
 
 
 def _match_ptr_header(
@@ -391,13 +449,20 @@ def _wrapped_range_tail_follows(
     return False
 
 
-def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
+def extract_ptr_transactions(
+    pdf_path: Path, *, max_year: int = FALLBACK_MAX_YEAR
+) -> list[PtrTransaction]:
     """Extract an e-filed PTR's §6.3 ``transactions[]`` from its PDF. Offline.
 
     Layout-aware (SPEC §2.2): anchors on each row's header line and folds any
     wrapped asset-name continuation back in. Raises :class:`PdfExtractError` on a
     present-but-unreadable PDF so the ``parse`` caller can record an
     ``extract_failed`` outcome rather than crash the run.
+
+    ``max_year`` (the command-entry year + 1) bounds the date sanity range
+    (GH-0113): a transaction/notification date with an implausible year is set
+    ``None`` with its raw string kept on ``date_raw`` / ``notification_date_raw``,
+    never emitted as a valid date.
     """
     try:
         with pdfplumber.open(pdf_path) as pdf:
@@ -531,15 +596,24 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
         if amount is None:
             amount = _parse_amount_range(f"{amount_low} - {amount_high}")
         asset = _scrub_field(" ".join(part for part in asset_parts if part))
+        asset_type_raw = _asset_type_raw_from_asset(asset)
+        # Sanity-range the two dates (GH-0113); a rejected year keeps its raw
+        # string on the sibling ``*_raw`` field as the per-row anomaly flag and
+        # the structured date stays None — never a fabricated valid date.
+        txn_d = parse_disclosure_date(txn_date, max_year=max_year)
+        notif_d = parse_disclosure_date(notif_date, max_year=max_year)
         transactions.append(
             PtrTransaction(
                 owner=owner or "self",
                 asset=asset,
                 ticker=_ticker_from_asset(asset),
-                asset_type=_asset_type_from_asset(asset),
+                asset_type=_normalize_asset_type(asset_type_raw),
+                asset_type_raw=asset_type_raw,
                 transaction_type=txn_type,
-                transaction_date=datetime.strptime(txn_date, "%m/%d/%Y").date(),
-                notification_date=datetime.strptime(notif_date, "%m/%d/%Y").date(),
+                transaction_date=txn_d,
+                date_raw=txn_date if txn_d is None else None,
+                notification_date=notif_d,
+                notification_date_raw=notif_date if notif_d is None else None,
                 amount_range=amount,
                 # In the glyphs-lost rendering the checkbox glyph is absent from
                 # the text layer entirely, so its state is unrecoverable: None
@@ -1237,7 +1311,7 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
         # None-value shift and the SPEC §2.2 wrap repair. ``col_spans`` are the
         # character ranges those columns occupy in ``raw`` (GH-0099).
         type_m = _FD_TYPE_TAG_RE.search(raw)
-        asset_type = type_m.group(1) if type_m else None
+        asset_type_raw = type_m.group(1) if type_m else None
         value_of_asset, income_type, income_amount, income_preceding, col_spans = (
             _schedule_a_amounts(raw)
         )
@@ -1267,7 +1341,8 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
             ScheduleAItem(
                 asset=asset,
                 owner=owner,
-                asset_type=asset_type,
+                asset_type=_normalize_asset_type(asset_type_raw),
+                asset_type_raw=asset_type_raw,
                 value_of_asset=value_of_asset,
                 income_type=income_type,
                 income_amount=income_amount,
@@ -1306,7 +1381,9 @@ _FD_B_ARROW_ROW_RE = re.compile(
 _FD_B_DATE_RE = re.compile(r"(\d{1,2}/\d{1,2}/\d{4})")
 
 
-def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
+def _parse_schedule_b(
+    lines: list[str], *, max_year: int = FALLBACK_MAX_YEAR
+) -> list[ScheduleBItem]:
     """Schedule B (transactions) → structured items + raw_text.
 
     A B row carries the asset's ``[TYPE]`` tag, a date, a ``P``/``S`` type and
@@ -1369,8 +1446,20 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
             date_m = _FD_B_ROW_RE.search(raw)
             asset = _scrub_field(raw[: date_m.start()].strip() if date_m else raw)
             token = date_m.group(2) if date_m else None
+        # Sanity-range the Date column (GH-0113): a date with an implausible year
+        # (a transposed-digit extraction artifact) is set None with its raw string
+        # kept on ``transaction_date_raw`` — the per-row anomaly flag — rather than
+        # emitted as a valid date. A row with no date column stays None/None.
+        date_raw_str = date_m.group(1) if date_m else None
         transaction_date = (
-            datetime.strptime(date_m.group(1), "%m/%d/%Y").date() if date_m else None
+            parse_disclosure_date(date_raw_str, max_year=max_year)
+            if date_raw_str
+            else None
+        )
+        transaction_date_raw = (
+            date_raw_str
+            if date_raw_str and transaction_date is None
+            else None
         )
         ttype = None
         if token:
@@ -1381,7 +1470,7 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
             if ttype == "S" and "(partial)" in raw:
                 ttype = "S(partial)"
         type_m = _FD_TYPE_TAG_RE.search(raw)
-        asset_type = type_m.group(1) if type_m else None
+        asset_type_raw = type_m.group(1) if type_m else None
         glyph_m = re.search(r"\bgfedcb?\b", raw)
         cap_gains = (glyph_m.group(0) == "gfedcb") if glyph_m else None
         # The amount column, wrap-aware: the first column-amount entry over the
@@ -1393,8 +1482,10 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
             ScheduleBItem(
                 asset=asset,
                 owner=owner,
-                asset_type=asset_type,
+                asset_type=_normalize_asset_type(asset_type_raw),
+                asset_type_raw=asset_type_raw,
                 transaction_date=transaction_date,
+                transaction_date_raw=transaction_date_raw,
                 transaction_type=ttype,
                 amount_range=entries[0][2] if entries else None,
                 cap_gains_over_200=cap_gains,
@@ -1932,7 +2023,7 @@ def _salvage_raw(letter: str, lines: list[str]) -> list:
     return items
 
 
-def extract_fd_schedules(pdf_path: Path) -> FdBody:
+def extract_fd_schedules(pdf_path: Path, *, max_year: int = FALLBACK_MAX_YEAR) -> FdBody:
     """Extract an e-filed annual-FD's §6.3 schedule body from its PDF. Offline.
 
     Segments the body by schedule **letter** (SPEC §2.2 small-caps caveat),
@@ -1942,6 +2033,10 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
     raises :class:`NotAnFdBody` when the PDF carries no schedule headings at all
     (an extension / cover sheet that is not an annual FD body) — the ``parse``
     caller writes no body for that case rather than a misleading empty one.
+
+    ``max_year`` (the command-entry year + 1) bounds the Schedule B
+    transaction-date sanity range (GH-0113): an implausible-year date is set
+    ``None`` with its raw string kept on ``transaction_date_raw``.
     """
     try:
         with pdfplumber.open(pdf_path) as pdf:
@@ -1965,7 +2060,13 @@ def extract_fd_schedules(pdf_path: Path) -> FdBody:
     for letter in sorted(segments):
         content = segments[letter]
         if parser := _FD_STRUCTURED.get(letter):
-            items = parser(content)
+            # Schedule B alone carries a transaction date, so it alone needs the
+            # sanity-range bound (GH-0113); the other parsers take only the lines.
+            items = (
+                parser(content, max_year=max_year)
+                if letter == "B"
+                else parser(content)
+            )
         else:
             items = []
         # No parser, or a parser that anchored no rows: the segment still carries

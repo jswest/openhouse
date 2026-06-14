@@ -416,6 +416,56 @@ def test_parse_extract_failure_sets_error_and_unparsed(tmp_path):
     assert not (parsed_dir / "ptr" / "20017980.json").exists()
 
 
+def test_out_of_range_date_records_residual_without_dropping_filing(tmp_path, monkeypatch):
+    # GH-0113 end-to-end: a PTR whose extraction surfaces an out-of-range date
+    # (the per-row anomaly flag is a set ``date_raw``) is NOT dropped — the body is
+    # written and the filing stays ``ok``, but the anomaly is surfaced in the
+    # unparsed manifest with reason ``date_out_of_range`` so the residual line
+    # accounts for it (never a silent gap — CLAUDE.md). Offline: a real efiled PDF
+    # (classifies efiled) with extraction stubbed to return a flagged transaction.
+    import json
+
+    from openhouse.schemas import AmountRange, PtrTransaction
+
+    _seed_one_ptr(tmp_path, LEE)
+    flagged = PtrTransaction(
+        owner="self",
+        asset="Apple Inc. (AAPL) [ST]",
+        ticker="AAPL",
+        asset_type="ST",
+        asset_type_raw="ST",
+        transaction_type="S",
+        transaction_date=None,
+        date_raw="04/30/3031",
+        notification_date=None,
+        notification_date_raw="05/02/3031",
+        amount_range=AmountRange(low=1001, high=15000, label="$1,001 - $15,000"),
+    )
+    monkeypatch.setattr(
+        "openhouse.parse.extract_ptr_transactions", lambda _p, **_kw: [flagged]
+    )
+    records = build_filing_records(tmp_path / "raw" / "2021" / "2021FD.xml", 2021)
+    parsed_dir = tmp_path / "parsed" / "2021"
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+    unparsed = _classify_records(
+        records,
+        data_dir=tmp_path,
+        types=["ptr", "fd"],
+        year=2021,
+        parsed_dir=parsed_dir,
+        max_year=2026,
+    )
+    # Filing intact: body written, status ok (not dropped to extract_failed).
+    assert records[0].parse_status == "ok"
+    body = json.loads((parsed_dir / "ptr" / "20017980.json").read_text())
+    assert body["transactions"][0]["date_raw"] == "04/30/3031"
+    # Residual entry accounts for the anomaly.
+    assert any(
+        u["reason"] == "date_out_of_range" and u["doc_id"] == "20017980"
+        for u in unparsed
+    )
+
+
 # --- critic regressions: page-break wrap, partial-extraction guard, ticker slot -
 
 
@@ -549,6 +599,83 @@ def test_smallcaps_type_letter_is_normalized(monkeypatch):
     _fake_pdfplumber(monkeypatch, [page])
     txns = extract_ptr_transactions(Path("synthetic.pdf"))
     assert [t.transaction_type for t in txns] == ["P", "S(partial)"]
+
+
+def test_asset_type_is_normalized_with_raw_preserved(monkeypatch):
+    # The Clerk's PDFs render the bracketed [TYPE] tag with inconsistent casing
+    # (sT/Cs/gS all occur — pdfplumber's small-caps glyph artifact). ``asset_type``
+    # is normalized (uppercased, trimmed) so consumers need not defensively
+    # upper() it, while the verbatim tag is preserved in ``asset_type_raw``
+    # (raw alongside normalized — GH-0114).
+    page = "\n".join(
+        [
+            "Apple Inc. (AAPL) [sT] P 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+            "Some Corp Bond [Cs] S 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+            "US Treasury [gS] P 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert [t.asset_type for t in txns] == ["ST", "CS", "GS"]
+    assert [t.asset_type_raw for t in txns] == ["sT", "Cs", "gS"]
+
+
+def test_transposed_year_transaction_date_is_flagged_not_accepted(monkeypatch):
+    # GH-0113: a transposed-digit year (``3031`` for ``2031``) parses via strptime
+    # exactly as readily as a sane year, so without a sanity range it would emit as
+    # a valid year-3031 date — silent bad data in a temporal-analysis tool. The
+    # date must instead be rejected: structured field None, raw string preserved,
+    # and the rest of the row (asset, type, amount) intact. ``max_year`` is the
+    # entry year + 1, threaded down — here a fixed offline value, never wall-clock.
+    page = "\n".join(
+        [
+            "JT Apple Inc. (AAPL) [ST] S 04/30/3031 05/02/3031 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"), max_year=2026)
+    assert len(txns) == 1
+    txn = txns[0]
+    # NOT emitted as a valid year-3031 date — the whole point of the guard.
+    assert txn.transaction_date is None
+    assert txn.notification_date is None
+    # Raw string preserved as the per-row anomaly flag.
+    assert txn.date_raw == "04/30/3031"
+    assert txn.notification_date_raw == "05/02/3031"
+    # The rest of the filing is intact — never dropped over one bad date.
+    assert txn.asset == "Apple Inc. (AAPL) [ST]"
+    assert txn.ticker == "AAPL"
+    assert txn.transaction_type == "S"
+    assert (txn.amount_range.low, txn.amount_range.high) == (1001, 15000)
+
+
+def test_near_future_typo_year_is_flagged_but_in_range_year_kept(monkeypatch):
+    # A near-future typo (``2220`` for ``2022``) is out of range and rejected, but
+    # a sound date on a *different* row in the same body parses normally — the
+    # guard is per-date, never a whole-filing drop. Confirms the upper bound is
+    # entry-year-relative: 2023 is accepted under max_year=2026, 2220 is not.
+    page = "\n".join(
+        [
+            "JT Tesla Inc. (TSLA) [ST] P 04/07/2220 04/08/2220 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+            "JT Ford (F) [ST] P 09/19/2023 09/20/2023 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"), max_year=2026)
+    assert len(txns) == 2
+    # Row 0: transposed near-future year — rejected, raw preserved.
+    assert txns[0].transaction_date is None
+    assert txns[0].date_raw == "04/07/2220"
+    # Row 1: a sound in-range date — kept, no anomaly flag.
+    assert txns[1].transaction_date is not None
+    assert txns[1].transaction_date.year == 2023
+    assert txns[1].date_raw is None
 
 
 def test_truncated_wrapped_high_still_raises(monkeypatch):

@@ -499,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
                     types=types,
                     strict=args.strict,
                     fetched_at=fetched_at,
+                    entry_year=current_year,
                 )
             except parse_mod.ParseError as exc:
                 print(f"error: {exc}", file=sys.stderr)

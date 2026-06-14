@@ -16,11 +16,12 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Optional
 from xml.etree import ElementTree as ET
 
+from .pdf import FALLBACK_MAX_YEAR, parse_disclosure_date
 from .schemas import (
     Filer,
     FilingMetadata,
@@ -162,25 +163,26 @@ def _parse_state_district(raw: str) -> Optional[StateDistrict]:
     return StateDistrict(raw=raw, state=state, district=district)
 
 
-def _parse_filing_date(raw: str) -> Optional[date]:
+def _parse_filing_date(raw: str, *, max_year: int = FALLBACK_MAX_YEAR) -> Optional[date]:
     """Parse a ``FilingDate`` (``M/D/YYYY``) into a :class:`date`, or ``None``.
 
     Empty ``FilingDate`` → ``None`` (SPEC §2.1: seen on type ``W``). The coverage
     ``Year`` is never derived from or cross-validated against this (a 2024 report
-    can carry a 2025 filing date)."""
+    can carry a 2025 filing date). An implausible year (outside the GH-0113 sanity
+    range, ``1990 … max_year``) is likewise ``None`` — an extraction artifact, not
+    a real filing date."""
     raw = raw.strip()
     if not raw:
         return None
-    try:
-        return datetime.strptime(raw, "%m/%d/%Y").date()
-    except ValueError:
-        return None
+    return parse_disclosure_date(raw, max_year=max_year)
 
 
 def build_filing_records(
     xml_path: Path,
     year: int,
     legislators: Optional["LegislatorIndex"] = None,
+    *,
+    max_year: int = FALLBACK_MAX_YEAR,
 ) -> list[FilingMetadata]:
     """Parse every ``<Member>`` in ``<year>FD.xml`` into a :class:`FilingMetadata`.
 
@@ -204,6 +206,10 @@ def build_filing_records(
     ``fd``, the §2.2 routing) — or ``None`` when the row carries no DocID.
     ``pdf_class`` is left ``None`` here (the per-PDF classification pass is #7);
     ``parse_status`` is ``"ok"`` (the metadata record always parses).
+
+    ``max_year`` (the command-entry year + 1) bounds the ``filing_date`` sanity
+    range (GH-0113): an implausible-year FilingDate degrades to ``None`` rather
+    than emitting as a valid date.
     """
     root = ET.parse(xml_path).getroot()
     records: list[FilingMetadata] = []
@@ -264,7 +270,9 @@ def build_filing_records(
             bioguide_id=bioguide_id,
             state_district=state_district,
             filing_type=FilingTypeInfo.from_code(raw_type),
-            filing_date=_parse_filing_date(_text(member, "FilingDate")),
+            filing_date=_parse_filing_date(
+                _text(member, "FilingDate"), max_year=max_year
+            ),
             source_pdf=source_pdf,
             pdf_class=None,
             parse_status="ok",
