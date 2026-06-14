@@ -451,9 +451,12 @@ def parse_year(
     )
 
     # Every filing not fully usable as an e-filed body, each with a reason (SPEC
-    # §6.5). The one e-filed path that can appear here is an efiled PTR whose body
-    # extraction failed (``extract_failed``); otherwise e-filed filings are not
-    # listed. Order is deterministic (record order).
+    # §6.5). Two e-filed paths can appear here: an efiled PTR whose body extraction
+    # failed (``extract_failed``), and a filing with a written body but an
+    # out-of-range date flagged in place (``date_out_of_range``). The latter keeps
+    # ``parse_status: ok`` and a body, so it is the one reason that coexists with a
+    # fully parsed filing (GH-0113); otherwise e-filed filings are not listed.
+    # Order is deterministic (record order).
     unparsed_manifest = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": fetched_at,

@@ -519,8 +519,8 @@ however many times it filed).
   "asset_type": "ST",                 // bracketed [TYPE] tag, NORMALIZED (uppercased, trimmed)
   "asset_type_raw": "sT",             // the same tag VERBATIM (Clerk casing drifts: sT/Cs/gS) — #114
   "transaction_type": "P",            // P purchase | S sale | S(partial) | E exchange
-  "transaction_date": "2023-12-21",
-  "notification_date": "2024-01-08",
+  "transaction_date": "2023-12-21",  // null if outside 1990..entry_year+1; raw kept on date_raw — #113
+  "notification_date": "2024-01-08",  // null if out of range; raw kept on notification_date_raw — #113
   "amount_range": { "low": 1001, "high": 15000, "label": "$1,001 - $15,000" },
   "cap_gains_over_200": false,       // true | false | null — null = UNKNOWN (see below)
   "description": null
@@ -624,9 +624,12 @@ being shadowed; it does not auto-migrate or read from `./data`.
   parsed-schema generation — the minor of `v0.<gen>.<patch>`; see GH-0037).
 - `unparsed-manifest.json` — every filing not fully parsed, with `doc_id`,
   `filer_id` (so a no-DocID row stays joinable), and a `reason`
-  (`scanned`, `missing`, `extract_failed`, `unknown_type`, `validation_error`) for a
-  clean OCR/follow-up backlog. (`missing` = the index lists the filing but no PDF is
-  on disk; `validation_error` is reserved — no emit path in v0.2.0.)
+  (`scanned`, `missing`, `extract_failed`, `unknown_type`, `validation_error`,
+  `date_out_of_range`) for a clean OCR/follow-up backlog. (`missing` = the index
+  lists the filing but no PDF is on disk; `validation_error` is reserved — no emit
+  path in v0.2.0; `date_out_of_range` is the one reason that coexists with a fully
+  written body and `parse_status: ok` — a row's date fell outside 1990..entry_year+1,
+  so it was flagged in place rather than dropped (§6.3, #113).)
 
 ---
 
