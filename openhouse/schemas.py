@@ -42,7 +42,13 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 # Candidate/New-Filer form variant's third income column). The same generation
 # re-anchors FD Schedule A/B/D/F row segmentation and adds the A/B completeness
 # guard, so a re-parse from ``raw/`` is required — which the bump forces.
-SCHEMA_VERSION = 6
+# Generation 7 (GH-0114): ``asset_type`` is now **normalized** (uppercased,
+# trimmed) on ``PtrTransaction`` / ``ScheduleAItem`` / ``ScheduleBItem`` — the
+# Clerk's PDFs render the bracketed tag with inconsistent casing
+# (``ST``/``sT``/``Cs``/``gS``), so every consumer had to defensively upper() it.
+# The verbatim tag is preserved beside it in a new ``asset_type_raw`` field
+# (raw alongside normalized — CLAUDE.md). Re-parse from ``raw/`` required.
+SCHEMA_VERSION = 7
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
@@ -214,7 +220,12 @@ class PtrTransaction(BaseModel):
       asset carries no parenthesized symbol (corp bonds ``[CS]``, govt ``[GS]``,
       etc. legitimately have none — ``None`` is correct, never a sentinel). A
       ticker is never inferred from the company name.
-    - ``asset_type`` — the bracketed tag (``ST`` from ``[ST]``), preserved raw.
+    - ``asset_type`` — the bracketed tag (``ST`` from ``[ST]``), **normalized**
+      (uppercased, trimmed) so it is comparable across the corpus; ``None`` when
+      the row carries no tag (GH-0114).
+    - ``asset_type_raw`` — the same tag **verbatim** (preserving the Clerk's
+      inconsistent casing, e.g. ``sT``/``Cs``/``gS``); raw alongside normalized
+      (CLAUDE.md). ``None`` exactly when ``asset_type`` is.
     - ``transaction_type`` — ``P`` | ``S`` | ``S(partial)`` | ``E`` (the form
       prints ``S (partial)``; normalized to ``S(partial)``).
     - ``transaction_date`` / ``notification_date`` — ISO ``YYYY-MM-DD``.
@@ -235,6 +246,7 @@ class PtrTransaction(BaseModel):
     asset: str
     ticker: Optional[str] = None
     asset_type: Optional[str] = None
+    asset_type_raw: Optional[str] = None
     transaction_type: str
     transaction_date: date
     notification_date: date
@@ -269,6 +281,7 @@ class ScheduleAItem(BaseModel):
     asset: str
     owner: Optional[str] = None
     asset_type: Optional[str] = None
+    asset_type_raw: Optional[str] = None
     value_of_asset: Optional[AmountRange] = None
     income_type: Optional[str] = None
     income_amount: Optional[AmountRange] = None
@@ -288,6 +301,7 @@ class ScheduleBItem(BaseModel):
     asset: str
     owner: Optional[str] = None
     asset_type: Optional[str] = None
+    asset_type_raw: Optional[str] = None
     transaction_date: Optional[date] = None
     transaction_type: Optional[str] = None
     amount_range: Optional[AmountRange] = None

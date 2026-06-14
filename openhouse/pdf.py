@@ -298,10 +298,30 @@ def _ticker_from_asset(asset: str) -> str | None:
     return parens[-1].strip().upper() if parens else None
 
 
-def _asset_type_from_asset(asset: str) -> str | None:
-    """The bracketed ``[ST]``-style tag, preserved raw (without brackets)."""
+def _asset_type_raw_from_asset(asset: str) -> str | None:
+    """The bracketed ``[ST]``-style tag, verbatim (without brackets).
+
+    Casing is **not** touched here — the Clerk's PDFs render the tag with
+    inconsistent casing (``ST``/``sT``/``Cs``/``gS`` all occur), and this is the
+    raw value preserved beside the normalized one (CLAUDE.md: raw alongside
+    normalized). Use :func:`_normalize_asset_type` for the clean, comparable
+    value.
+    """
     match = _ASSET_TYPE_RE.search(asset)
     return match.group(1).strip() if match else None
+
+
+def _normalize_asset_type(raw: str | None) -> str | None:
+    """Uppercased, trimmed asset-type tag — the convenient default value.
+
+    ``None`` in, ``None`` out (no tag on the row). Defeats the small-caps glyph
+    artifact and per-form casing drift so consumers need not defensively
+    ``upper()`` the field (GH-0114).
+    """
+    if raw is None:
+        return None
+    normalized = raw.strip().upper()
+    return normalized or None
 
 
 def _match_ptr_header(
@@ -531,12 +551,14 @@ def extract_ptr_transactions(pdf_path: Path) -> list[PtrTransaction]:
         if amount is None:
             amount = _parse_amount_range(f"{amount_low} - {amount_high}")
         asset = _scrub_field(" ".join(part for part in asset_parts if part))
+        asset_type_raw = _asset_type_raw_from_asset(asset)
         transactions.append(
             PtrTransaction(
                 owner=owner or "self",
                 asset=asset,
                 ticker=_ticker_from_asset(asset),
-                asset_type=_asset_type_from_asset(asset),
+                asset_type=_normalize_asset_type(asset_type_raw),
+                asset_type_raw=asset_type_raw,
                 transaction_type=txn_type,
                 transaction_date=datetime.strptime(txn_date, "%m/%d/%Y").date(),
                 notification_date=datetime.strptime(notif_date, "%m/%d/%Y").date(),
@@ -1237,7 +1259,7 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
         # None-value shift and the SPEC §2.2 wrap repair. ``col_spans`` are the
         # character ranges those columns occupy in ``raw`` (GH-0099).
         type_m = _FD_TYPE_TAG_RE.search(raw)
-        asset_type = type_m.group(1) if type_m else None
+        asset_type_raw = type_m.group(1) if type_m else None
         value_of_asset, income_type, income_amount, income_preceding, col_spans = (
             _schedule_a_amounts(raw)
         )
@@ -1267,7 +1289,8 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
             ScheduleAItem(
                 asset=asset,
                 owner=owner,
-                asset_type=asset_type,
+                asset_type=_normalize_asset_type(asset_type_raw),
+                asset_type_raw=asset_type_raw,
                 value_of_asset=value_of_asset,
                 income_type=income_type,
                 income_amount=income_amount,
@@ -1381,7 +1404,7 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
             if ttype == "S" and "(partial)" in raw:
                 ttype = "S(partial)"
         type_m = _FD_TYPE_TAG_RE.search(raw)
-        asset_type = type_m.group(1) if type_m else None
+        asset_type_raw = type_m.group(1) if type_m else None
         glyph_m = re.search(r"\bgfedcb?\b", raw)
         cap_gains = (glyph_m.group(0) == "gfedcb") if glyph_m else None
         # The amount column, wrap-aware: the first column-amount entry over the
@@ -1393,7 +1416,8 @@ def _parse_schedule_b(lines: list[str]) -> list[ScheduleBItem]:
             ScheduleBItem(
                 asset=asset,
                 owner=owner,
-                asset_type=asset_type,
+                asset_type=_normalize_asset_type(asset_type_raw),
+                asset_type_raw=asset_type_raw,
                 transaction_date=transaction_date,
                 transaction_type=ttype,
                 amount_range=entries[0][2] if entries else None,

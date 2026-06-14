@@ -551,6 +551,28 @@ def test_smallcaps_type_letter_is_normalized(monkeypatch):
     assert [t.transaction_type for t in txns] == ["P", "S(partial)"]
 
 
+def test_asset_type_is_normalized_with_raw_preserved(monkeypatch):
+    # The Clerk's PDFs render the bracketed [TYPE] tag with inconsistent casing
+    # (sT/Cs/gS all occur — pdfplumber's small-caps glyph artifact). ``asset_type``
+    # is normalized (uppercased, trimmed) so consumers need not defensively
+    # upper() it, while the verbatim tag is preserved in ``asset_type_raw``
+    # (raw alongside normalized — GH-0114).
+    page = "\n".join(
+        [
+            "Apple Inc. (AAPL) [sT] P 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+            "Some Corp Bond [Cs] S 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+            "US Treasury [gS] P 01/02/2020 01/13/2020 $1,001 - $15,000 gfedc",
+            "FILINg STATUS: New",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    txns = extract_ptr_transactions(Path("synthetic.pdf"))
+    assert [t.asset_type for t in txns] == ["ST", "CS", "GS"]
+    assert [t.asset_type_raw for t in txns] == ["sT", "Cs", "gS"]
+
+
 def test_truncated_wrapped_high_still_raises(monkeypatch):
     # A row whose $HIGH bound never materializes (header ends ``$15,001 -`` and the
     # next content is the row's own detail line, no money token) must NOT fabricate
