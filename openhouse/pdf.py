@@ -723,6 +723,13 @@ _FD_GLYPH_RE = re.compile(r"\bgfedcb?\s*$")
 # The bracketed [TYPE] asset-class tag that marks an A/B asset line.
 _FD_TYPE_TAG_RE = re.compile(r"\[([A-Za-z0-9]+)\]")
 
+# The shape of a real Clerk asset-type code (``ST``/``MF``/``BA``…, rendered in
+# inconsistent case — ``sT``/``Ba``; plus the digit-led ``5P``/``5F``/``5``
+# forms). A 3+ char bracket is a ticker the filer wrote into the name (``[VOO]``,
+# ``[ARKK]``) and ``[1]``/``[2]`` are footnote refs — neither is a type tag. Used
+# to tell a real second type tag (a merged row — GH-0100) from such noise.
+_FD_ASSET_TYPE_CODE_RE = re.compile(r"[A-Za-z]{2}|5[A-Za-z0-9]?")
+
 # An owner column token (SP/DC/JT) appearing right after the [TYPE] tag.
 # Case-insensitive: the case-mangled rendering (SPEC §2.2) lowercases the
 # small-caps owner tokens unpredictably (``Sp`` / ``Jt``); extractors normalize
@@ -733,6 +740,16 @@ _FD_OWNER_AFTER_TYPE_RE = re.compile(r"\][\s]*(SP|DC|JT)\b", re.IGNORECASE)
 # wrapped row whose ``[TYPE]`` tag landed off the anchor line (GH-0099). The
 # arrow itself is the column boundary, so the token right after it is the owner.
 _FD_OWNER_AFTER_ARROW_RE = re.compile(r"⇒[\s]*(SP|DC|JT)\b", re.IGNORECASE)
+
+# The owner token sitting immediately before the value column's low bound —
+# where it lands on a wrapped-``[TYPE]`` row whose tag wrapped off the value line
+# entirely, so neither the after-tag nor the after-arrow form is on the line
+# (GH-0100; ``…Lease JT $1,001 - $15,000`` / ``[GS]``). Anchored to the value low
+# so it cannot match an ``SP``/``JT`` that happens to fall inside an asset name.
+# A normal row matches the after-tag form first; this is only the fallback.
+_FD_OWNER_BEFORE_VALUE_RE = re.compile(
+    r"\b(SP|DC|JT)\b\s+(?=\$[\d,]+\s*-)", re.IGNORECASE
+)
 
 # The checkbox glyph matched anywhere (not just line-end) — used to lift the
 # glyph token out of the asset slice on wrapped rows where it renders mid-name.
@@ -908,13 +925,19 @@ def _strip_spans(raw: str, end: int, spans: list[tuple[int, int]]) -> str:
     return re.sub(r"\s+", " ", "".join(out)).strip()
 
 
-def _group_items(lines: list[str], *, starts_item) -> list[str]:
+def _group_items(lines: list[str], *, starts_item, starts_before=None) -> list[str]:
     """Fold ``lines`` into per-item verbatim ``raw_text`` blocks.
 
     A new item begins at each line for which ``starts_item(line)`` is true; every
     following line (wrapped column, ``LOCATION:``/``DESCRIPTION:`` detail, wrapped
     amount) folds into the current item until the next start. Returns one joined
     ``raw_text`` string per item, in document order.
+
+    ``starts_before(line, next_line)`` (optional) is a one-line lookahead: a line
+    that ``starts_item`` did not anchor still opens a row when the *next*
+    meaningful line proves it did — used by Schedule A for the row whose ``[TYPE]``
+    tag (and only the tag) wrapped onto the following line, so the body line above
+    carries no on-line tag/glyph/value-low to anchor on (GH-0100).
 
     Any lines *before* the first item-start anchor are not dropped — a row whose
     anchor was lost (a Schedule D liability with a blank ``Date incurred``, an A/B
@@ -923,18 +946,20 @@ def _group_items(lines: list[str], *, starts_item) -> list[str]:
     silently drop / verbatim raw_text on every line item". They are folded into a
     single leading raw item so their text survives verbatim.
     """
+    # Drop blank, whitespace-, or NUL-only furniture (NUL isn't stripped by
+    # str.strip but scrubs to empty): it carries no filer content, so it must not
+    # seed an empty-raw_text item — matches _salvage_raw, which also skips such
+    # lines. Never drops content (there is none). Precomputed so the lookahead can
+    # see the next *meaningful* line, not an intervening blank.
+    rows = [s for ln in lines if (s := ln.strip()) and _scrub_raw_text(s)]
     items: list[str] = []
     cur: list[str] = []
     pre: list[str] = []  # lines seen before the first item-start anchor
-    for ln in lines:
-        s = ln.strip()
-        if not s or not _scrub_raw_text(s):
-            # Blank, whitespace-, or NUL-only furniture (NUL isn't stripped by
-            # str.strip but scrubs to empty): it carries no filer content, so it
-            # must not seed an empty-raw_text item — matches _salvage_raw, which
-            # also skips such lines. Never drops content (there is none).
-            continue
-        if starts_item(s):
+    for i, s in enumerate(rows):
+        start = starts_item(s)
+        if not start and starts_before is not None and i + 1 < len(rows):
+            start = starts_before(s, rows[i + 1])
+        if start:
             if cur:
                 items.append(" ".join(cur))
             cur = [s]
@@ -1240,6 +1265,24 @@ _FD_A_ROW_AFTER_TYPE_RE = re.compile(rf"\]\s*(?i:SP|DC|JT)?\s*{_FD_VALUE_START}"
 # followed by the value column's start opens a row.
 _FD_A_ROW_AFTER_ARROW_RE = re.compile(rf"⇒\s*(?i:SP|DC|JT)?\s*{_FD_VALUE_START}")
 
+# A tag-less Schedule A row-start signal (GH-0100): the value column's low-bound
+# start — a ``$lo -`` standing on a line that carries no [TYPE] tag, no glyph,
+# and no anchoring arrow. The asset name (and, on a ⇒ subholding, the umbrella
+# account name + arrow + the subholding's own name) can wrap so far that the
+# value column prints on the name's *first* physical line while the [TYPE] tag
+# lands a line (or several) below it. That left the row anchorless on every other
+# signal, so it — and its value bucket — folded silently into the row above (the
+# #70 regression; ``Account [BA]`` after ``…Jet Checking $1,001 - $15,000``, or a
+# whole buried ⇒ subholding cluster ``…Deferred $15,001 - $50,000 Tax-Deferred`` /
+# ``Compensation Plan ⇒`` / ``BNY Mellon … (STSVX)`` / ``[MF]``). Anchoring on the
+# value low recovers the row: the wrapped tag/name fold in as continuations and
+# the column parser untangles them. Only a column *low* matches — a wrapped HIGH
+# lands as a bare ``$N`` with no trailing dash, so a continuation line never trips
+# this. Broader than ``_FD_DANGLING_LOW_RE`` (which requires a *word* after the
+# dash and which ``_fd_amount_entries`` still uses for its narrower wrapped-high
+# pairing): this also fires on a complete ``$lo - $hi`` value bucket.
+_FD_A_VALUE_LOW_RE = re.compile(r"\$[\d,]+\s*-")
+
 # A value column that *opens* with the literal ``None``/``Undetermined`` —
 # immediately after the ``[TYPE]`` tag or the subholding arrow (plus the
 # optional owner token). On such a row every ``$lo - $hi`` bucket belongs to
@@ -1252,6 +1295,31 @@ _FD_A_NONE_VALUE_RE = re.compile(
     r"[\]⇒]\s*(?:SP|DC|JT)?\s*(?:None|Undetermined)\b", re.IGNORECASE
 )
 
+# Any value-column signature anywhere on a line (the same alternation as
+# ``_FD_VALUE_START``, un-anchored). A row whose value is ``None``/``Over`` rather
+# than a ``$lo -`` range carries no value low for ``_FD_A_VALUE_LOW_RE`` to catch,
+# so the wrapped-tag lookahead (``_is_wrapped_tag_tail`` below) uses this to tell
+# a value-bearing row body from a ⇒ subholding's pure-name continuation line.
+_FD_A_HAS_VALUE_RE = re.compile(_FD_VALUE_START)
+
+
+def _is_wrapped_tag_tail(s: str) -> bool:
+    """``s`` is only a wrapped ``[TYPE]`` tag (plus maybe the tail of the asset
+    name): ``[MF]`` / ``Account [BA]`` / ``(PENN) [ST]`` / ``REFUNDING BOND [GS]``.
+
+    It carries a real asset-type code but no value column, no glyph, no arrow, and
+    is not a detail line — so it can only be the ``[TYPE]`` tag that wrapped off
+    the row body on the line above (GH-0100), never a row of its own. A line that
+    anchors itself (tag + value, or a value low) or carries a ticker/footnote
+    bracket rather than a real code is not a tail.
+    """
+    if _FD_DETAIL_RE.match(s) or _FD_GLYPH_RE.search(s) or "⇒" in s:
+        return False
+    if _FD_A_VALUE_LOW_RE.search(s) or _FD_A_ROW_AFTER_TYPE_RE.search(s):
+        return False
+    m = _FD_TYPE_TAG_RE.search(s)
+    return bool(m and _FD_ASSET_TYPE_CODE_RE.fullmatch(m.group(1)))
+
 
 def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
     """Schedule A (assets & "unearned" income) → structured items + raw_text.
@@ -1263,8 +1331,12 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
     checkbox column, and on glyphs-lost NUL documents, which lose the glyph),
     or the subholding owner arrow ``⇒`` (the row's ``[TYPE]``-tagged name often
     wraps onto the next line, leaving only the arrow on the anchor line). A
-    fourth, narrow signal — a dangling value low bound on a tag-less line —
-    catches the C/H row whose ``[TYPE]`` wrapped off the line entirely.
+    fourth signal — a tag-less line opening the value column with a ``$lo -`` low
+    bound — catches the rows whose ``[TYPE]`` tag (and, on a ⇒ cluster, the
+    subholding name and arrow) wrapped off the value line entirely (GH-0100):
+    the wrapped-tag member/Candidate row and the buried ⇒-subholding cluster
+    whose value prints a line above its tag. Without it those rows folded
+    silently into the row above — the #70 Schedule A regression.
     """
 
     def starts(s: str) -> bool:
@@ -1288,16 +1360,31 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
             # Only an arrow followed by the value column opens a row — a bare
             # arrow can sit on a wrapped continuation (see the regex comment).
             return bool(_FD_A_ROW_AFTER_ARROW_RE.search(s))
-        # Tag-less line carrying a dangling value low bound (``Hackett &
-        # Associates, PC …, 100% $250,001 - None``): the asset name ran long
-        # enough to push the [TYPE] tag onto the next line, so the value
-        # column's range start is the only anchor signal left. Wrap
-        # continuation lines carry bare amounts or name text — never a
-        # ``$lo - <word>`` dangling start — so this cannot split a row.
-        return bool(_FD_DANGLING_LOW_RE.search(s))
+        # Tag-less line opening the value column with a ``$lo -`` low bound — the
+        # asset (or ⇒ subholding) name ran long enough to push the [TYPE] tag onto
+        # a later line, so the value column's range start is the only anchor signal
+        # left (GH-0100; see _FD_A_VALUE_LOW_RE). Covers the dangling-low C/H case
+        # (``…100% $250,001 - None``), the wrapped-[TYPE] member row, and the
+        # buried ⇒-subholding cluster. A wrapped HIGH bound is a bare ``$N`` with no
+        # trailing dash, so a continuation line cannot split a row here.
+        return bool(_FD_A_VALUE_LOW_RE.search(s))
+
+    def starts_before(s: str, nxt: str) -> bool:
+        # One-line lookahead (GH-0100): ``s`` opens a row when its ``[TYPE]`` tag
+        # wrapped onto ``nxt`` and its value is None/Over (no ``$lo -`` for the
+        # tag-less signal above to see) — e.g. ``403b … International Opportunities
+        # None Tax-Deferred`` / ``[MF]``. Requiring a value signature on ``s`` is
+        # what keeps this from splitting a ⇒ subholding: that cluster's pure-name
+        # continuation line (``BNY Mellon … (STSVX)``) carries no value and must
+        # fold into the subholding's value line above, not anchor on its own tag.
+        return (
+            not _FD_DETAIL_RE.match(s)
+            and bool(_FD_A_HAS_VALUE_RE.search(s))
+            and _is_wrapped_tag_tail(nxt)
+        )
 
     items: list[ScheduleAItem] = []
-    for raw in _group_items(lines, starts_item=starts):
+    for raw in _group_items(lines, starts_item=starts, starts_before=starts_before):
         location = description = None
         loc_m = re.search(
             rf"{_FD_LOCATION_LABEL}\s*(.*?)(?:\s+{_FD_DESCRIPTION_LABEL}|$)", raw
@@ -1316,10 +1403,13 @@ def _parse_schedule_a(lines: list[str]) -> list[ScheduleAItem]:
             _schedule_a_amounts(raw)
         )
         # The owner column (SP/DC/JT) prints right after the [TYPE] tag on a
-        # single-line row, but after the subholding arrow ⇒ when the name wraps
-        # — and there the token lands *inside* the asset slice. Match both.
-        owner_m = _FD_OWNER_AFTER_TYPE_RE.search(raw) or _FD_OWNER_AFTER_ARROW_RE.search(
-            raw
+        # single-line row, after the subholding arrow ⇒ when the name wraps, or —
+        # when the tag itself wrapped off the value line (GH-0100) — right before
+        # the value low. Each lands *inside* the asset slice; match all three.
+        owner_m = (
+            _FD_OWNER_AFTER_TYPE_RE.search(raw)
+            or _FD_OWNER_AFTER_ARROW_RE.search(raw)
+            or _FD_OWNER_BEFORE_VALUE_RE.search(raw)
         )
         owner = owner_m.group(1).upper() if owner_m else None
         # The asset name is everything up to the [TYPE] tag — but on wrapped /
@@ -2023,6 +2113,23 @@ def _salvage_raw(letter: str, lines: list[str]) -> list:
     return items
 
 
+def _schedule_merge_residual(items: list) -> bool:
+    """True if any anchored Schedule A/B row absorbed an un-split sibling.
+
+    A clean row carries exactly one real asset-type code; two or more in one
+    row's ``raw_text`` means a wrapped-``[TYPE]`` / ⇒-subholding row that no anchor
+    could separate folded in (GH-0100), fusing two assets. Surfaced as a
+    ``schedule_incomplete`` residual so the merge is loud, never a silent drop —
+    ``raw_text`` keeps the buried row's text verbatim regardless. Tickers and
+    footnote brackets are not codes (``_FD_ASSET_TYPE_CODE_RE``), so a name
+    carrying ``[VOO]`` beside its real ``[ST]`` tag is not mistaken for a merge.
+    """
+    def real_codes(raw: str) -> int:
+        return sum(1 for t in _FD_TYPE_TAG_RE.findall(raw) if _FD_ASSET_TYPE_CODE_RE.fullmatch(t))
+
+    return any(real_codes(it.raw_text) >= 2 for it in items)
+
+
 def extract_fd_schedules(pdf_path: Path, *, max_year: int = FALLBACK_MAX_YEAR) -> FdBody:
     """Extract an e-filed annual-FD's §6.3 schedule body from its PDF. Offline.
 
@@ -2057,6 +2164,7 @@ def extract_fd_schedules(pdf_path: Path, *, max_year: int = FALLBACK_MAX_YEAR) -
 
     segments = _segment_schedules(lines)
     schedules: dict[str, list] = {}
+    incomplete: list[str] = []  # letters carrying an un-split merge (GH-0100)
     for letter in sorted(segments):
         content = segments[letter]
         if parser := _FD_STRUCTURED.get(letter):
@@ -2100,6 +2208,15 @@ def extract_fd_schedules(pdf_path: Path, *, max_year: int = FALLBACK_MAX_YEAR) -
                     f"anchored {len(items)} row(s) but the segment carries "
                     f"{expected} [TYPE] tag(s) — rows merged"
                 )
+            # Short of a collapse: a single anchored row that still fused two
+            # assets (≥2 real type codes in its raw_text) is a wrapped-[TYPE] / ⇒
+            # merge no anchor could separate (GH-0100). The filing stays sound and
+            # keeps its body — its text is all present — but the schedule is
+            # flagged as a ``schedule_incomplete`` residual rather than passing
+            # silently. After the GH-0100 anchor fix this is rare (a None-value
+            # subholding whose tag wrapped past the lookahead's reach).
+            if _schedule_merge_residual(items):
+                incomplete.append(letter)
         schedules[letter] = [it.model_dump(mode="json") for it in items]
 
-    return FdBody(schedules=schedules)
+    return FdBody(schedules=schedules, incomplete_schedules=incomplete)

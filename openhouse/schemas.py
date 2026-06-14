@@ -62,7 +62,17 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 # silent gap — CLAUDE.md). ``PtrTransaction.transaction_date`` /
 # ``notification_date`` therefore become ``Optional``. Re-parse from ``raw/``
 # required.
-SCHEMA_VERSION = 7
+# Generation 8 (GH-0100): FD Schedule A row anchoring recovers wrapped-``[TYPE]``
+# and ⇒-subholding rows whose value prints a line above their tag — assets that
+# previously folded silently into the row above (the #70 regression). The parser
+# now anchors a tag-less line on its ``$lo -`` value low, and a None/Over-value
+# row whose tag wrapped via a one-line lookahead at the wrapped tag-tail; a row
+# that still cannot be separated (≥2 asset-type codes in one row) is flagged as a
+# ``schedule_incomplete`` residual (``unparsed-manifest.json``) without dropping
+# the filing — completeness over the known, explicit residual for the rest
+# (CLAUDE.md). Recovered rows change parsed output, so re-parse from ``raw/`` is
+# required — which the bump forces.
+SCHEMA_VERSION = 8
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
@@ -452,3 +462,10 @@ class FdBody(BaseModel):
     """
 
     schedules: dict[str, list] = Field(default_factory=dict)
+    # Letters (A/B) whose anchored rows still carry an un-split merge — a
+    # wrapped-``[TYPE]`` / ⇒-subholding row no anchor could separate, leaving two
+    # assets fused in one row (GH-0100). In-memory only: ``parse`` reads it to
+    # emit a ``schedule_incomplete`` residual; it is NOT written to the body file
+    # (``_write_fd_body`` persists only ``schedules``), so the on-disk body
+    # contract is unchanged.
+    incomplete_schedules: list[str] = Field(default_factory=list)
