@@ -67,10 +67,11 @@ Clerk into normalized JSON: `pull` (network) → `parse` (offline) → `read`
 - Live-data probes during development hit the real Clerk site — keep them
   rare, polite, and out of the test suite (tests run on checked-in fixtures
   under `tests/fixtures/`).
-- **`ship` and `ultraship` are vendored from a local skill drawer, not authored
-  here.** `.claude/skills/{ship,ultraship}/` are byte-for-byte copies pressed from
-  the drawer — never hand-edit them (the skill self-checks against its `.stamp`
-  and will flag drift). Change behavior in the drawer and re-press; everything
-  openhouse-specific lives in `.claude/ship.toml` / `.claude/ultraship.toml`,
-  which the press never touches. (`release` is still repo-local — not yet
-  vendored.)
+- **`ship` is vendored from a local skill drawer, not authored here.**
+  `.claude/skills/ship/` is a byte-for-byte copy pressed from the drawer — never
+  hand-edit it (the skill self-checks against its `.stamp` and will flag drift).
+  Change behavior in the drawer and re-press; everything openhouse-specific lives
+  in `.claude/ship.toml`, which the press never touches. The redesigned `/ship`
+  now handles omnibus bundles natively (a parent issue with native GitHub
+  sub-issues, fanned across player subagents), so the old `/ultraship` skill was
+  retired. (`release` is still repo-local — not yet vendored.)
