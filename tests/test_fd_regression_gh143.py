@@ -18,8 +18,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from openhouse.pdf import extract_fd_schedules
 
 PDF_FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
@@ -131,7 +129,6 @@ def test_schiff_schedule_i_single_real_row():
 # --- E/F strand (NEW; #17 territory) — position/organization unsplit ----------
 
 
-@pytest.mark.xfail(reason="E/F splitter: leading identical-position block unsplit", strict=False)
 def test_williams_schedule_e_first_block_split():
     e = _sched(WILLIAMS, "E")
     # E[0..6] share "Sole Director & President"; only these leading rows are unsplit.
@@ -139,7 +136,6 @@ def test_williams_schedule_e_first_block_split():
     assert e[0]["organization"] == "JRW Corporation"
 
 
-@pytest.mark.xfail(reason="E/F splitter + comment-as-row on Schedule E", strict=False)
 def test_harris_schedule_e_split_and_no_comment_row():
     e = _sched(HARRIS, "E")
     assert e[0]["position"] is not None

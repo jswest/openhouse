@@ -1975,14 +1975,88 @@ _FD_POSITION_TITLES = (
     "publisher",
 )
 
+# Core role words: a leading word-run is a Position only if it carries at least
+# one of these (so an organization name whose first words happen to be connectors
+# is never mistaken for a title). Single-word titles from the exact-prefix list,
+# reduced to the word a multi-word title hinges on (``board of trustees`` →
+# ``trustees``), so the run-matcher recognizes compound/conjoined titles the
+# exact list cannot enumerate (``Sole Director & President``, GH-0150).
+_FD_POSITION_ROLE_WORDS = frozenset(
+    {
+        "director",
+        "directors",
+        "president",
+        "chairman",
+        "chairperson",
+        "chair",
+        "secretary",
+        "treasurer",
+        "trustee",
+        "trustees",
+        "member",
+        "officer",
+        "partner",
+        "manager",
+        "owner",
+        "ceo",
+        "cfo",
+        "coo",
+        "consultant",
+        "advisor",
+        "adviser",
+        "delegate",
+        "commissioner",
+        "governor",
+        "editor",
+        "publisher",
+    }
+)
+
+# Words that may sit inside the Position run beside a role word — conjunctions,
+# articles, and the rank/scope modifiers that prefix a role (``Sole``/``Vice``/
+# ``Finance Committee`` …). The run stops at the first word in neither set, which
+# is the start of the organization column.
+_FD_POSITION_CONNECTORS = frozenset(
+    {
+        "&",
+        "and",
+        "of",
+        "the",
+        "sole",
+        "vice",
+        "co",
+        "deputy",
+        "assistant",
+        "acting",
+        "interim",
+        "managing",
+        "general",
+        "limited",
+        "executive",
+        "advisory",
+        "finance",
+        "audit",
+        "nominating",
+        "governance",
+        "committee",
+        "board",
+        "emeritus",
+        "in",
+    }
+)
+
 
 def _split_position(raw: str) -> tuple[str | None, str | None]:
     """Split a Schedule E row into ``(position, organization)``.
 
-    The form's two columns merge on extraction with no delimiter, so we only
-    split when the row opens with a recognized position title — the title is the
-    ``Position`` column, the remainder the organization. An unrecognized opening
-    leaves both ``None`` (raw_text still carries the row).
+    The form's two columns merge on extraction with no delimiter, so we split
+    only on a recognized opening. First the exact title list (``President`` /
+    ``Board of Trustees``); failing that, a leading run of role/connector words
+    that carries at least one role word (``Sole Director & President`` /
+    ``Finance Committee Member`` — GH-0150) — these compound and conjoined titles
+    the flat list cannot enumerate, yet the leading block of a real filing shares
+    them across many rows. An unrecognized opening leaves both ``None`` (raw_text
+    still carries the row).
     """
     low = raw.lower()
     for title in _FD_POSITION_TITLES:
@@ -1991,13 +2065,41 @@ def _split_position(raw: str) -> tuple[str | None, str | None]:
             if nxt == " ":  # a real word boundary, not a longer word
                 org = raw[len(title) :].strip()
                 return raw[: len(title)].strip(), org or None
+    # Run-matcher fallback: walk the leading words while each is a role or
+    # connector word, stopping at the organization. Trailing punctuation
+    # (``Director,`` / ``President,``) is ignored for the membership test.
+    words = raw.split()
+    end = 0
+    has_role = False
+    for w in words:
+        key = w.lower().strip(".,;:")  # "&" stays (it is a connector)
+        if key in _FD_POSITION_ROLE_WORDS:
+            has_role = True
+        elif key not in _FD_POSITION_CONNECTORS:
+            break
+        end += 1
+    if has_role and 0 < end < len(words):
+        position = " ".join(words[:end]).rstrip(",")
+        organization = " ".join(words[end:]).strip()
+        return position or None, organization or None
     return None, None
+
+
+# A per-row ``COMMENTS`` continuation line. The filer's free-text note renders on
+# its own line led by the form's small-caps ``C`` glyph (lost to NULs — ``C\x00+:``)
+# or, on an intact rendering, a plain ``C :`` / ``C:``. It is NOT a new position —
+# it annotates the row above — so it must fold into its parent item, never anchor
+# its own row (GH-0150). (The NUL form is also kept out of ``_FD_TRAILER_RE`` by
+# that pattern's ``(?!:)`` lookahead, which is what lets it reach this parser.)
+_FD_E_COMMENT_RE = re.compile(r"^C(?:\x00+|\s*):", re.IGNORECASE)
 
 
 def _parse_schedule_e(lines: list[str]) -> list[ScheduleEItem]:
     """Schedule E (positions) → ``position``/``organization`` + raw_text."""
     items: list[ScheduleEItem] = []
-    for raw in _group_items(lines, starts_item=lambda s: True):
+    for raw in _group_items(
+        lines, starts_item=lambda s: not _FD_E_COMMENT_RE.match(s)
+    ):
         scrubbed = _scrub_raw_text(raw)
         position, organization = _split_position(scrubbed)
         items.append(
