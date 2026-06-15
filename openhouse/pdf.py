@@ -1218,6 +1218,20 @@ def _schedule_a_amounts(
         if len(entries) > 1
         else None
     )
+    # Two-income (Candidate/New-Filer) form, current-year column = literal None
+    # (#132): the form prints Type | Current-Year | Preceding-Year. When the
+    # current-year cell is ``None`` it carries no ``$`` so it never becomes an
+    # amount entry — the lone trailing ``$lo - $hi`` is the *preceding* column,
+    # and the ``None`` sentinel lands in the value→income gap, contaminating
+    # ``income_type`` ("Capital Gains None") and sliding the preceding range into
+    # the income (current-year) slot. Recognize a ``None``/``Undetermined``
+    # trailing the type words as the empty current-year cell: strip it from the
+    # type, null the current-year income, and reassign the range to preceding.
+    if income_type and preceding is None:
+        type_m = _FD_A_NONE_INCOME_RE.search(income_type)
+        if type_m:
+            income, preceding = None, income
+            income_type = income_type[: type_m.start()].strip() or None
     # Column spans to lift out of the asset name: each entry's slot, the whole
     # value→income gap (which carries the income-type word(s) — they print
     # *between* the name fragments on wrapped/subholding rows), and the wrapped
@@ -1307,6 +1321,13 @@ _FD_A_VALUE_LOW_RE = re.compile(r"\$[\d,]+\s*-")
 _FD_A_NONE_VALUE_RE = re.compile(
     r"[\]⇒]\s*(?:SP|DC|JT)?\s*(?:None|Undetermined)\b", re.IGNORECASE
 )
+
+# A literal ``None``/``Undetermined`` current-year income cell trailing the
+# income-type word(s) on the two-income (Candidate/New-Filer) form (#132). It
+# carries no ``$``, so it is never an amount entry — it folds into the
+# value→income gap and contaminates ``income_type``. Anchored to end-of-string
+# so only a *trailing* sentinel matches (the type word(s) come first).
+_FD_A_NONE_INCOME_RE = re.compile(r"\s+(?:None|Undetermined)\s*$", re.IGNORECASE)
 
 # Any value-column signature anywhere on a line (the same alternation as
 # ``_FD_VALUE_START``, un-anchored). A row whose value is ``None``/``Over`` rather
