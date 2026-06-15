@@ -206,6 +206,10 @@ Python 3.12+, managed with [`uv`](https://docs.astral.sh/uv/):
 uv run pytest        # tests
 ```
 
+New contributors: [`CONTRIBUTING.md`](./CONTRIBUTING.md) is the standalone
+onboarding guide — dev setup, the issue → PR workflow, and the data-model and
+legal invariants the code must hold to.
+
 ## Releasing
 
 Versions are `v0.<SCHEMA_VERSION>.<patch>` — the minor **is** `SCHEMA_VERSION`,
