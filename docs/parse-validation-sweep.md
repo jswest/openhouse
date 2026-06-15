@@ -109,7 +109,10 @@ merged, and it can't go stale the way a pinned list of "known bugs" does.
 **6 — Orchestrate cheaply.** One subagent per filing, **five at a time**, each
 absorbing the PDF page-images in a throwaway context and returning only a
 structured verdict — so the sweep scales across unlimited filings without the
-orchestrator's context bloating with rasterized pages. The orchestrator owns
+orchestrator's context bloating with rasterized pages. Each subagent rasterizes
+into its **own per-`doc_id` render dir** (`render/<doc_id>/`); concurrent agents
+sharing one temp dir clobber each other's pages, so isolation here is
+load-bearing, not hygiene (run-202606141629, batch 1). The orchestrator owns
 selection, dedup, and the report; it files nothing automatically. There is no
 recurring loop — the work is compute-bound, not waiting on external state, so it
 runs as a single bounded fan-out rather than a `/loop` on a timer. A calibration
