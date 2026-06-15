@@ -3,24 +3,22 @@
 # not the skill. See `.claude/skills/ship/ship.toml.example` for the full key
 # reference.
 
-base_branch      = "main"                          # default branch / promotion target
-branch_prefix    = "omnibus"                       # omnibus branch stem (shared with ultraship)
-version_scheme   = "leading-v"                      # omnibus issues are titled `vX.Y.Z — …`,
-                                                   #   so prefer `omnibus/vX.Y.Z`
-worktree_pattern = "../{repo}-issue-{n}-{slug}"    # sibling, never nested
+base_branch       = "main"                          # ultimate promotion target / default --onto
+branch_prefix     = "omnibus"                       # omnibus branch stem
+worktree_pattern  = "../{repo}-issue-{n}-{slug}"    # sibling, never nested
 
-test_cmd          = "uv run pytest"                # the suite
-test_source_globs = ["*.py", "pyproject.toml"]     # a diff touching any of these is "test-affecting"
-docs_only_globs   = ["*.md", "LICENSE*", "docs/**"] # a diff wholly within these auto-skips the suite
-skip_tests_token  = true                           # honor a `skip-tests` opt-in
-gate_agent        = "simplify-refactor"            # per-commit quality pass
+test_cmd          = "uv run pytest"                 # the suite
+test_source_globs = ["*.py", "pyproject.toml"]      # a diff touching any of these is "test-affecting"
+auto_skip_globs   = ["*.md", "docs/**", "LICENSE*"] # diff wholly within these → tests auto-skip
 
-architecture_doc  = ""                             # openhouse keeps no single current-state doc
-decisions_dir     = "docs/decisions"               # one additive note per decision
-decisions_index   = "docs/decisions/README.md"     # newest-first index
+architecture_doc  = ""                              # openhouse keeps no single current-state doc
+decisions_dir     = "docs/decisions"                # one additive note per decision
+decisions_index   = "docs/decisions/README.md"      # newest-first index
 
+# Injected verbatim into every player prompt AND the director's own work —
+# openhouse's live-data redline.
+guardrails        = "Tests run on checked-in fixtures only. If the issue needs a fresh probe of the Clerk's site, do it once, by hand, politely — and turn what you learn into a fixture under tests/fixtures/, never a network-touching test."
 guard_hook        = ".claude/hooks/guard-main-write.sh"  # detected; informational only
 
-# Injected verbatim into the step-8 implementation guidance — openhouse's
-# live-data redline.
-live_data_note = "Tests run on checked-in fixtures only. If the issue needs a fresh probe of the Clerk's site, do it once, by hand, politely — and turn what you learn into a fixture under tests/fixtures/, never a network-touching test."
+player_tier       = "cheap"                         # default model tier for players: "cheap" | "strong"
+max_critic_passes = 3                               # critic → triage loop cap before parking
