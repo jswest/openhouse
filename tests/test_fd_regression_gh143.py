@@ -88,28 +88,24 @@ def test_waltz_schedule_d_month_not_in_creditor():
 # --- #133 — Schedule H/J column-header emitted as a data row ------------------
 
 
-@pytest.mark.xfail(reason="#133 incomplete: intact-letter H header captured as a row", strict=False)
 def test_schiff_schedule_h_no_header_row():
     h = _sched(SCHIFF, "H")
     assert _no_header_rows(h)
     assert len(h) == 3  # PDF has 3 trips, not 4
 
 
-@pytest.mark.xfail(reason="#133 incomplete: intact-letter H header captured as a row", strict=False)
 def test_harris_schedule_h_no_header_row():
     h = _sched(HARRIS, "H")
     assert _no_header_rows(h)
     assert len(h) == 3
 
 
-@pytest.mark.xfail(reason="#133 incomplete: intact-letter H header captured as a row", strict=False)
 def test_waltz_schedule_h_no_header_row():
     h = _sched(WALTZ, "H")
     assert _no_header_rows(h)
     assert len(h) == 1  # only Government of India
 
 
-@pytest.mark.xfail(reason="#133 incomplete: intact-letter H header captured as a row", strict=False)
 def test_brownley_schedule_h_no_header_and_real_row():
     h = _sched(BROWNLEY, "H")
     assert _no_header_rows(h)
@@ -117,7 +113,6 @@ def test_brownley_schedule_h_no_header_and_real_row():
     assert "Aspen" in (h[0].get("source") or "")
 
 
-@pytest.mark.xfail(reason="#133 incomplete: intact-letter J header captured as a row", strict=False)
 def test_lopez_schedule_j_no_header_and_split():
     j = _sched(LOPEZ, "J")
     assert _no_header_rows(j)
