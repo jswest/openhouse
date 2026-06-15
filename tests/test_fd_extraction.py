@@ -597,6 +597,66 @@ def test_schedule_h_yearless_slash_in_continuation_does_not_anchor(monkeypatch):
     assert "9/11 Memorial Museum" in h[0]["raw_text"]
 
 
+def test_schedule_h_nul_glyph_header_not_emitted_as_row(monkeypatch):
+    # #133 (FABRICATION; verified on 10054295 / 10059679, both NUL-rendered annual
+    # FDs): in the glyphs-lost rendering the Schedule H column-header line extracts
+    # as NUL runs (``Source Dates Location Items`` → ``S\x00+ D\x00+ L\x00+ I\x00+``),
+    # so the intact-letter ``Source Date`` furniture branch misses it and the banner
+    # leaks as a phantom raw_text row (structured fields null). The header must be
+    # recognized and skipped before row extraction.
+    header = f"S{chr(0) * 5} D{chr(0) * 4} L{chr(0) * 7} I{chr(0) * 4}"
+    page = "\n".join(
+        [
+            f"S{chr(0) * 7} H: t{chr(0) * 30}",  # ScheDule H: travel… (NUL heading)
+            header,
+            "Policy Institute 06/01/2020 - 06/03/2020 Aspen, Colorado",
+            "Lodging and conference registration fees",
+            f"C{chr(0) * 12} a{chr(0) * 2} S{chr(0) * 8}",  # certification… trailer
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    h = extract_fd_schedules(Path("synthetic.pdf")).schedules["H"]
+    # The header is NOT a row: exactly one item (the real trip), no phantom record.
+    assert len(h) == 1
+    # No item carries the header banner as its raw_text (the fabrication signature).
+    assert all(chr(0) not in item["raw_text"] for item in h)
+    assert all("Source" not in item["raw_text"] for item in h)
+    # The real H row degrades to raw_text as designed: source/dates split off, the
+    # by-design Location/Items merge stays null, full row preserved in raw_text.
+    assert h[0]["source"] == "Policy Institute"
+    assert h[0]["dates"] == "06/01/2020 - 06/03/2020"
+    assert h[0]["location"] is None
+    assert h[0]["items"] is None
+    assert "Aspen, Colorado" in h[0]["raw_text"]
+
+
+def test_schedule_j_nul_glyph_header_not_emitted_and_row_degrades(monkeypatch):
+    # #133 (FABRICATION; verified on 10061936, a NUL-rendered annual FD): Schedule J
+    # has no structured parser — every real row degrades to a raw_text-only item by
+    # design (its two columns merge with no stable delimiter). The NUL-rendered
+    # column header (``Source Description of Duties`` → ``S\x00+ D\x00+ … D\x00+``)
+    # must be skipped so it is not salvaged into a phantom raw_text row.
+    header = f"S{chr(0) * 5} D{chr(0) * 10} of D{chr(0) * 5}"
+    page = "\n".join(
+        [
+            # ScheDule J: comPenSation… (NUL heading)
+            f"S{chr(0) * 7} J: c{chr(0) * 40}",
+            header,
+            "Acme Corporation Senior advisory and consulting services",
+            f"C{chr(0) * 12} a{chr(0) * 2} S{chr(0) * 8}",  # certification trailer
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    j = extract_fd_schedules(Path("synthetic.pdf")).schedules["J"]
+    # The header is NOT a row: exactly one item (the real disclosure), no phantom.
+    assert len(j) == 1
+    assert all(chr(0) not in item["raw_text"] for item in j)
+    # The real J row degrades to raw_text as designed: all structured columns null,
+    # the full row carried verbatim in raw_text (J has no column parser).
+    assert j[0]["raw_text"] == "Acme Corporation Senior advisory and consulting services"
+    assert all(v is None for k, v in j[0].items() if k != "raw_text")
+
+
 # --- D structured (synthetic, since the fixture's D is "None disclosed.") ------
 
 
