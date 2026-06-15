@@ -752,6 +752,18 @@ _FD_FURNITURE_RE = re.compile(
     # E–J column-header furniture (#17): each schedule's header row, on its own
     # line, leads with these tokens; the values below are filer content.
     r"Source Description|Source Date|Source Activity|Source Brief|"
+    # The modern intact-letter H/J header bands (#146). The live form's Schedule H
+    # header wraps across physical lines as ``Trip Details Inclusions`` /
+    # ``Source Start [Date] End Date Itinerary Days at Own Lodging? Food? Family?``
+    # / a ``[Date ]Exp.`` tail; Schedule J's header is
+    # ``Source (Name and Address) Brief Description of Duties``. None leads with a
+    # bare ``Source <column>`` token, so the branches above miss them and the
+    # banner leaks as phantom pre-anchor rows. A real H row opens with the trip's
+    # funding source then a date (never ``Source Start`` / ``Trip Details``), and a
+    # real J row's source is the org's name+parenthesized address (not the literal
+    # ``(Name and Address)`` placeholder), so none collides.
+    r"Trip Details|Source Start|(?:Date )?Exp\.$|"
+    r"Source \(Name and Address\)|"
     # Schedule H/J column header in the glyphs-lost (NUL) rendering (#133):
     # the small-caps header words extract as NUL runs, so the intact-letter
     # ``Source Date``/``Source Description`` branches above miss it and the
@@ -1206,6 +1218,20 @@ def _schedule_a_amounts(
         if len(entries) > 1
         else None
     )
+    # Two-income (Candidate/New-Filer) form, current-year column = literal None
+    # (#132): the form prints Type | Current-Year | Preceding-Year. When the
+    # current-year cell is ``None`` it carries no ``$`` so it never becomes an
+    # amount entry — the lone trailing ``$lo - $hi`` is the *preceding* column,
+    # and the ``None`` sentinel lands in the value→income gap, contaminating
+    # ``income_type`` ("Capital Gains None") and sliding the preceding range into
+    # the income (current-year) slot. Recognize a ``None``/``Undetermined``
+    # trailing the type words as the empty current-year cell: strip it from the
+    # type, null the current-year income, and reassign the range to preceding.
+    if income_type and preceding is None:
+        type_m = _FD_A_NONE_INCOME_RE.search(income_type)
+        if type_m:
+            income, preceding = None, income
+            income_type = income_type[: type_m.start()].strip() or None
     # Column spans to lift out of the asset name: each entry's slot, the whole
     # value→income gap (which carries the income-type word(s) — they print
     # *between* the name fragments on wrapped/subholding rows), and the wrapped
@@ -1295,6 +1321,13 @@ _FD_A_VALUE_LOW_RE = re.compile(r"\$[\d,]+\s*-")
 _FD_A_NONE_VALUE_RE = re.compile(
     r"[\]⇒]\s*(?:SP|DC|JT)?\s*(?:None|Undetermined)\b", re.IGNORECASE
 )
+
+# A literal ``None``/``Undetermined`` current-year income cell trailing the
+# income-type word(s) on the two-income (Candidate/New-Filer) form (#132). It
+# carries no ``$``, so it is never an amount entry — it folds into the
+# value→income gap and contaminates ``income_type``. Anchored to end-of-string
+# so only a *trailing* sentinel matches (the type word(s) come first).
+_FD_A_NONE_INCOME_RE = re.compile(r"\s+(?:None|Undetermined)\s*$", re.IGNORECASE)
 
 # Any value-column signature anywhere on a line (the same alternation as
 # ``_FD_VALUE_START``, un-anchored). A row whose value is ``None``/``Over`` rather
@@ -1620,8 +1653,9 @@ _FD_C_TYPE_PHRASES = (
 # The owner token renders in either case on the live form (``Spouse`` and the
 # all-caps ``SPOUSE``); GH-0101 only listed ``Spouse``, so an all-caps owner bled
 # its token into ``source`` (GH-0131). Both casings are owner tokens, not source.
+_FD_C_OWNER_TOKENS = ("Member", "Spouse", "SPOUSE", "SP", "DC", "JT")
 _FD_C_TYPE_RE = re.compile(
-    r"\s((?:(?:Member|Spouse|SPOUSE|SP|DC|JT)\s+)?(?:"
+    r"\s((?:(?:" + "|".join(_FD_C_OWNER_TOKENS) + r")\s+)?(?:"
     + "|".join(re.escape(p) for p in _FD_C_TYPE_PHRASES)
     + r"))\s*$"
 )
@@ -1663,6 +1697,16 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
             parts = head.rsplit(" ", 1)
             if len(parts) == 2 and parts[1]:
                 source, income_type = parts[0].strip(), parts[1].strip()
+                # An open-vocabulary Type (not in _FD_C_TYPE_PHRASES) still carries
+                # the owner column folded in front of it — ``Naborforce Spouse
+                # wage`` / ``… Spouse salary`` (GH-0131 strand). The last-token
+                # split is owner-blind, so the owner token lands at the tail of
+                # ``source``. Peel it back onto ``income_type`` so the owner stays
+                # with the Type column, never the Source.
+                src_parts = source.rsplit(" ", 1)
+                if len(src_parts) == 2 and src_parts[1] in _FD_C_OWNER_TOKENS:
+                    source = src_parts[0].strip()
+                    income_type = f"{src_parts[1]} {income_type}"
             else:
                 source, income_type = head, None
         items.append(
@@ -1687,6 +1731,19 @@ _FD_DATE_RE = re.compile(
     r"\b("
     r"(?:January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+(?:\d{1,2},\s+)?\d{4}"
+    # Abbreviated month (``Jan 2022`` — GH-0148): the 3-letter forms filers
+    # enter alongside the spelled-out month. Listed after the full names so
+    # ``January 2016`` matches the spelled-out branch; the trailing whitespace
+    # requirement keeps ``Jan`` from claiming the head of ``January``. Without
+    # this the bare-year fallback anchored on the year and ``Jan`` leaked into
+    # ``creditor`` (``SoFi Jan``).
+    r"|(?:Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{4}"
+    # A free-text ``Date incurred`` — filers write prose like ``Various dates
+    # in 2022`` (GH-0148). The year may be displaced by the column re-flow, so
+    # the prose phrase (with any contiguous trailing year) is the date span;
+    # anchoring on the bare year instead let the prose + type + amount low
+    # bound all collapse into ``creditor``.
+    r"|Various dates(?:\s+in)?(?:\s+\d{4})?"
     r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b"
 )
 
@@ -1696,6 +1753,16 @@ _FD_DATE_RE = re.compile(
 # word boundaries keep it from matching inside a formatted amount (the comma
 # grouping breaks any 4-digit run) or a longer number.
 _FD_D_BARE_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
+# A Schedule-D dangling value-range low bound — like ``_FD_DANGLING_LOW_RE`` (a
+# ``$lo -`` whose high bound spilled past an intruding column) but broadened to
+# also accept a *digit* after the dash, not just a letter. On a free-text/wrapped
+# date the re-flow can land the displaced date year between the low bound and its
+# dash and the high bound (Schiff: ``Margin loan on portfolio $100,001 - 2022
+# $250,000``), so the follower is a digit, which the letter-only A/B pattern
+# misses — leaving ``amount_range`` null. A contiguous ``$lo - $hi`` bucket still
+# has ``$`` (not ``[A-Za-z\d]``) after the dash, so it is unaffected and takes the
+# bucket path. D-local: the A/B value-column logic keeps its stricter pattern.
+_FD_D_DANGLING_LOW_RE = re.compile(r"\$([\d,]+)\s+-\s+(?=[A-Za-z\d])")
 # The amount column's *range start* (``$lo -`` or ``Over``) — the corroborating
 # signal a bare-year D anchor requires (below). The dash is load-bearing: a
 # wrapped continuation line can carry a bare year AND the row's wrapped high
@@ -1738,9 +1805,10 @@ def _fd_d_amount(
     # 1) A contiguous ``$lo - $hi`` bucket — the unwrapped (or already de-wrapped
     #    contiguous) case. Type ends at its start; nothing displaced.
     bucket = _FD_AMOUNT_RE.search(raw)
-    # 2) A dangling low (``$lo -`` with a word, not ``$hi``, right after) — the
-    #    wrapped-Type signature: the high bound spilled past the type continuation.
-    dangling = _FD_DANGLING_LOW_RE.search(raw)
+    # 2) A dangling low (``$lo -`` with a word or displaced year, not ``$hi``,
+    #    right after) — the wrapped-Type / wrapped-date signature: the high bound
+    #    spilled past the intruding column continuation.
+    dangling = _FD_D_DANGLING_LOW_RE.search(raw)
     if bucket and not (dangling and dangling.start() < bucket.start()):
         # The first complete bucket precedes any dangling low → it is the amount.
         # Type ends at the bucket start; the bucket itself is excluded by the end.
@@ -1843,6 +1911,13 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
 # A trailing dollar figure (gift/honoraria value) at the (de-wrapped) row end.
 _FD_TRAILING_DOLLAR_RE = re.compile(r"(\$[\d,]+(?:\.\d{2})?)\s*$")
 
+# The same dollar figure anywhere in the row — the fallback when the amount is not
+# the last column (Schiff's Schedule I row "… Article 04/22/2022 $500.00 Burbank
+# Temporary Aid Center": the charity-name tail follows the amount, so the trailing
+# anchor misses and the source would be lost). Schedules I/G carry a single figure,
+# not a ``$lo - $hi`` range, so no range-guard is needed.
+_FD_DOLLAR_RE = re.compile(r"(\$[\d,]+(?:\.\d{2})?)")
+
 # A leading ``Month YYYY`` (or ``MM/YYYY`` / ``MM/DD/YYYY``) agreement/travel date.
 _FD_LEADING_DATE_RE = re.compile(
     r"^\s*("
@@ -1900,14 +1975,88 @@ _FD_POSITION_TITLES = (
     "publisher",
 )
 
+# Core role words: a leading word-run is a Position only if it carries at least
+# one of these (so an organization name whose first words happen to be connectors
+# is never mistaken for a title). Single-word titles from the exact-prefix list,
+# reduced to the word a multi-word title hinges on (``board of trustees`` →
+# ``trustees``), so the run-matcher recognizes compound/conjoined titles the
+# exact list cannot enumerate (``Sole Director & President``, GH-0150).
+_FD_POSITION_ROLE_WORDS = frozenset(
+    {
+        "director",
+        "directors",
+        "president",
+        "chairman",
+        "chairperson",
+        "chair",
+        "secretary",
+        "treasurer",
+        "trustee",
+        "trustees",
+        "member",
+        "officer",
+        "partner",
+        "manager",
+        "owner",
+        "ceo",
+        "cfo",
+        "coo",
+        "consultant",
+        "advisor",
+        "adviser",
+        "delegate",
+        "commissioner",
+        "governor",
+        "editor",
+        "publisher",
+    }
+)
+
+# Words that may sit inside the Position run beside a role word — conjunctions,
+# articles, and the rank/scope modifiers that prefix a role (``Sole``/``Vice``/
+# ``Finance Committee`` …). The run stops at the first word in neither set, which
+# is the start of the organization column.
+_FD_POSITION_CONNECTORS = frozenset(
+    {
+        "&",
+        "and",
+        "of",
+        "the",
+        "sole",
+        "vice",
+        "co",
+        "deputy",
+        "assistant",
+        "acting",
+        "interim",
+        "managing",
+        "general",
+        "limited",
+        "executive",
+        "advisory",
+        "finance",
+        "audit",
+        "nominating",
+        "governance",
+        "committee",
+        "board",
+        "emeritus",
+        "in",
+    }
+)
+
 
 def _split_position(raw: str) -> tuple[str | None, str | None]:
     """Split a Schedule E row into ``(position, organization)``.
 
-    The form's two columns merge on extraction with no delimiter, so we only
-    split when the row opens with a recognized position title — the title is the
-    ``Position`` column, the remainder the organization. An unrecognized opening
-    leaves both ``None`` (raw_text still carries the row).
+    The form's two columns merge on extraction with no delimiter, so we split
+    only on a recognized opening. First the exact title list (``President`` /
+    ``Board of Trustees``); failing that, a leading run of role/connector words
+    that carries at least one role word (``Sole Director & President`` /
+    ``Finance Committee Member`` — GH-0150) — these compound and conjoined titles
+    the flat list cannot enumerate, yet the leading block of a real filing shares
+    them across many rows. An unrecognized opening leaves both ``None`` (raw_text
+    still carries the row).
     """
     low = raw.lower()
     for title in _FD_POSITION_TITLES:
@@ -1916,13 +2065,41 @@ def _split_position(raw: str) -> tuple[str | None, str | None]:
             if nxt == " ":  # a real word boundary, not a longer word
                 org = raw[len(title) :].strip()
                 return raw[: len(title)].strip(), org or None
+    # Run-matcher fallback: walk the leading words while each is a role or
+    # connector word, stopping at the organization. Trailing punctuation
+    # (``Director,`` / ``President,``) is ignored for the membership test.
+    words = raw.split()
+    end = 0
+    has_role = False
+    for w in words:
+        key = w.lower().strip(".,;:")  # "&" stays (it is a connector)
+        if key in _FD_POSITION_ROLE_WORDS:
+            has_role = True
+        elif key not in _FD_POSITION_CONNECTORS:
+            break
+        end += 1
+    if has_role and 0 < end < len(words):
+        position = " ".join(words[:end]).rstrip(",")
+        organization = " ".join(words[end:]).strip()
+        return position or None, organization or None
     return None, None
+
+
+# A per-row ``COMMENTS`` continuation line. The filer's free-text note renders on
+# its own line led by the form's small-caps ``C`` glyph (lost to NULs — ``C\x00+:``)
+# or, on an intact rendering, a plain ``C :`` / ``C:``. It is NOT a new position —
+# it annotates the row above — so it must fold into its parent item, never anchor
+# its own row (GH-0150). (The NUL form is also kept out of ``_FD_TRAILER_RE`` by
+# that pattern's ``(?!:)`` lookahead, which is what lets it reach this parser.)
+_FD_E_COMMENT_RE = re.compile(r"^C(?:\x00+|\s*):", re.IGNORECASE)
 
 
 def _parse_schedule_e(lines: list[str]) -> list[ScheduleEItem]:
     """Schedule E (positions) → ``position``/``organization`` + raw_text."""
     items: list[ScheduleEItem] = []
-    for raw in _group_items(lines, starts_item=lambda s: True):
+    for raw in _group_items(
+        lines, starts_item=lambda s: not _FD_E_COMMENT_RE.match(s)
+    ):
         scrubbed = _scrub_raw_text(raw)
         position, organization = _split_position(scrubbed)
         items.append(
@@ -1961,23 +2138,27 @@ def _parse_schedule_f(lines: list[str]) -> list[ScheduleFItem]:
     return items
 
 
-# A Schedule H ``Dates`` column: a single travel date or a date *range*
-# (``06/01/2020 - 06/03/2020`` / ``June 2020`` / ``6/1/2020``). The dash-joined
-# range is matched greedily so the whole span lands in ``dates``, not just its
-# first endpoint. ``Month YYYY`` and the ``MM/DD/YYYY``/``M/YYYY`` forms mirror
-# the other schedules' date vocabularies (1499, 1660); the range tail is optional
-# for a single date. A **yearless** ``M/D`` form is deliberately NOT matched: this
-# regex also gates row-anchoring (``starts_item``), so a bare ``1/2`` / ``9/11``
-# in a wrapped Location/Items continuation line would otherwise spuriously anchor
-# a new trip and fabricate a ``dates`` value the filer never wrote (GH-0103
-# critic). A real travel date carries a year.
+# A Schedule H ``Dates`` column: a single travel date or a start/end date *range*.
+# Two date forms join the range: the older single-``Dates``-column dash form
+# (``06/01/2020 - 06/03/2020``) and the modern split ``Start``/``End Date`` columns
+# that extract space-adjacent (``01/21/2022 01/21/2022`` — #146), so the separator
+# is a dash OR plain whitespace. The range tail is matched greedily so the whole
+# span (both endpoints) lands in ``dates``, not just the start. ``Month YYYY`` and
+# the ``MM/DD/YYYY``/``M/YYYY`` forms mirror the other schedules' date vocabularies
+# (1499, 1660); the range tail is optional for a single date. A **yearless** ``M/D``
+# form is deliberately NOT matched: this regex also gates row-anchoring
+# (``starts_item``), so a bare ``1/2`` / ``9/11`` in a wrapped Location/Items
+# continuation line would otherwise spuriously anchor a new trip and fabricate a
+# ``dates`` value the filer never wrote (GH-0103 critic). Both endpoints carry a
+# year, so the whitespace separator cannot fuse a date with a bare year in the
+# itinerary that follows.
 _FD_H_DATE = (
     r"(?:January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+\d{4}"
     r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4}"
 )
 _FD_H_DATES_RE = re.compile(
-    rf"(?P<dates>(?:{_FD_H_DATE})(?:\s*[-–]\s*(?:{_FD_H_DATE}))?)",
+    rf"(?P<dates>(?:{_FD_H_DATE})(?:(?:\s*[-–]\s*|\s+)(?:{_FD_H_DATE}))?)",
     re.IGNORECASE,
 )
 
@@ -2025,6 +2206,40 @@ def _parse_schedule_h(lines: list[str]) -> list[ScheduleHItem]:
     return items
 
 
+# Schedule J's ``Source (Name and Address)`` column ends at the closing paren of
+# the filer's parenthesized address (``Protect Kids Colorado (Colorado Springs,
+# CO, US) Professional Project …``); everything after it is the ``Brief
+# Description of Duties`` column. The parenthesized address is the only stable
+# interior delimiter the two merged columns offer, so we split there and leave
+# both fields ``None`` when no address paren is present (raw_text still carries
+# the row).
+_FD_J_SOURCE_RE = re.compile(r"^(?P<source>.+?\([^)]*\))\s+(?P<description>\S.*)$")
+
+
+def _parse_schedule_j(lines: list[str]) -> list[ScheduleJItem]:
+    """Schedule J (new-filer comp >$5,000) → ``source``/``description`` + raw_text.
+
+    Columns are ``Source (Name and Address) | Brief Description of Duties``. They
+    merge with no delimiter on extraction except the filer's parenthesized address
+    closing the ``Source`` column (:data:`_FD_J_SOURCE_RE`): we split there:
+    source through the closing paren, description after. A row with no address
+    paren leaves both fields ``None`` and ``raw_text`` carries the row in full.
+    """
+    items: list[ScheduleJItem] = []
+    for raw in _group_items(lines, starts_item=lambda s: True):
+        scrubbed = _scrub_raw_text(raw)
+        m = _FD_J_SOURCE_RE.match(scrubbed)
+        if m:
+            source = _scrub_field(m.group("source")) or None
+            description = _scrub_field(m.group("description")) or None
+        else:
+            source = description = None
+        items.append(
+            ScheduleJItem(source=source, description=description, raw_text=scrubbed)
+        )
+    return items
+
+
 def _split_trailing_dollar(raw: str) -> tuple[str, str | None, str | None]:
     """Split a row into ``(scrubbed, source, money)`` on a trailing dollar figure.
 
@@ -2035,7 +2250,7 @@ def _split_trailing_dollar(raw: str) -> tuple[str, str | None, str | None]:
     when absent; the caller keeps the verbatim ``scrubbed`` as ``raw_text``.
     """
     scrubbed = _scrub_raw_text(raw)
-    m = _FD_TRAILING_DOLLAR_RE.search(scrubbed)
+    m = _FD_TRAILING_DOLLAR_RE.search(scrubbed) or _FD_DOLLAR_RE.search(scrubbed)
     if not m:
         return scrubbed, None, None
     return scrubbed, scrubbed[: m.start()].strip() or None, m.group(1)
@@ -2053,20 +2268,23 @@ def _parse_schedule_g(lines: list[str]) -> list[ScheduleGItem]:
 
 def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
     """Schedule I (charity in lieu of honoraria) → ``source``/``amount`` + raw_text
-    (``Source | Activity | Date | Amount``; see :func:`_split_trailing_dollar`)."""
+    (``Source | Activity | Date | Amount``; see :func:`_split_trailing_dollar`).
+
+    A row anchors on its ``Amount`` column (the one confident I has), so a charity
+    name that wrapped onto following lines (Schiff's "Burbank / Temporary Aid /
+    Center") folds into its row rather than fabricating per-line items (#147)."""
     items: list[ScheduleIItem] = []
-    for raw in _group_items(lines, starts_item=lambda s: True):
+    for raw in _group_items(lines, starts_item=lambda s: bool(_FD_DOLLAR_RE.search(s))):
         scrubbed, source, amount = _split_trailing_dollar(raw)
         items.append(ScheduleIItem(source=source, amount=amount, raw_text=scrubbed))
     return items
 
 
-# J (new-filer comp) has no entry: its two columns merge with no stable
-# delimiter and no committed fixture has a filled form to anchor a split, so it
-# falls through to ``_salvage_raw`` — one raw_text-only item per row, all
-# structured columns ``None``. H (travel) anchors on its ``Dates`` column to
-# coalesce wrapped itineraries and split off source/dates (GH-0103); its
-# ``Location``/``Items`` still merge, so those stay ``None`` (best-effort, #17).
+# J (new-filer comp) splits its ``Source (Name and Address) | Brief Description``
+# columns on the filer's parenthesized address (#146). H (travel) anchors on its
+# ``Dates`` column to coalesce wrapped itineraries and split off source/dates
+# (GH-0103); its ``Location``/``Items`` still merge, so those stay ``None``
+# (best-effort, #17).
 _FD_STRUCTURED = {
     "A": _parse_schedule_a,
     "B": _parse_schedule_b,
@@ -2077,6 +2295,7 @@ _FD_STRUCTURED = {
     "G": _parse_schedule_g,
     "H": _parse_schedule_h,
     "I": _parse_schedule_i,
+    "J": _parse_schedule_j,
 }
 
 # The item model per schedule letter, used to salvage a segment whose column
