@@ -139,17 +139,24 @@ captured once at run entry), incrementally so a partial sweep is already usable:
   header). `jq`-composable and re-processable.
 - **`consolidated-issues.md`** — candidate root causes rolled up into issue
   drafts.
+- **`results-log-entry.md`** — the ready-to-commit results-log entry, in the
+  tracked log's newest-first format. Git-ignored like the rest; a human pastes
+  it into the tracked cross-run log (see below).
 
 Nothing is filed. The drafts are reviewed, then the confirmed in-scope ones
 become issues by hand.
 
-**After each run, append to the results log.** The per-run JSONL/MD above are
-git-ignored and regenerable; the durable record is
+**Each run drafts the results-log entry; a human commits it.** The
+durable cross-run record is the tracked
 [`reports/parse-validation-sweep-results.md`](../reports/parse-validation-sweep-results.md)
-(tracked). Add a new dated section, newest first: scope, the verdict roll-up,
-and the distinct *root-cause* issues — each one line, with novel / known-open /
-regression status and any referenced GH issue. Keep it brief; it is the
-cross-run memory the bulky artifacts can't be.
+— but the run never edits it. Instead the run writes the ready-to-commit entry
+to the git-ignored run dir as `results-log-entry.md`, newest-first: a new dated
+section with scope, the verdict roll-up, and the distinct *root-cause* issues —
+each one line, with novel / known-open / regression status and any referenced GH
+issue. Keep it brief; it is the cross-run memory the bulky artifacts can't be. A
+human then pastes that entry into the tracked log and commits it — standalone, or
+riding the next real PR (e.g. a fix for a bug the sweep surfaced). Because the
+sweep itself touches only git-ignored paths, it needs no worktree and no PR.
 
 ## Guarantee, and its limits
 
