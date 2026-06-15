@@ -1855,6 +1855,13 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
 # A trailing dollar figure (gift/honoraria value) at the (de-wrapped) row end.
 _FD_TRAILING_DOLLAR_RE = re.compile(r"(\$[\d,]+(?:\.\d{2})?)\s*$")
 
+# The same dollar figure anywhere in the row — the fallback when the amount is not
+# the last column (Schiff's Schedule I row "… Article 04/22/2022 $500.00 Burbank
+# Temporary Aid Center": the charity-name tail follows the amount, so the trailing
+# anchor misses and the source would be lost). Schedules I/G carry a single figure,
+# not a ``$lo - $hi`` range, so no range-guard is needed.
+_FD_DOLLAR_RE = re.compile(r"(\$[\d,]+(?:\.\d{2})?)")
+
 # A leading ``Month YYYY`` (or ``MM/YYYY`` / ``MM/DD/YYYY``) agreement/travel date.
 _FD_LEADING_DATE_RE = re.compile(
     r"^\s*("
@@ -2085,7 +2092,7 @@ def _split_trailing_dollar(raw: str) -> tuple[str, str | None, str | None]:
     when absent; the caller keeps the verbatim ``scrubbed`` as ``raw_text``.
     """
     scrubbed = _scrub_raw_text(raw)
-    m = _FD_TRAILING_DOLLAR_RE.search(scrubbed)
+    m = _FD_TRAILING_DOLLAR_RE.search(scrubbed) or _FD_DOLLAR_RE.search(scrubbed)
     if not m:
         return scrubbed, None, None
     return scrubbed, scrubbed[: m.start()].strip() or None, m.group(1)
@@ -2103,9 +2110,13 @@ def _parse_schedule_g(lines: list[str]) -> list[ScheduleGItem]:
 
 def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
     """Schedule I (charity in lieu of honoraria) → ``source``/``amount`` + raw_text
-    (``Source | Activity | Date | Amount``; see :func:`_split_trailing_dollar`)."""
+    (``Source | Activity | Date | Amount``; see :func:`_split_trailing_dollar`).
+
+    A row anchors on its ``Amount`` column (the one confident I has), so a charity
+    name that wrapped onto following lines (Schiff's "Burbank / Temporary Aid /
+    Center") folds into its row rather than fabricating per-line items (#147)."""
     items: list[ScheduleIItem] = []
-    for raw in _group_items(lines, starts_item=lambda s: True):
+    for raw in _group_items(lines, starts_item=lambda s: bool(_FD_DOLLAR_RE.search(s))):
         scrubbed, source, amount = _split_trailing_dollar(raw)
         items.append(ScheduleIItem(source=source, amount=amount, raw_text=scrubbed))
     return items

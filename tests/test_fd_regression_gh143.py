@@ -124,7 +124,6 @@ def test_lopez_schedule_j_no_header_and_split():
 # --- #130 — trailing schedule absorbs the appendix into fabricated rows -------
 
 
-@pytest.mark.xfail(reason="#130 incomplete: populated Schedule I absorbs the appendix", strict=False)
 def test_schiff_schedule_i_single_real_row():
     i = _sched(SCHIFF, "I")
     # PDF: exactly one real entry; parser fabricates 12 appendix rows (13 total)
