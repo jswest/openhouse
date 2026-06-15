@@ -698,24 +698,6 @@ _FD_TRAILER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# The post-table "Asset Class Details" appendix title (#97). It follows the last
-# schedule and is NOT schedule content — its body is a key/legend of asset-class
-# codes, never disclosed rows. When the last schedule is empty (``None
-# disclosed.``) the appendix would otherwise be salvaged into fabricated rows for
-# a schedule the filer left blank, violating the "never fabricate a row" agreement.
-# Two renderings, matched against the NUL-scrubbed line (``_scrub_raw_text``):
-#   • intact / case-mangled — ``Schedules A and B Asset Class Details`` /
-#     ``ScheDule a anD B aSSet claSS DetailS`` — carries the literal phrase.
-#   • small-caps glyph-collapse — every word but the schedule letters loses its
-#     glyphs, so the title flattens to its initials: ``S A B A C D`` (Schedules A
-#     and B Asset Class Details) / ``S A A C D`` (Schedule A Asset Class Details).
-#     Anchored ``S … A C D`` (Asset Class Details), single-letter tokens only, so
-#     a real content row (multi-letter words) can't collide.
-_FD_APPENDIX_RE = re.compile(
-    r"(asset\s+class\s+details|^S(?:\s+[A-Za-z]){1,4}\s+A\s+C\s+D\s*$)",
-    re.IGNORECASE,
-)
-
 # An A/B row's trailing "tx. over $1,000?" checkbox glyph (gfedc unchecked /
 # gfedcb checked) — the same glyph as the PTR cap-gains box, anchored at line end.
 _FD_GLYPH_RE = re.compile(r"\bgfedcb?\s*$")
@@ -769,7 +751,19 @@ _FD_FURNITURE_RE = re.compile(
     r"to Preceding|liability|\* For the complete|\* Asset class|name of organization|"
     # E–J column-header furniture (#17): each schedule's header row, on its own
     # line, leads with these tokens; the values below are filer content.
-    r"Source Description|Source Date|Source Activity|Source Brief)",
+    r"Source Description|Source Date|Source Activity|Source Brief|"
+    # Schedule H/J column header in the glyphs-lost (NUL) rendering (#133):
+    # the small-caps header words extract as NUL runs, so the intact-letter
+    # ``Source Date``/``Source Description`` branches above miss it and the
+    # banner leaks as a phantom raw_text row. Both H (``Source Dates Location
+    # Items``) and J (``Source Description of Duties``) lead with the ``Source``
+    # column (``S\x00+``) followed by a ``D``-initial second column
+    # (``Dates``/``Description`` → ``D\x00+``). Anchoring on that ``S\x00+ D\x00+``
+    # pair is collision-proof: the ``S\x00+ A:`` schedule heading is consumed
+    # before this check, and the ``S\x00+ A \x00+ B`` appendix title has an
+    # ``A``-initial second token — so neither matches. NULs appear only in
+    # furniture (SPEC §2.2), so a real H/J row never trips this.
+    r"S\x00+\s+D\x00+)",
     re.IGNORECASE,
 )
 
@@ -825,6 +819,13 @@ def _segment_schedules(lines: list[str]) -> dict[str, list[str]]:
             and not _FD_FURNITURE_RE.match(ln.strip())
         ]
 
+    def is_none_disclosed() -> bool:
+        # True once the filer's ``None disclosed.`` marker is in the buffer — the
+        # schedule was explicitly left blank. This distinguishes an empty *blank*
+        # schedule (whose only line is the marker) from a populated schedule that
+        # merely hasn't seen its first content row yet (buffer holds furniture).
+        return any(_NONE_DISCLOSED_RE.match(b.strip()) for b in buf if b.strip())
+
     def flush() -> None:
         if current is None:
             return
@@ -844,17 +845,17 @@ def _segment_schedules(lines: list[str]) -> dict[str, list[str]]:
             current = None
             buf = []
             continue
-        # The "Asset Class Details" appendix (#97) follows the last schedule and
-        # is never disclosed rows. If the current schedule is empty so far (the
-        # filer marked it ``None disclosed.``), terminate it here so the appendix
-        # is not salvaged into fabricated rows for a blank schedule. If the
-        # schedule already has real content, fold the appendix into it (as on an
-        # intact document) rather than dropping it — never silently drop.
-        if (
-            current is not None
-            and not meaningful_rows()
-            and _FD_APPENDIX_RE.search(_scrub_raw_text(s))
-        ):
+        # A post-table appendix (asset-class legends, investment-vehicle keys, …)
+        # follows the last schedule and is never disclosed rows. When the filer
+        # marked that trailing schedule ``None disclosed.``, ANY content line that
+        # follows is appendix material, not schedule rows — terminate here so it is
+        # not salvaged into fabricated rows for a schedule the filer left blank
+        # (#130, generalizing #97 which whitelisted only "Asset Class Details").
+        # The test is heading-agnostic: an explicitly-blank schedule cannot grow
+        # real rows, so the first such line ends it regardless of its title. A
+        # populated schedule (real ``meaningful_rows``) never trips this and folds
+        # any appendix into its content as on an intact document — never dropped.
+        if current is not None and is_none_disclosed() and not meaningful_rows():
             flush()
             current = None
             buf = []
@@ -1589,14 +1590,16 @@ def _parse_schedule_b(
 # closed set of phrases on the live form; these are the values attested on the
 # committed fixtures (Thompson: ``Retirement Plan``, ``Pension``, ``Annuity
 # Plan``; Hackett candidate: ``Salary``) and in the issue's cited filings
-# (``Spouse Salary``, ``Professional Services``, ``Spouse Pension``). Longest
-# phrases must precede their prefixes so the alternation is greedy-correct
-# (``Retirement Plan`` before ``Pension``/``Salary``). An UNKNOWN Type is *not*
+# (``Spouse Salary``, ``Professional Services``, ``Spouse Pension``; ``Pension
+# Plan`` attested on GH-0131's 10068086 / 10057260). Longest phrases must precede
+# their prefixes so the alternation is greedy-correct (``Retirement Plan`` before
+# ``Pension``/``Salary``; ``Pension Plan`` before ``Pension``). An UNKNOWN Type is *not*
 # in this list — the caller then falls back to the single-token split so the row
 # still divides (and ``raw_text`` keeps it whole regardless): never dropped.
 _FD_C_TYPE_PHRASES = (
     "Retirement Plan",
     "Annuity Plan",
+    "Pension Plan",
     "Professional Services",
     "Salary",
     "Pension",
@@ -1614,8 +1617,11 @@ _FD_C_TYPE_PHRASES = (
 # ``Member Retirement Plan`` / ``Spouse Pension`` — issue example Davis is
 # ``Spouse Salary``) then one vocabulary phrase, anchored to the head's end so it
 # only claims the trailing Type column, never a phrase buried in the source name.
+# The owner token renders in either case on the live form (``Spouse`` and the
+# all-caps ``SPOUSE``); GH-0101 only listed ``Spouse``, so an all-caps owner bled
+# its token into ``source`` (GH-0131). Both casings are owner tokens, not source.
 _FD_C_TYPE_RE = re.compile(
-    r"\s((?:(?:Member|Spouse|SP|DC|JT)\s+)?(?:"
+    r"\s((?:(?:Member|Spouse|SPOUSE|SP|DC|JT)\s+)?(?:"
     + "|".join(re.escape(p) for p in _FD_C_TYPE_PHRASES)
     + r"))\s*$"
 )
@@ -1670,13 +1676,17 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
     return items
 
 
-# A Schedule D ``Date incurred`` — ``Month YYYY``, ``MM/DD/YYYY``, or ``MM/YYYY``
-# (longer date forms first so the most specific match wins). Used both to anchor a
-# liability row's item-start and to extract the date, so the two always agree.
+# A Schedule D ``Date incurred`` — ``Month DD, YYYY``, ``Month YYYY``,
+# ``MM/DD/YYYY``, or ``MM/YYYY`` (longer date forms first so the most specific
+# match wins). Used both to anchor a liability row's item-start and to extract the
+# date, so the two always agree. The optional ``\d{1,2},`` day-comma group lets the
+# ``Month DD, YYYY`` form be consumed *whole* (GH-0134): otherwise ``Month\s+\d{4}``
+# cannot match the ``Month DD`` head, the bare-year fallback matches only the
+# trailing ``YYYY``, and the ``Month DD,`` fragment leaks into ``creditor``.
 _FD_DATE_RE = re.compile(
     r"\b("
     r"(?:January|February|March|April|May|June|July|August|"
-    r"September|October|November|December)\s+\d{4}"
+    r"September|October|November|December)\s+(?:\d{1,2},\s+)?\d{4}"
     r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b"
 )
 

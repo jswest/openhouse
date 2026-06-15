@@ -362,6 +362,50 @@ def test_schedule_c_multiword_type_does_not_bleed_into_source():
     assert annuity["income_type"] == "Spouse Annuity Plan"
 
 
+def test_schedule_c_spouse_pension_prefixed_type_does_not_bleed_into_source():
+    # GH-0131: closed #101 fixed the multi-word and ``Spouse``-prefixed Type cases,
+    # but two prefixed-Type shapes still bled their leading token into ``source``:
+    #   - an all-caps owner token (``SPOUSE``) — #101 only listed ``Spouse``, so the
+    #     all-caps owner fell through to the last-token split and lodged in source;
+    #   - a Type that *begins with* ``Pension`` and runs two words (``Pension Plan``)
+    #     — ``Pension Plan`` was not a vocabulary phrase, so the split truncated
+    #     income_type to ``Plan`` and shoved ``Pension`` into source.
+    # The named filings (10068086, 5 rows; 10057260) are not checked into
+    # tests/fixtures/, so we reproduce their row shapes synthetically (the #101/#97
+    # convention), asserting the CORRECT source AND income_type for each row.
+    from openhouse.pdf import _parse_schedule_c
+
+    # 10068086 — five Schedule C rows mixing the regressing shapes with the cases
+    # #101 already handled (those must stay green here too).
+    rows = _parse_schedule_c(
+        [
+            "Acme Industries SPOUSE Salary $50,000.00",            # all-caps owner + Type
+            "Teachers Retirement System Pension Plan N/A",        # Type begins with Pension
+            "State of Mississippi Member Retirement Plan $11,195.00",  # #101: owner + 2-word Type
+            "AXA Equitable Annuity Spouse Annuity Plan N/A",      # #101: phrase also in source
+            "Consulting LLC Professional Services $25,000.00",    # #101: 2-word Type, no owner
+        ]
+    )
+    assert len(rows) == 5
+    by_src = {r.source: r for r in rows}
+
+    assert by_src["Acme Industries"].income_type == "SPOUSE Salary"
+    assert by_src["Acme Industries"].amount == "$50,000.00"
+
+    assert by_src["Teachers Retirement System"].income_type == "Pension Plan"
+    assert by_src["Teachers Retirement System"].amount == "N/A"
+
+    assert by_src["State of Mississippi"].income_type == "Member Retirement Plan"
+    assert by_src["AXA Equitable Annuity"].income_type == "Spouse Annuity Plan"
+    assert by_src["Consulting LLC"].income_type == "Professional Services"
+
+    # 10057260 — a SPOUSE-prefixed pension row: the owner token stays in the Type.
+    (row,) = _parse_schedule_c(["Northern Trust Company SPOUSE Pension N/A"])
+    assert row.source == "Northern Trust Company"
+    assert row.income_type == "SPOUSE Pension"
+    assert row.amount == "N/A"
+
+
 def test_schedule_c_unknown_multiword_type_degrades_safely(monkeypatch):
     # An UNKNOWN Type (not in the vocabulary) falls back to the single-token
     # split rather than being dropped — and the verbatim row survives in
@@ -551,6 +595,66 @@ def test_schedule_h_yearless_slash_in_continuation_does_not_anchor(monkeypatch):
     assert all(item["dates"] != "1/2" and item["dates"] != "9/11" for item in h)
     # The wrapped continuation text is preserved in the single row's raw_text.
     assert "9/11 Memorial Museum" in h[0]["raw_text"]
+
+
+def test_schedule_h_nul_glyph_header_not_emitted_as_row(monkeypatch):
+    # #133 (FABRICATION; verified on 10054295 / 10059679, both NUL-rendered annual
+    # FDs): in the glyphs-lost rendering the Schedule H column-header line extracts
+    # as NUL runs (``Source Dates Location Items`` → ``S\x00+ D\x00+ L\x00+ I\x00+``),
+    # so the intact-letter ``Source Date`` furniture branch misses it and the banner
+    # leaks as a phantom raw_text row (structured fields null). The header must be
+    # recognized and skipped before row extraction.
+    header = f"S{chr(0) * 5} D{chr(0) * 4} L{chr(0) * 7} I{chr(0) * 4}"
+    page = "\n".join(
+        [
+            f"S{chr(0) * 7} H: t{chr(0) * 30}",  # ScheDule H: travel… (NUL heading)
+            header,
+            "Policy Institute 06/01/2020 - 06/03/2020 Aspen, Colorado",
+            "Lodging and conference registration fees",
+            f"C{chr(0) * 12} a{chr(0) * 2} S{chr(0) * 8}",  # certification… trailer
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    h = extract_fd_schedules(Path("synthetic.pdf")).schedules["H"]
+    # The header is NOT a row: exactly one item (the real trip), no phantom record.
+    assert len(h) == 1
+    # No item carries the header banner as its raw_text (the fabrication signature).
+    assert all(chr(0) not in item["raw_text"] for item in h)
+    assert all("Source" not in item["raw_text"] for item in h)
+    # The real H row degrades to raw_text as designed: source/dates split off, the
+    # by-design Location/Items merge stays null, full row preserved in raw_text.
+    assert h[0]["source"] == "Policy Institute"
+    assert h[0]["dates"] == "06/01/2020 - 06/03/2020"
+    assert h[0]["location"] is None
+    assert h[0]["items"] is None
+    assert "Aspen, Colorado" in h[0]["raw_text"]
+
+
+def test_schedule_j_nul_glyph_header_not_emitted_and_row_degrades(monkeypatch):
+    # #133 (FABRICATION; verified on 10061936, a NUL-rendered annual FD): Schedule J
+    # has no structured parser — every real row degrades to a raw_text-only item by
+    # design (its two columns merge with no stable delimiter). The NUL-rendered
+    # column header (``Source Description of Duties`` → ``S\x00+ D\x00+ … D\x00+``)
+    # must be skipped so it is not salvaged into a phantom raw_text row.
+    header = f"S{chr(0) * 5} D{chr(0) * 10} of D{chr(0) * 5}"
+    page = "\n".join(
+        [
+            # ScheDule J: comPenSation… (NUL heading)
+            f"S{chr(0) * 7} J: c{chr(0) * 40}",
+            header,
+            "Acme Corporation Senior advisory and consulting services",
+            f"C{chr(0) * 12} a{chr(0) * 2} S{chr(0) * 8}",  # certification trailer
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    j = extract_fd_schedules(Path("synthetic.pdf")).schedules["J"]
+    # The header is NOT a row: exactly one item (the real disclosure), no phantom.
+    assert len(j) == 1
+    assert all(chr(0) not in item["raw_text"] for item in j)
+    # The real J row degrades to raw_text as designed: all structured columns null,
+    # the full row carried verbatim in raw_text (J has no column parser).
+    assert j[0]["raw_text"] == "Acme Corporation Senior advisory and consulting services"
+    assert all(v is None for k, v in j[0].items() if k != "raw_text")
 
 
 # --- D structured (synthetic, since the fixture's D is "None disclosed.") ------
@@ -865,6 +969,97 @@ def test_empty_trailing_schedule_nul_appendix_not_fabricated(monkeypatch):
     )
     assert "Non-federal Retirement Accounts" not in all_raw
     assert "Charles Schwab" not in all_raw
+
+
+def test_empty_trailing_schedule_does_not_absorb_nonwhitelisted_appendix(monkeypatch):
+    # #130: the empty-trailing-schedule termination must be HEADING-AGNOSTIC. #97
+    # only whitelisted the "Asset Class Details" appendix, so any OTHER post-table
+    # appendix (e.g. "Investment Vehicle Details") after a ``None disclosed.``
+    # trailing schedule still bled in and was fabricated into Schedule I rows
+    # (verified on 10057260 / 10059583 / 10059679 / 10068086 (I), 10068928 (J)).
+    page = "\n".join(
+        [
+            "ScheDule a: aSSetS anD \"unearneD\" income",
+            "asset owner value of asset income income tx. >",
+            "Vanguard 500 Index Fund [MF] JT $1,001 - $15,000 None",
+            # Trailing Schedule I, marked empty by the filer.
+            "ScheDule i: PaymentS maDe to cHarity in lieu of Honoraria",
+            "None disclosed.",
+            # A post-table appendix whose title is NOT "Asset Class Details" — its
+            # lines are an investment-vehicle key, NOT Schedule I disclosures.
+            "Investment Vehicle Details",
+            "Vanguard 500 Index Fund",
+            "Fidelity Contrafund",
+            "American Funds Growth Fund",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    # A keeps its real row; I was "None disclosed." → absent, NOT fabricated rows.
+    assert "I" not in body.schedules
+    assert sorted(body.schedules) == ["A"]
+    all_raw = " ".join(
+        item["raw_text"] for items in body.schedules.values() for item in items
+    )
+    # The appendix vehicle names never surface as disclosed content anywhere.
+    assert "Fidelity Contrafund" not in all_raw
+    assert "American Funds Growth Fund" not in all_raw
+
+
+def test_empty_trailing_schedule_j_does_not_absorb_appendix(monkeypatch):
+    # #130 (J variant, verified on 10068928): an empty trailing Schedule J followed
+    # by ANY post-table appendix terminates before the appendix — no fabricated J.
+    page = "\n".join(
+        [
+            f"S{chr(0) * 7} E: P{chr(0) * 8}",
+            "Position Name of Organization",
+            "Board member Some Nonprofit, Inc.",
+            # Trailing Schedule J, empty.
+            "ScheDule J: comPenSation in exceSS of $5,000 PaiD By one Source",
+            "None disclosed.",
+            # Non-whitelisted appendix material follows.
+            "Investment Vehicle Details",
+            "Some Managed Account Program",
+            "Charles Schwab JT TEN (Owner: JT)",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    # E keeps its real row; J was "None disclosed." → absent, not fabricated.
+    assert "J" not in body.schedules
+    assert sorted(body.schedules) == ["E"]
+    all_raw = " ".join(
+        item["raw_text"] for items in body.schedules.values() for item in items
+    )
+    assert "Some Managed Account Program" not in all_raw
+    assert "Charles Schwab" not in all_raw
+
+
+def test_populated_trailing_schedule_still_folds_appendix(monkeypatch):
+    # #130 guard: the heading-agnostic termination must fire ONLY for an explicitly
+    # blank (``None disclosed.``) schedule. A trailing schedule with REAL rows still
+    # folds a following appendix into its content rather than dropping it — the
+    # "never silently drop a filing" agreement. (Without the ``None disclosed.``
+    # gate, a naive "no rows yet" test would wrongly terminate populated schedules.)
+    page = "\n".join(
+        [
+            "ScheDule a: aSSetS anD \"unearneD\" income",
+            "asset owner value of asset income income tx. >",
+            "Vanguard 500 Index Fund [MF] JT $1,001 - $15,000 None",
+            # Trailing Schedule I WITH a real disclosed row (not blank).
+            "ScheDule i: PaymentS maDe to cHarity in lieu of Honoraria",
+            "Habitat for Humanity Speaking fee 2024 $5,000",
+            # Appendix follows a populated schedule → folded in, never dropped.
+            "Investment Vehicle Details",
+            "Vanguard 500 Index Fund",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    assert "I" in body.schedules  # real content kept, not terminated away
+    i_raw = " ".join(item["raw_text"] for item in body.schedules["I"])
+    assert "Habitat for Humanity" in i_raw  # the real row survives
+    assert "Investment Vehicle Details" in i_raw  # appendix folded, not dropped
 
 
 def test_nul_extension_cover_sheet_still_not_an_fd_body(monkeypatch):
@@ -1538,6 +1733,70 @@ def test_schedule_d_present_but_unparseable_amount_stays_visible(monkeypatch):
     # raw_text — the loss is visible, not silent.
     assert "$100,001 -" in d[0]["liability_type"]
     assert "$100,001 -" in d[0]["raw_text"]
+
+
+def test_schedule_d_month_day_year_date_consumed_whole(monkeypatch):
+    # GH-0134: a single-line Date incurred written as "Month DD, YYYY" must be
+    # consumed WHOLE (comma included) into date_incurred. Before the fix
+    # _FD_DATE_RE matched only "Month YYYY", so "Month DD," failed it, the
+    # bare-year fallback captured only the trailing year, and the "Month DD,"
+    # fragment leaked into creditor. Two real rows from the issue:
+    #   10063197 (D[1]): "April 15, 2019".
+    #   10057260 (D[5]): "January 1, 2020".
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            # 10063197 D[1] shape: Month DD, YYYY date, single-line amount.
+            "Navient April 15, 2019 Student Loan $15,001 - $50,000",
+            # 10057260 D[5] shape: a second Month DD, YYYY row.
+            "Wells Fargo January 1, 2020 Mortgage $250,001 - $500,000",
+            # Control: the comma-less Month YYYY form is unaffected.
+            "Old National Bank January 2016 Mortgage $15,001 - $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 3
+    # The whole "Month DD, YYYY" lands in date_incurred — no fragment leaks.
+    assert d[0]["creditor"] == "Navient"
+    assert d[0]["date_incurred"] == "April 15, 2019"
+    assert d[0]["liability_type"] == "Student Loan"
+    assert d[0]["amount_range"]["label"] == "$15,001 - $50,000"
+    assert d[1]["creditor"] == "Wells Fargo"
+    assert d[1]["date_incurred"] == "January 1, 2020"
+    assert d[1]["liability_type"] == "Mortgage"
+    assert d[1]["amount_range"]["label"] == "$250,001 - $500,000"
+    # Control row (comma-less Month YYYY) still parses as before.
+    assert d[2]["creditor"] == "Old National Bank"
+    assert d[2]["date_incurred"] == "January 2016"
+
+
+def test_schedule_d_month_day_year_with_wrapped_amount(monkeypatch):
+    # GH-0134 + GH-0102: the Month DD, YYYY date must coexist with the wrapped-Type
+    # amount handling — the date is consumed whole AND the interleaved amount is
+    # recovered, with a clean creditor and rejoined type.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            "BB&T Bank April 15, 2019 Mortgage on Rental Property, $100,001 -",
+            "Washington, DC $250,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 1
+    assert d[0]["creditor"] == "BB&T Bank"
+    assert d[0]["date_incurred"] == "April 15, 2019"
+    assert d[0]["liability_type"] == "Mortgage on Rental Property, Washington, DC"
+    assert d[0]["amount_range"] == {
+        "low": 100001,
+        "high": 250000,
+        "label": "$100,001 - $250,000",
+    }
 
 
 def test_schedule_f_bare_year_leading_date(monkeypatch):
