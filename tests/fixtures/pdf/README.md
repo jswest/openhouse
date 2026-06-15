@@ -98,3 +98,22 @@ The two e-filed PTRs double as body-extraction fixtures (`tests/test_ptr_extract
 **Legal (SPEC §1).** Clerk FD data carries a statutory use restriction: not for
 commercial use, soliciting, or establishing credit ratings. These files are
 checked in solely as test fixtures for an open-source parser.
+
+## GH-0143 column-content regression fixtures (schema-8, sweep run-202606150610)
+
+Real annual-FD PDFs (2022–2024) where the v0.8.0 column-content fixes
+(#130/#131/#133/#134) and #132 did **not** generalize — the failing cases the
+prior PRs' synthetic shapes missed. Asserted by
+`tests/test_fd_regression_gh143.py` (each `xfail` until its fix lands). Expected
+values are the vision-verified PDF truth in
+`reports/run-202606150610/calibration.jsonl`.
+
+| File | DocID | Yr | Pins (bug) |
+|---|---|---|---|
+| `efiled_fd_colcontent_10054507.pdf` | 10054507 | 2022 | Schiff — all four: C Spouse bleed (#131), D collapse on "Various dates in 2022" (#134), H header-as-row (#133), I absorbs appendix (#130) |
+| `efiled_fd_schedeh_10054295.pdf` | 10054295 | 2022 | Harris — H header-as-row (#133); E unsplit + comment-as-row (E/F strand) |
+| `efiled_fd_schedcdh_10057260.pdf` | 10057260 | 2023 | Waltz — C "Spouse salary" bleed (#131), D "Jan 2022" leak (#134), H header (#133); #130 holds here |
+| `efiled_fd_schede_10059583.pdf` | 10059583 | 2023 | Williams — E[0..6] position/organization unsplit (E/F strand); all four fixes hold |
+| `efiled_fd_schedh_10059679.pdf` | 10059679 | 2023 | Brownley — H header-as-row + H[1] field loss (#133) |
+| `efiled_fd_schedj_10061936.pdf` | 10061936 | 2024 | Lopez — J header-as-row + J[1] unsplit (#133) |
+| `efiled_fd_incomecols_10062886.pdf` | 10062886 | 2023 | Moore — two-income Schedule A column corruption (#132) |
