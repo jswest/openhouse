@@ -22,6 +22,10 @@ Each subagent absorbs the rasterized PDF in a throwaway context and returns
 > - Parsed record (JSON): `{PARSED_JSON}`
 > - Metadata: `doc_id={DOC_ID}`, `year={YEAR}`, `filing_type={FILING_TYPE}`,
 >   `pdf_class={PDF_CLASS}`
+> - Render scratch dir (yours alone): `{RENDER_DIR}` — rasterize the PDF's pages
+>   **only** into this per-`doc_id` directory. Never write to a shared temp dir:
+>   concurrent subagents that rasterize into the same path clobber each other and
+>   one agent ends up reading another filing's pages.
 >
 > **Method**
 > 1. Render the PDF in full and **transcribe every field and row by vision** —
@@ -95,7 +99,8 @@ Each subagent absorbs the rasterized PDF in a throwaway context and returns
 >   "notes": "anything the orchestrator should know; empty string if none"
 > }
 > ```
-> Do not read or modify anything other than the PDF at `{PDF_PATH}`.
+> Do not read or modify anything other than the PDF at `{PDF_PATH}` and your own
+> render scratch dir `{RENDER_DIR}`.
 
 ---
 
