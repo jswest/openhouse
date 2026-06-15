@@ -698,24 +698,6 @@ _FD_TRAILER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# The post-table "Asset Class Details" appendix title (#97). It follows the last
-# schedule and is NOT schedule content — its body is a key/legend of asset-class
-# codes, never disclosed rows. When the last schedule is empty (``None
-# disclosed.``) the appendix would otherwise be salvaged into fabricated rows for
-# a schedule the filer left blank, violating the "never fabricate a row" agreement.
-# Two renderings, matched against the NUL-scrubbed line (``_scrub_raw_text``):
-#   • intact / case-mangled — ``Schedules A and B Asset Class Details`` /
-#     ``ScheDule a anD B aSSet claSS DetailS`` — carries the literal phrase.
-#   • small-caps glyph-collapse — every word but the schedule letters loses its
-#     glyphs, so the title flattens to its initials: ``S A B A C D`` (Schedules A
-#     and B Asset Class Details) / ``S A A C D`` (Schedule A Asset Class Details).
-#     Anchored ``S … A C D`` (Asset Class Details), single-letter tokens only, so
-#     a real content row (multi-letter words) can't collide.
-_FD_APPENDIX_RE = re.compile(
-    r"(asset\s+class\s+details|^S(?:\s+[A-Za-z]){1,4}\s+A\s+C\s+D\s*$)",
-    re.IGNORECASE,
-)
-
 # An A/B row's trailing "tx. over $1,000?" checkbox glyph (gfedc unchecked /
 # gfedcb checked) — the same glyph as the PTR cap-gains box, anchored at line end.
 _FD_GLYPH_RE = re.compile(r"\bgfedcb?\s*$")
@@ -825,6 +807,13 @@ def _segment_schedules(lines: list[str]) -> dict[str, list[str]]:
             and not _FD_FURNITURE_RE.match(ln.strip())
         ]
 
+    def is_none_disclosed() -> bool:
+        # True once the filer's ``None disclosed.`` marker is in the buffer — the
+        # schedule was explicitly left blank. This distinguishes an empty *blank*
+        # schedule (whose only line is the marker) from a populated schedule that
+        # merely hasn't seen its first content row yet (buffer holds furniture).
+        return any(_NONE_DISCLOSED_RE.match(b.strip()) for b in buf if b.strip())
+
     def flush() -> None:
         if current is None:
             return
@@ -844,17 +833,17 @@ def _segment_schedules(lines: list[str]) -> dict[str, list[str]]:
             current = None
             buf = []
             continue
-        # The "Asset Class Details" appendix (#97) follows the last schedule and
-        # is never disclosed rows. If the current schedule is empty so far (the
-        # filer marked it ``None disclosed.``), terminate it here so the appendix
-        # is not salvaged into fabricated rows for a blank schedule. If the
-        # schedule already has real content, fold the appendix into it (as on an
-        # intact document) rather than dropping it — never silently drop.
-        if (
-            current is not None
-            and not meaningful_rows()
-            and _FD_APPENDIX_RE.search(_scrub_raw_text(s))
-        ):
+        # A post-table appendix (asset-class legends, investment-vehicle keys, …)
+        # follows the last schedule and is never disclosed rows. When the filer
+        # marked that trailing schedule ``None disclosed.``, ANY content line that
+        # follows is appendix material, not schedule rows — terminate here so it is
+        # not salvaged into fabricated rows for a schedule the filer left blank
+        # (#130, generalizing #97 which whitelisted only "Asset Class Details").
+        # The test is heading-agnostic: an explicitly-blank schedule cannot grow
+        # real rows, so the first such line ends it regardless of its title. A
+        # populated schedule (real ``meaningful_rows``) never trips this and folds
+        # any appendix into its content as on an intact document — never dropped.
+        if current is not None and is_none_disclosed() and not meaningful_rows():
             flush()
             current = None
             buf = []

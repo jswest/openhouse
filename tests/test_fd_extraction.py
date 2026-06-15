@@ -867,6 +867,97 @@ def test_empty_trailing_schedule_nul_appendix_not_fabricated(monkeypatch):
     assert "Charles Schwab" not in all_raw
 
 
+def test_empty_trailing_schedule_does_not_absorb_nonwhitelisted_appendix(monkeypatch):
+    # #130: the empty-trailing-schedule termination must be HEADING-AGNOSTIC. #97
+    # only whitelisted the "Asset Class Details" appendix, so any OTHER post-table
+    # appendix (e.g. "Investment Vehicle Details") after a ``None disclosed.``
+    # trailing schedule still bled in and was fabricated into Schedule I rows
+    # (verified on 10057260 / 10059583 / 10059679 / 10068086 (I), 10068928 (J)).
+    page = "\n".join(
+        [
+            "ScheDule a: aSSetS anD \"unearneD\" income",
+            "asset owner value of asset income income tx. >",
+            "Vanguard 500 Index Fund [MF] JT $1,001 - $15,000 None",
+            # Trailing Schedule I, marked empty by the filer.
+            "ScheDule i: PaymentS maDe to cHarity in lieu of Honoraria",
+            "None disclosed.",
+            # A post-table appendix whose title is NOT "Asset Class Details" — its
+            # lines are an investment-vehicle key, NOT Schedule I disclosures.
+            "Investment Vehicle Details",
+            "Vanguard 500 Index Fund",
+            "Fidelity Contrafund",
+            "American Funds Growth Fund",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    # A keeps its real row; I was "None disclosed." → absent, NOT fabricated rows.
+    assert "I" not in body.schedules
+    assert sorted(body.schedules) == ["A"]
+    all_raw = " ".join(
+        item["raw_text"] for items in body.schedules.values() for item in items
+    )
+    # The appendix vehicle names never surface as disclosed content anywhere.
+    assert "Fidelity Contrafund" not in all_raw
+    assert "American Funds Growth Fund" not in all_raw
+
+
+def test_empty_trailing_schedule_j_does_not_absorb_appendix(monkeypatch):
+    # #130 (J variant, verified on 10068928): an empty trailing Schedule J followed
+    # by ANY post-table appendix terminates before the appendix — no fabricated J.
+    page = "\n".join(
+        [
+            f"S{chr(0) * 7} E: P{chr(0) * 8}",
+            "Position Name of Organization",
+            "Board member Some Nonprofit, Inc.",
+            # Trailing Schedule J, empty.
+            "ScheDule J: comPenSation in exceSS of $5,000 PaiD By one Source",
+            "None disclosed.",
+            # Non-whitelisted appendix material follows.
+            "Investment Vehicle Details",
+            "Some Managed Account Program",
+            "Charles Schwab JT TEN (Owner: JT)",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    # E keeps its real row; J was "None disclosed." → absent, not fabricated.
+    assert "J" not in body.schedules
+    assert sorted(body.schedules) == ["E"]
+    all_raw = " ".join(
+        item["raw_text"] for items in body.schedules.values() for item in items
+    )
+    assert "Some Managed Account Program" not in all_raw
+    assert "Charles Schwab" not in all_raw
+
+
+def test_populated_trailing_schedule_still_folds_appendix(monkeypatch):
+    # #130 guard: the heading-agnostic termination must fire ONLY for an explicitly
+    # blank (``None disclosed.``) schedule. A trailing schedule with REAL rows still
+    # folds a following appendix into its content rather than dropping it — the
+    # "never silently drop a filing" agreement. (Without the ``None disclosed.``
+    # gate, a naive "no rows yet" test would wrongly terminate populated schedules.)
+    page = "\n".join(
+        [
+            "ScheDule a: aSSetS anD \"unearneD\" income",
+            "asset owner value of asset income income tx. >",
+            "Vanguard 500 Index Fund [MF] JT $1,001 - $15,000 None",
+            # Trailing Schedule I WITH a real disclosed row (not blank).
+            "ScheDule i: PaymentS maDe to cHarity in lieu of Honoraria",
+            "Habitat for Humanity Speaking fee 2024 $5,000",
+            # Appendix follows a populated schedule → folded in, never dropped.
+            "Investment Vehicle Details",
+            "Vanguard 500 Index Fund",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    body = extract_fd_schedules(Path("synthetic.pdf"))
+    assert "I" in body.schedules  # real content kept, not terminated away
+    i_raw = " ".join(item["raw_text"] for item in body.schedules["I"])
+    assert "Habitat for Humanity" in i_raw  # the real row survives
+    assert "Investment Vehicle Details" in i_raw  # appendix folded, not dropped
+
+
 def test_nul_extension_cover_sheet_still_not_an_fd_body(monkeypatch):
     # A glyphs-lost extension/cover sheet (small-caps titles render as NUL runs
     # but there are no "S… <LETTER>:" headings) must STILL raise NotAnFdBody —
