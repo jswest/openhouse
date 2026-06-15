@@ -752,6 +752,18 @@ _FD_FURNITURE_RE = re.compile(
     # E–J column-header furniture (#17): each schedule's header row, on its own
     # line, leads with these tokens; the values below are filer content.
     r"Source Description|Source Date|Source Activity|Source Brief|"
+    # The modern intact-letter H/J header bands (#146). The live form's Schedule H
+    # header wraps across physical lines as ``Trip Details Inclusions`` /
+    # ``Source Start [Date] End Date Itinerary Days at Own Lodging? Food? Family?``
+    # / a ``[Date ]Exp.`` tail; Schedule J's header is
+    # ``Source (Name and Address) Brief Description of Duties``. None leads with a
+    # bare ``Source <column>`` token, so the branches above miss them and the
+    # banner leaks as phantom pre-anchor rows. A real H row opens with the trip's
+    # funding source then a date (never ``Source Start`` / ``Trip Details``), and a
+    # real J row's source is the org's name+parenthesized address (not the literal
+    # ``(Name and Address)`` placeholder), so none collides.
+    r"Trip Details|Source Start|(?:Date )?Exp\.$|"
+    r"Source \(Name and Address\)|"
     # Schedule H/J column header in the glyphs-lost (NUL) rendering (#133):
     # the small-caps header words extract as NUL runs, so the intact-letter
     # ``Source Date``/``Source Description`` branches above miss it and the
@@ -1961,23 +1973,27 @@ def _parse_schedule_f(lines: list[str]) -> list[ScheduleFItem]:
     return items
 
 
-# A Schedule H ``Dates`` column: a single travel date or a date *range*
-# (``06/01/2020 - 06/03/2020`` / ``June 2020`` / ``6/1/2020``). The dash-joined
-# range is matched greedily so the whole span lands in ``dates``, not just its
-# first endpoint. ``Month YYYY`` and the ``MM/DD/YYYY``/``M/YYYY`` forms mirror
-# the other schedules' date vocabularies (1499, 1660); the range tail is optional
-# for a single date. A **yearless** ``M/D`` form is deliberately NOT matched: this
-# regex also gates row-anchoring (``starts_item``), so a bare ``1/2`` / ``9/11``
-# in a wrapped Location/Items continuation line would otherwise spuriously anchor
-# a new trip and fabricate a ``dates`` value the filer never wrote (GH-0103
-# critic). A real travel date carries a year.
+# A Schedule H ``Dates`` column: a single travel date or a start/end date *range*.
+# Two date forms join the range: the older single-``Dates``-column dash form
+# (``06/01/2020 - 06/03/2020``) and the modern split ``Start``/``End Date`` columns
+# that extract space-adjacent (``01/21/2022 01/21/2022`` — #146), so the separator
+# is a dash OR plain whitespace. The range tail is matched greedily so the whole
+# span (both endpoints) lands in ``dates``, not just the start. ``Month YYYY`` and
+# the ``MM/DD/YYYY``/``M/YYYY`` forms mirror the other schedules' date vocabularies
+# (1499, 1660); the range tail is optional for a single date. A **yearless** ``M/D``
+# form is deliberately NOT matched: this regex also gates row-anchoring
+# (``starts_item``), so a bare ``1/2`` / ``9/11`` in a wrapped Location/Items
+# continuation line would otherwise spuriously anchor a new trip and fabricate a
+# ``dates`` value the filer never wrote (GH-0103 critic). Both endpoints carry a
+# year, so the whitespace separator cannot fuse a date with a bare year in the
+# itinerary that follows.
 _FD_H_DATE = (
     r"(?:January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+\d{4}"
     r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4}"
 )
 _FD_H_DATES_RE = re.compile(
-    rf"(?P<dates>(?:{_FD_H_DATE})(?:\s*[-–]\s*(?:{_FD_H_DATE}))?)",
+    rf"(?P<dates>(?:{_FD_H_DATE})(?:(?:\s*[-–]\s*|\s+)(?:{_FD_H_DATE}))?)",
     re.IGNORECASE,
 )
 
@@ -2025,6 +2041,40 @@ def _parse_schedule_h(lines: list[str]) -> list[ScheduleHItem]:
     return items
 
 
+# Schedule J's ``Source (Name and Address)`` column ends at the closing paren of
+# the filer's parenthesized address (``Protect Kids Colorado (Colorado Springs,
+# CO, US) Professional Project …``); everything after it is the ``Brief
+# Description of Duties`` column. The parenthesized address is the only stable
+# interior delimiter the two merged columns offer, so we split there and leave
+# both fields ``None`` when no address paren is present (raw_text still carries
+# the row).
+_FD_J_SOURCE_RE = re.compile(r"^(?P<source>.+?\([^)]*\))\s+(?P<description>\S.*)$")
+
+
+def _parse_schedule_j(lines: list[str]) -> list[ScheduleJItem]:
+    """Schedule J (new-filer comp >$5,000) → ``source``/``description`` + raw_text.
+
+    Columns are ``Source (Name and Address) | Brief Description of Duties``. They
+    merge with no delimiter on extraction except the filer's parenthesized address
+    closing the ``Source`` column (:data:`_FD_J_SOURCE_RE`): we split there:
+    source through the closing paren, description after. A row with no address
+    paren leaves both fields ``None`` and ``raw_text`` carries the row in full.
+    """
+    items: list[ScheduleJItem] = []
+    for raw in _group_items(lines, starts_item=lambda s: True):
+        scrubbed = _scrub_raw_text(raw)
+        m = _FD_J_SOURCE_RE.match(scrubbed)
+        if m:
+            source = _scrub_field(m.group("source")) or None
+            description = _scrub_field(m.group("description")) or None
+        else:
+            source = description = None
+        items.append(
+            ScheduleJItem(source=source, description=description, raw_text=scrubbed)
+        )
+    return items
+
+
 def _split_trailing_dollar(raw: str) -> tuple[str, str | None, str | None]:
     """Split a row into ``(scrubbed, source, money)`` on a trailing dollar figure.
 
@@ -2061,12 +2111,11 @@ def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
     return items
 
 
-# J (new-filer comp) has no entry: its two columns merge with no stable
-# delimiter and no committed fixture has a filled form to anchor a split, so it
-# falls through to ``_salvage_raw`` — one raw_text-only item per row, all
-# structured columns ``None``. H (travel) anchors on its ``Dates`` column to
-# coalesce wrapped itineraries and split off source/dates (GH-0103); its
-# ``Location``/``Items`` still merge, so those stay ``None`` (best-effort, #17).
+# J (new-filer comp) splits its ``Source (Name and Address) | Brief Description``
+# columns on the filer's parenthesized address (#146). H (travel) anchors on its
+# ``Dates`` column to coalesce wrapped itineraries and split off source/dates
+# (GH-0103); its ``Location``/``Items`` still merge, so those stay ``None``
+# (best-effort, #17).
 _FD_STRUCTURED = {
     "A": _parse_schedule_a,
     "B": _parse_schedule_b,
@@ -2077,6 +2126,7 @@ _FD_STRUCTURED = {
     "G": _parse_schedule_g,
     "H": _parse_schedule_h,
     "I": _parse_schedule_i,
+    "J": _parse_schedule_j,
 }
 
 # The item model per schedule letter, used to salvage a segment whose column
