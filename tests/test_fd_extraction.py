@@ -362,6 +362,50 @@ def test_schedule_c_multiword_type_does_not_bleed_into_source():
     assert annuity["income_type"] == "Spouse Annuity Plan"
 
 
+def test_schedule_c_spouse_pension_prefixed_type_does_not_bleed_into_source():
+    # GH-0131: closed #101 fixed the multi-word and ``Spouse``-prefixed Type cases,
+    # but two prefixed-Type shapes still bled their leading token into ``source``:
+    #   - an all-caps owner token (``SPOUSE``) — #101 only listed ``Spouse``, so the
+    #     all-caps owner fell through to the last-token split and lodged in source;
+    #   - a Type that *begins with* ``Pension`` and runs two words (``Pension Plan``)
+    #     — ``Pension Plan`` was not a vocabulary phrase, so the split truncated
+    #     income_type to ``Plan`` and shoved ``Pension`` into source.
+    # The named filings (10068086, 5 rows; 10057260) are not checked into
+    # tests/fixtures/, so we reproduce their row shapes synthetically (the #101/#97
+    # convention), asserting the CORRECT source AND income_type for each row.
+    from openhouse.pdf import _parse_schedule_c
+
+    # 10068086 — five Schedule C rows mixing the regressing shapes with the cases
+    # #101 already handled (those must stay green here too).
+    rows = _parse_schedule_c(
+        [
+            "Acme Industries SPOUSE Salary $50,000.00",            # all-caps owner + Type
+            "Teachers Retirement System Pension Plan N/A",        # Type begins with Pension
+            "State of Mississippi Member Retirement Plan $11,195.00",  # #101: owner + 2-word Type
+            "AXA Equitable Annuity Spouse Annuity Plan N/A",      # #101: phrase also in source
+            "Consulting LLC Professional Services $25,000.00",    # #101: 2-word Type, no owner
+        ]
+    )
+    assert len(rows) == 5
+    by_src = {r.source: r for r in rows}
+
+    assert by_src["Acme Industries"].income_type == "SPOUSE Salary"
+    assert by_src["Acme Industries"].amount == "$50,000.00"
+
+    assert by_src["Teachers Retirement System"].income_type == "Pension Plan"
+    assert by_src["Teachers Retirement System"].amount == "N/A"
+
+    assert by_src["State of Mississippi"].income_type == "Member Retirement Plan"
+    assert by_src["AXA Equitable Annuity"].income_type == "Spouse Annuity Plan"
+    assert by_src["Consulting LLC"].income_type == "Professional Services"
+
+    # 10057260 — a SPOUSE-prefixed pension row: the owner token stays in the Type.
+    (row,) = _parse_schedule_c(["Northern Trust Company SPOUSE Pension N/A"])
+    assert row.source == "Northern Trust Company"
+    assert row.income_type == "SPOUSE Pension"
+    assert row.amount == "N/A"
+
+
 def test_schedule_c_unknown_multiword_type_degrades_safely(monkeypatch):
     # An UNKNOWN Type (not in the vocabulary) falls back to the single-token
     # split rather than being dropped — and the verbatim row survives in

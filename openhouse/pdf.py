@@ -1578,14 +1578,16 @@ def _parse_schedule_b(
 # closed set of phrases on the live form; these are the values attested on the
 # committed fixtures (Thompson: ``Retirement Plan``, ``Pension``, ``Annuity
 # Plan``; Hackett candidate: ``Salary``) and in the issue's cited filings
-# (``Spouse Salary``, ``Professional Services``, ``Spouse Pension``). Longest
-# phrases must precede their prefixes so the alternation is greedy-correct
-# (``Retirement Plan`` before ``Pension``/``Salary``). An UNKNOWN Type is *not*
+# (``Spouse Salary``, ``Professional Services``, ``Spouse Pension``; ``Pension
+# Plan`` attested on GH-0131's 10068086 / 10057260). Longest phrases must precede
+# their prefixes so the alternation is greedy-correct (``Retirement Plan`` before
+# ``Pension``/``Salary``; ``Pension Plan`` before ``Pension``). An UNKNOWN Type is *not*
 # in this list — the caller then falls back to the single-token split so the row
 # still divides (and ``raw_text`` keeps it whole regardless): never dropped.
 _FD_C_TYPE_PHRASES = (
     "Retirement Plan",
     "Annuity Plan",
+    "Pension Plan",
     "Professional Services",
     "Salary",
     "Pension",
@@ -1603,8 +1605,11 @@ _FD_C_TYPE_PHRASES = (
 # ``Member Retirement Plan`` / ``Spouse Pension`` — issue example Davis is
 # ``Spouse Salary``) then one vocabulary phrase, anchored to the head's end so it
 # only claims the trailing Type column, never a phrase buried in the source name.
+# The owner token renders in either case on the live form (``Spouse`` and the
+# all-caps ``SPOUSE``); GH-0101 only listed ``Spouse``, so an all-caps owner bled
+# its token into ``source`` (GH-0131). Both casings are owner tokens, not source.
 _FD_C_TYPE_RE = re.compile(
-    r"\s((?:(?:Member|Spouse|SP|DC|JT)\s+)?(?:"
+    r"\s((?:(?:Member|Spouse|SPOUSE|SP|DC|JT)\s+)?(?:"
     + "|".join(re.escape(p) for p in _FD_C_TYPE_PHRASES)
     + r"))\s*$"
 )
