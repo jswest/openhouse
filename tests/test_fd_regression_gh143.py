@@ -151,7 +151,6 @@ def test_harris_schedule_e_split_and_no_comment_row():
 # --- #132 — Schedule A two-income (candidate/new-filer) column corruption -----
 
 
-@pytest.mark.xfail(reason="#132 confirmed: current-year 'None' + preceding range misaligned", strict=False)
 def test_moore_schedule_a_two_income_alignment():
     a = _sched(MOORE, "A")
     # A[9..12] (Robinhood): PDF type "Capital Gains", current-year "None",
