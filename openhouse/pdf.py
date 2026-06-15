@@ -751,7 +751,19 @@ _FD_FURNITURE_RE = re.compile(
     r"to Preceding|liability|\* For the complete|\* Asset class|name of organization|"
     # E–J column-header furniture (#17): each schedule's header row, on its own
     # line, leads with these tokens; the values below are filer content.
-    r"Source Description|Source Date|Source Activity|Source Brief)",
+    r"Source Description|Source Date|Source Activity|Source Brief|"
+    # Schedule H/J column header in the glyphs-lost (NUL) rendering (#133):
+    # the small-caps header words extract as NUL runs, so the intact-letter
+    # ``Source Date``/``Source Description`` branches above miss it and the
+    # banner leaks as a phantom raw_text row. Both H (``Source Dates Location
+    # Items``) and J (``Source Description of Duties``) lead with the ``Source``
+    # column (``S\x00+``) followed by a ``D``-initial second column
+    # (``Dates``/``Description`` → ``D\x00+``). Anchoring on that ``S\x00+ D\x00+``
+    # pair is collision-proof: the ``S\x00+ A:`` schedule heading is consumed
+    # before this check, and the ``S\x00+ A \x00+ B`` appendix title has an
+    # ``A``-initial second token — so neither matches. NULs appear only in
+    # furniture (SPEC §2.2), so a real H/J row never trips this.
+    r"S\x00+\s+D\x00+)",
     re.IGNORECASE,
 )
 
