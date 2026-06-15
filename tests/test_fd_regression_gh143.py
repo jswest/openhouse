@@ -50,14 +50,12 @@ def _no_header_rows(rows: list[dict]) -> bool:
 # --- #131 — Schedule C owner-prefixed Type bleeds into Source -----------------
 
 
-@pytest.mark.xfail(reason="#131 incomplete: open-vocab Type, Spouse bleeds into source", strict=False)
 def test_schiff_schedule_c_spouse_not_in_source():
     c = _sched(SCHIFF, "C")
     # PDF: Source="Naborforce", Type="Spouse wage". Parser leaks "Spouse" into source.
     assert c[0]["source"] == "Naborforce"
 
 
-@pytest.mark.xfail(reason="#131 incomplete: 'Spouse salary' bleeds into source", strict=False)
 def test_waltz_schedule_c_spouse_not_in_source():
     c = _sched(WALTZ, "C")
     # PDF: Source="Ghyabi Management and Consulting", Type="Spouse salary".
@@ -67,7 +65,6 @@ def test_waltz_schedule_c_spouse_not_in_source():
 # --- #134 — Schedule D non-standard date collapses the row --------------------
 
 
-@pytest.mark.xfail(reason="#134 incomplete: 'Various dates in 2022' collapses the D row", strict=False)
 def test_schiff_schedule_d_no_column_collapse():
     d = _sched(SCHIFF, "D")
     # PDF: creditor="UBS Financial Services Inc", date="Various dates in 2022",
@@ -78,7 +75,6 @@ def test_schiff_schedule_d_no_column_collapse():
     assert row["amount_range"]["label"] == "$100,001 - $250,000"
 
 
-@pytest.mark.xfail(reason="#134 incomplete: 'Jan 2022' leaks 'Jan' into creditor", strict=False)
 def test_waltz_schedule_d_month_not_in_creditor():
     d = _sched(WALTZ, "D")
     # PDF: creditor="SoFi", date="Jan 2022". Parser yields creditor="SoFi Jan".

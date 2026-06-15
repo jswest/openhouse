@@ -1632,8 +1632,9 @@ _FD_C_TYPE_PHRASES = (
 # The owner token renders in either case on the live form (``Spouse`` and the
 # all-caps ``SPOUSE``); GH-0101 only listed ``Spouse``, so an all-caps owner bled
 # its token into ``source`` (GH-0131). Both casings are owner tokens, not source.
+_FD_C_OWNER_TOKENS = ("Member", "Spouse", "SPOUSE", "SP", "DC", "JT")
 _FD_C_TYPE_RE = re.compile(
-    r"\s((?:(?:Member|Spouse|SPOUSE|SP|DC|JT)\s+)?(?:"
+    r"\s((?:(?:" + "|".join(_FD_C_OWNER_TOKENS) + r")\s+)?(?:"
     + "|".join(re.escape(p) for p in _FD_C_TYPE_PHRASES)
     + r"))\s*$"
 )
@@ -1675,6 +1676,16 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
             parts = head.rsplit(" ", 1)
             if len(parts) == 2 and parts[1]:
                 source, income_type = parts[0].strip(), parts[1].strip()
+                # An open-vocabulary Type (not in _FD_C_TYPE_PHRASES) still carries
+                # the owner column folded in front of it — ``Naborforce Spouse
+                # wage`` / ``… Spouse salary`` (GH-0131 strand). The last-token
+                # split is owner-blind, so the owner token lands at the tail of
+                # ``source``. Peel it back onto ``income_type`` so the owner stays
+                # with the Type column, never the Source.
+                src_parts = source.rsplit(" ", 1)
+                if len(src_parts) == 2 and src_parts[1] in _FD_C_OWNER_TOKENS:
+                    source = src_parts[0].strip()
+                    income_type = f"{src_parts[1]} {income_type}"
             else:
                 source, income_type = head, None
         items.append(
@@ -1699,6 +1710,19 @@ _FD_DATE_RE = re.compile(
     r"\b("
     r"(?:January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+(?:\d{1,2},\s+)?\d{4}"
+    # Abbreviated month (``Jan 2022`` — GH-0148): the 3-letter forms filers
+    # enter alongside the spelled-out month. Listed after the full names so
+    # ``January 2016`` matches the spelled-out branch; the trailing whitespace
+    # requirement keeps ``Jan`` from claiming the head of ``January``. Without
+    # this the bare-year fallback anchored on the year and ``Jan`` leaked into
+    # ``creditor`` (``SoFi Jan``).
+    r"|(?:Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{4}"
+    # A free-text ``Date incurred`` — filers write prose like ``Various dates
+    # in 2022`` (GH-0148). The year may be displaced by the column re-flow, so
+    # the prose phrase (with any contiguous trailing year) is the date span;
+    # anchoring on the bare year instead let the prose + type + amount low
+    # bound all collapse into ``creditor``.
+    r"|Various dates(?:\s+in)?(?:\s+\d{4})?"
     r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b"
 )
 
@@ -1708,6 +1732,16 @@ _FD_DATE_RE = re.compile(
 # word boundaries keep it from matching inside a formatted amount (the comma
 # grouping breaks any 4-digit run) or a longer number.
 _FD_D_BARE_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
+# A Schedule-D dangling value-range low bound — like ``_FD_DANGLING_LOW_RE`` (a
+# ``$lo -`` whose high bound spilled past an intruding column) but broadened to
+# also accept a *digit* after the dash, not just a letter. On a free-text/wrapped
+# date the re-flow can land the displaced date year between the low bound and its
+# dash and the high bound (Schiff: ``Margin loan on portfolio $100,001 - 2022
+# $250,000``), so the follower is a digit, which the letter-only A/B pattern
+# misses — leaving ``amount_range`` null. A contiguous ``$lo - $hi`` bucket still
+# has ``$`` (not ``[A-Za-z\d]``) after the dash, so it is unaffected and takes the
+# bucket path. D-local: the A/B value-column logic keeps its stricter pattern.
+_FD_D_DANGLING_LOW_RE = re.compile(r"\$([\d,]+)\s+-\s+(?=[A-Za-z\d])")
 # The amount column's *range start* (``$lo -`` or ``Over``) — the corroborating
 # signal a bare-year D anchor requires (below). The dash is load-bearing: a
 # wrapped continuation line can carry a bare year AND the row's wrapped high
@@ -1750,9 +1784,10 @@ def _fd_d_amount(
     # 1) A contiguous ``$lo - $hi`` bucket — the unwrapped (or already de-wrapped
     #    contiguous) case. Type ends at its start; nothing displaced.
     bucket = _FD_AMOUNT_RE.search(raw)
-    # 2) A dangling low (``$lo -`` with a word, not ``$hi``, right after) — the
-    #    wrapped-Type signature: the high bound spilled past the type continuation.
-    dangling = _FD_DANGLING_LOW_RE.search(raw)
+    # 2) A dangling low (``$lo -`` with a word or displaced year, not ``$hi``,
+    #    right after) — the wrapped-Type / wrapped-date signature: the high bound
+    #    spilled past the intruding column continuation.
+    dangling = _FD_D_DANGLING_LOW_RE.search(raw)
     if bucket and not (dangling and dangling.start() < bucket.start()):
         # The first complete bucket precedes any dangling low → it is the amount.
         # Type ends at the bucket start; the bucket itself is excluded by the end.
