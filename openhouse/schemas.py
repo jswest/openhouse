@@ -72,7 +72,17 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 # the filing — completeness over the known, explicit residual for the rest
 # (CLAUDE.md). Recovered rows change parsed output, so re-parse from ``raw/`` is
 # required — which the bump forces.
-SCHEMA_VERSION = 8
+# Generation 9 (GH-0143): FD schedule column-content extraction re-fixes the
+# v0.8.0 attempts (#130/#131/#133/#134) missed on harder real-filing variants —
+# intact-letter Schedule H/J header suppression + J source/description split
+# (#146); a populated trailing Schedule I anchors on its amount column instead of
+# fabricating appendix rows (#147); Schedule C owner-prefixed open-vocabulary Type
+# no longer bleeds into source and Schedule D non-standard dates no longer collapse
+# the row (#148); two-income (candidate) Schedule A maps current-year ``None`` and
+# the preceding-year range correctly (#149, confirming #132); Schedule E splits
+# identical-position blocks and folds ``C :`` comment lines (#150). All change
+# parsed output, so re-parse from ``raw/`` is required — which the bump forces.
+SCHEMA_VERSION = 9
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.
