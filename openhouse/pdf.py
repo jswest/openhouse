@@ -1676,13 +1676,17 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
     return items
 
 
-# A Schedule D ``Date incurred`` — ``Month YYYY``, ``MM/DD/YYYY``, or ``MM/YYYY``
-# (longer date forms first so the most specific match wins). Used both to anchor a
-# liability row's item-start and to extract the date, so the two always agree.
+# A Schedule D ``Date incurred`` — ``Month DD, YYYY``, ``Month YYYY``,
+# ``MM/DD/YYYY``, or ``MM/YYYY`` (longer date forms first so the most specific
+# match wins). Used both to anchor a liability row's item-start and to extract the
+# date, so the two always agree. The optional ``\d{1,2},`` day-comma group lets the
+# ``Month DD, YYYY`` form be consumed *whole* (GH-0134): otherwise ``Month\s+\d{4}``
+# cannot match the ``Month DD`` head, the bare-year fallback matches only the
+# trailing ``YYYY``, and the ``Month DD,`` fragment leaks into ``creditor``.
 _FD_DATE_RE = re.compile(
     r"\b("
     r"(?:January|February|March|April|May|June|July|August|"
-    r"September|October|November|December)\s+\d{4}"
+    r"September|October|November|December)\s+(?:\d{1,2},\s+)?\d{4}"
     r"|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b"
 )
 

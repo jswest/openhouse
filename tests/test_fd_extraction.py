@@ -1735,6 +1735,70 @@ def test_schedule_d_present_but_unparseable_amount_stays_visible(monkeypatch):
     assert "$100,001 -" in d[0]["raw_text"]
 
 
+def test_schedule_d_month_day_year_date_consumed_whole(monkeypatch):
+    # GH-0134: a single-line Date incurred written as "Month DD, YYYY" must be
+    # consumed WHOLE (comma included) into date_incurred. Before the fix
+    # _FD_DATE_RE matched only "Month YYYY", so "Month DD," failed it, the
+    # bare-year fallback captured only the trailing year, and the "Month DD,"
+    # fragment leaked into creditor. Two real rows from the issue:
+    #   10063197 (D[1]): "April 15, 2019".
+    #   10057260 (D[5]): "January 1, 2020".
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            # 10063197 D[1] shape: Month DD, YYYY date, single-line amount.
+            "Navient April 15, 2019 Student Loan $15,001 - $50,000",
+            # 10057260 D[5] shape: a second Month DD, YYYY row.
+            "Wells Fargo January 1, 2020 Mortgage $250,001 - $500,000",
+            # Control: the comma-less Month YYYY form is unaffected.
+            "Old National Bank January 2016 Mortgage $15,001 - $50,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 3
+    # The whole "Month DD, YYYY" lands in date_incurred — no fragment leaks.
+    assert d[0]["creditor"] == "Navient"
+    assert d[0]["date_incurred"] == "April 15, 2019"
+    assert d[0]["liability_type"] == "Student Loan"
+    assert d[0]["amount_range"]["label"] == "$15,001 - $50,000"
+    assert d[1]["creditor"] == "Wells Fargo"
+    assert d[1]["date_incurred"] == "January 1, 2020"
+    assert d[1]["liability_type"] == "Mortgage"
+    assert d[1]["amount_range"]["label"] == "$250,001 - $500,000"
+    # Control row (comma-less Month YYYY) still parses as before.
+    assert d[2]["creditor"] == "Old National Bank"
+    assert d[2]["date_incurred"] == "January 2016"
+
+
+def test_schedule_d_month_day_year_with_wrapped_amount(monkeypatch):
+    # GH-0134 + GH-0102: the Month DD, YYYY date must coexist with the wrapped-Type
+    # amount handling — the date is consumed whole AND the interleaved amount is
+    # recovered, with a clean creditor and rejoined type.
+    page = "\n".join(
+        [
+            "ScheDule D: liabilitieS",
+            "owner creditor Date incurred type amount of",
+            "BB&T Bank April 15, 2019 Mortgage on Rental Property, $100,001 -",
+            "Washington, DC $250,000",
+            "certification anD Signature",
+        ]
+    )
+    _fake_pdfplumber(monkeypatch, [page])
+    d = extract_fd_schedules(Path("synthetic.pdf")).schedules["D"]
+    assert len(d) == 1
+    assert d[0]["creditor"] == "BB&T Bank"
+    assert d[0]["date_incurred"] == "April 15, 2019"
+    assert d[0]["liability_type"] == "Mortgage on Rental Property, Washington, DC"
+    assert d[0]["amount_range"] == {
+        "low": 100001,
+        "high": 250000,
+        "label": "$100,001 - $250,000",
+    }
+
+
 def test_schedule_f_bare_year_leading_date(monkeypatch):
     # Real line shape from filing 10039877: the agreement Date column is a
     # bare year. Before GH-0070 no row anchored and date stayed None.
