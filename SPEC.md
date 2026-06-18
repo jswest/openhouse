@@ -616,10 +616,11 @@ body with `parse_status: "ok"`.
 
 The layout is **source-scoped** (#174): each source owns a `<source>/` level
 under both `raw/` and `parsed/`. The clerk pipeline writes under `clerk/`;
-`raw/fec/<cycle>/` + `parsed/fec/<cycle>/` are **reserved** for the FEC lane
-(cross-ref #167) but no FEC code path creates them yet. The CC0
-congress-legislators reference set stays at the un-scoped `raw/reference/` — it
-is shared bulk data, not a source's disclosures, so it is not relocated.
+`fec pull` (#170) now creates `raw/fec/<cycle>/` (the four bulk files +
+`fec-pull-manifest.json`); `parsed/fec/<cycle>/` stays **reserved** for the FEC
+normalization sub-issue. The CC0 congress-legislators reference set stays at the
+un-scoped `raw/reference/` — it is shared bulk data, not a source's disclosures,
+so it is not relocated.
 
 ```
 <data-dir>/
@@ -631,7 +632,7 @@ is shared bulk data, not a source's disclosures, so it is not relocated.
         pull-manifest.json
         ptr/<DocID>.pdf
         fd/<DocID>.pdf
-    fec/<cycle>/            # reserved for the FEC lane (#167) — not yet created
+    fec/<cycle>/            # FEC bulk lane (#170): cn.txt ccl.txt cm.txt itpas2.txt + fec-pull-manifest.json
     reference/              # CC0 congress-legislators bulk files (un-scoped, shared)
   parsed/
     clerk/
@@ -916,6 +917,33 @@ The FEC lane is **cycle-keyed on disk** (vs the clerk lane's per-coverage-year):
 `cli.fec_raw_dir` / `cli.fec_parsed_dir` with the same
 `--data-dir` → `OPENHOUSE_DATA_DIR` → `~/.openhouse` precedence as everything
 else.
+
+### 13.5a Verified facts about the FEC bulk source (`fec pull`, #170)
+
+From the by-hand polite probe of the 2024 cycle (carried into the trimmed
+fixtures under `tests/fixtures/fec/`):
+
+- **URLs & redirect.** `https://www.fec.gov/files/bulk-downloads/<cycle>/<file>`
+  returns a **302** to an AWS GovCloud S3 host
+  (`cg-…s3-us-gov-west-1.amazonaws.com/bulk-downloads/<cycle>/<file>`). The
+  client follows redirects; the manifest records both the requested `www.fec.gov`
+  URL and the final storage URL.
+- **Zip name vs. inner member.** The *zip* carries the 2-digit cycle suffix
+  (`cn24.zip`); the *inner member* does **not** — it is the bare stem: `cn.txt`,
+  `ccl.txt`, `cm.txt`, and the irregular **`itpas2.txt`** for `pas2<yy>.zip`.
+- **Files are pipe-delimited (`|`), LF-terminated, latin-1**, with the column
+  orders from the FEC data-dictionary pages: `cn` 15 cols (CAND_ID … CAND_PCC at
+  col 10 = principal committee), `ccl` 7 cols (CAND_ID, CAND_ELECTION_YR,
+  FEC_ELECTION_YR, CMTE_ID, CMTE_TP, **CMTE_DSGN** = `P` for principal,
+  LINKAGE_ID), `cm` 15 cols (CMTE_ID, CMTE_NM, … CMTE_TP col 10, **ORG_TP** col
+  13, CONNECTED_ORG_NM col 14, CAND_ID col 15), `itpas2` 22 cols (CMTE_ID =
+  contributor, IMAGE_NUM col 5, TRANSACTION_DT col 14, TRANSACTION_AMT col 15,
+  **OTHER_ID col 16 = recipient committee**, CAND_ID col 17, TRAN_ID col 18).
+- **Real 2024 sizes:** `cn24.zip` 356 KB, `ccl24.zip` 94 KB, `cm24.zip` 883 KB,
+  `pas224.zip` ~24.7 MB (the largest — expected, well under the 150 MB park cap).
+- **`cm` has no affiliated-committee column** — the public committee master file
+  does not carry one, so `FecCommittee.affiliation` has no bulk source and is
+  left `None` for now.
 
 ### 13.6 Records & schema version
 
