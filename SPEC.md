@@ -3,12 +3,17 @@
 A standalone tool that pulls, parses, and queries **U.S. House of Representatives
 financial disclosure** filings from the Office of the Clerk.
 
-Three commands, one data directory:
+The CLI is **source-scoped** (#174): a source noun (`clerk` / `fec`) sits above
+the pipeline verbs, so today's House-Clerk pipeline lives under `clerk`. (`fec`
+is scaffolded — verbs are stubs until #167.) The tool-level `ready` (and the
+repo-local `release` skill) stay top-level, not under a source.
 
 ```
-openhouse pull  <year | year_start-year_end>   # acquire raw artifacts from the Clerk (network)
-openhouse parse <year | year_start-year_end>   # transform raw artifacts → normalized JSON (offline)
-openhouse read  <subcommand> [args]            # query the normalized JSON (offline, read-only)
+openhouse clerk pull  <year | year_start-year_end>   # acquire raw artifacts from the Clerk (network)
+openhouse clerk parse <year | year_start-year_end>   # transform raw artifacts → normalized JSON (offline)
+openhouse clerk read  <subcommand> [args]            # query the normalized JSON (offline, read-only)
+openhouse clerk inspect <year> --sample <f>          # human accuracy review in a local web app (offline)
+openhouse ready                                       # install the agent skill (offline, top-level)
 ```
 
 `pull` is the network step; `parse` is purely local; `read` is a pure function over
@@ -195,23 +200,28 @@ filing.
 
 ---
 
-## 3. Command: `openhouse pull`
+## 3. Command: `openhouse clerk pull`
+
+The CLI is **source-scoped** (#174): a source noun (`clerk` / `fec`) sits above
+the pipeline verbs, so the House-Clerk acquisition path is `openhouse clerk pull`.
+(`fec` is scaffolded but not implemented — see #167; the FEC raw lane reserves
+`raw/fec/<cycle>/`.) The bare pre-namespace form (`openhouse pull …`) is removed.
 
 ```
-openhouse pull 2024
-openhouse pull 2019-2024
-openhouse pull 2024 --types ptr
-openhouse pull 2024 --index-only
+openhouse clerk pull 2024
+openhouse clerk pull 2019-2024
+openhouse clerk pull 2024 --types ptr
+openhouse clerk pull 2024 --index-only
 ```
 
 **Behavior**, per year in range:
 
-1. Download `<YEAR>FD.zip`; extract `<YEAR>FD.xml` (+ `.txt`) into `raw/<year>/`.
+1. Download `<YEAR>FD.zip`; extract `<YEAR>FD.xml` (+ `.txt`) into `raw/clerk/<year>/`.
 2. Parse the index just enough to enumerate `(DocID, FilingType, year)` targets.
-3. Download each referenced PDF into `raw/<year>/<family>/<DocID>.pdf`
+3. Download each referenced PDF into `raw/clerk/<year>/<family>/<DocID>.pdf`
    (`family` = `ptr` if `FilingType == 'P'` else `fd` — the §2.2 routing rule),
    unless `--index-only`.
-4. Write/update `raw/<year>/pull-manifest.json` (see §6.3).
+4. Write/update `raw/clerk/<year>/pull-manifest.json` (see §6.3).
 
 **Requirements:**
 
@@ -255,15 +265,15 @@ openhouse pull 2024 --index-only
 
 ---
 
-## 4. Command: `openhouse parse`
+## 4. Command: `openhouse clerk parse`
 
 ```
-openhouse parse 2024
-openhouse parse 2019-2024
-openhouse parse 2024 --types fd
+openhouse clerk parse 2024
+openhouse clerk parse 2019-2024
+openhouse clerk parse 2024 --types fd
 ```
 
-**Behavior**, per year in range — entirely offline, reading only `raw/<year>/`:
+**Behavior**, per year in range — entirely offline, reading only `raw/clerk/<year>/`:
 
 1. Parse `<YEAR>FD.xml` → one **filing metadata** record per entry (§6.1),
    including the computed `filer_id` (§6.2).
@@ -274,10 +284,10 @@ openhouse parse 2024 --types fd
      `missing`. Extraction-yields-text is authoritative; the DocID prefix is a fast
      pre-filter only (§2.2).
    - `efiled` → extract structured fields per form family (§6.1 PTR / FD schedules).
-   - `scanned` → record in `parsed/<year>/unparsed-manifest.json`, emit the metadata
-     record with `pdf_class: "scanned"` and `body: null`. **No OCR in v1.**
-4. Write normalized JSON to `parsed/<year>/` (§6.4 layout).
-5. Write `parsed/<year>/parse-manifest.json` with counts, identity warnings, and a
+   - `scanned` → record in `parsed/clerk/<year>/unparsed-manifest.json`, emit the
+     metadata record with `pdf_class: "scanned"` and `body: null`. **No OCR in v1.**
+4. Write normalized JSON to `parsed/clerk/<year>/` (§6.4 layout).
+5. Write `parsed/clerk/<year>/parse-manifest.json` with counts, identity warnings, and a
    parse-quality summary.
 
 **Requirements:**
@@ -298,20 +308,20 @@ openhouse parse 2024 --types fd
 
 ---
 
-## 5. Command: `openhouse read`
+## 5. Command: `openhouse clerk read`
 
-The query surface. Offline, read-only, a pure function over `parsed/` — never
-touches `raw/` or the network, never writes anything. **No database**: at this
+The query surface. Offline, read-only, a pure function over `parsed/clerk/` —
+never touches `raw/` or the network, never writes anything. **No database**: at this
 scale (~2,250 filings and low-tens-of-thousands of transactions per year), scanning
 the JSON in place is milliseconds, and skipping a load step means `read` can never
 disagree with the last `parse`. (If cross-year analytics ever get heavy, DuckDB can
 query the JSON files where they sit — still no load step.)
 
 ```
-openhouse read filings 2024 --type ptr --member adams       # filtered filing index
-openhouse read filing 20024277                              # one filing: metadata + body
-openhouse read trades 2019-2024 --ticker ALB --owner SP     # flattened transactions across years
-openhouse read summary 2024                                 # counts: types, efiled/scanned, errors, warnings
+openhouse clerk read filings 2024 --type ptr --member adams       # filtered filing index
+openhouse clerk read filing 20024277                              # one filing: metadata + body
+openhouse clerk read trades 2019-2024 --ticker ALB --owner SP     # flattened transactions across years
+openhouse clerk read summary 2024                                 # counts: types, efiled/scanned, errors, warnings
 ```
 
 **Subcommands:**
@@ -340,7 +350,7 @@ openhouse read summary 2024                                 # counts: types, efi
 
 ---
 
-## 5.5 Command: `openhouse inspect`
+## 5.5 Command: `openhouse clerk inspect`
 
 The accuracy-review surface. `pull`/`parse`/`read` move filings *through* the
 pipeline; `inspect` asks whether the filings that came out are **right**. It
@@ -351,8 +361,8 @@ browser hitting `127.0.0.1`; no new Python deps (stdlib `http.server` +
 `pdfplumber`).
 
 ```
-openhouse inspect 2022 --sample 0.05                 # review a stratified ~5% of 2022
-openhouse inspect 2022 --sample 0.1 --seed 7         # a different reproducible draw
+openhouse clerk inspect 2022 --sample 0.05                 # review a stratified ~5% of 2022
+openhouse clerk inspect 2022 --sample 0.1 --seed 7         # a different reproducible draw
 ```
 
 **Why it exists:** a `parse_status: ok` filing can still be wrong — most visibly
@@ -432,7 +442,7 @@ bundle).
   "state_district": { "raw": "GA12", "state": "GA", "district": 12 },
   "filing_type": { "code": "P", "label": "periodic_transaction_report" },
   "filing_date": "2024-01-08",
-  "source_pdf": "raw/2024/ptr/20024277.pdf",
+  "source_pdf": "raw/clerk/2024/ptr/20024277.pdf",
   "pdf_class": "efiled",
   "parse_status": "ok"
 }
@@ -604,29 +614,41 @@ body with `parse_status: "ok"`.
 
 ### 6.4 Directory layout
 
+The layout is **source-scoped** (#174): each source owns a `<source>/` level
+under both `raw/` and `parsed/`. The clerk pipeline writes under `clerk/`;
+`raw/fec/<cycle>/` + `parsed/fec/<cycle>/` are **reserved** for the FEC lane
+(cross-ref #167) but no FEC code path creates them yet. The CC0
+congress-legislators reference set stays at the un-scoped `raw/reference/` — it
+is shared bulk data, not a source's disclosures, so it is not relocated.
+
 ```
 <data-dir>/
   raw/
-    <year>/
-      <year>FD.xml
-      <year>FD.txt
-      pull-manifest.json
-      ptr/<DocID>.pdf
-      fd/<DocID>.pdf
+    clerk/
+      <year>/
+        <year>FD.xml
+        <year>FD.txt
+        pull-manifest.json
+        ptr/<DocID>.pdf
+        fd/<DocID>.pdf
+    fec/<cycle>/            # reserved for the FEC lane (#167) — not yet created
+    reference/              # CC0 congress-legislators bulk files (un-scoped, shared)
   parsed/
-    <year>/
-      filings.json            # array of filing-metadata records (the index, normalized)
-      ptr/<DocID>.json        # one file per PTR body
-      fd/<DocID>.json         # one file per annual-FD body
-      parse-manifest.json
-      unparsed-manifest.json  # scanned/skipped + error filings, with reasons
+    clerk/
+      <year>/
+        filings.json            # array of filing-metadata records (the index, normalized)
+        ptr/<DocID>.json        # one file per PTR body
+        fd/<DocID>.json         # one file per annual-FD body
+        parse-manifest.json
+        unparsed-manifest.json  # scanned/skipped + error filings, with reasons
+    fec/<cycle>/           # reserved for the FEC lane (#167) — not yet created
 ```
 
 > One file per filing body keeps `parse` incremental and diffs readable; `filings.json`
 > is the single roll-up index for the year. ✅ Sized: ~2,250 filings in 2024 —
 > thousands of small JSONs per year is fine.
 
-The data root (`<data-dir>`) resolves with a uniform precedence across all three
+The data root (`<data-dir>`) resolves with a uniform precedence across all
 commands (#50): the explicit `--data-dir` flag → the `OPENHOUSE_DATA_DIR`
 environment variable → the `~/.openhouse` default (#80, a single per-user
 dotfolder in `$HOME`, expanded via `Path.home()`). Because the default is
@@ -635,6 +657,23 @@ working directory lands in one stable store — no separate empty `./data` islan
 per cwd. When the default is in use and a non-empty `./data` exists in the cwd
 (a leftover from before #80), openhouse prints a one-time stderr note that it is
 being shadowed; it does not auto-migrate or read from `./data`.
+
+**Migrating from the pre-namespace layout (#174).** A store created before the
+source namespace has bare year dirs directly under `raw/` and `parsed/`. The
+migration is a one-time **offline `mv`** — relocating bytes, not re-crawling:
+
+```
+mv ~/.openhouse/raw/<year>    ~/.openhouse/raw/clerk/<year>
+mv ~/.openhouse/parsed/<year> ~/.openhouse/parsed/clerk/<year>
+```
+
+When openhouse detects a legacy `raw/<YYYY>/` it prints this `mv` once to stderr
+as a **nudge** — it never relocates data itself (same spirit as the `./data`
+shadow note above). After the `mv`, re-run `openhouse clerk parse <year>`: the
+move relocates `filings.json` but not the `source_pdf` path each record embeds
+(it still reads `raw/<year>/…`), and the schema-generation bump (9→10, §6.5)
+makes `read`'s schema-drift warning surface the stale tree until the re-parse
+refreshes those paths.
 
 ### 6.5 Manifests
 
@@ -764,12 +803,12 @@ e-filed FD, `8220122` paper FD, `30022163` extension, `7940` type-W):
 
 ## 11. v1 acceptance (definition of done)
 
-- `openhouse pull 2024` downloads the index + all e-filed PTR and FD PDFs, resumably,
-  with a complete `pull-manifest.json`.
-- `openhouse parse 2024` produces `filings.json` plus per-body JSON for every e-filed
-  filing, with scanned filings catalogued (not parsed) in `unparsed-manifest.json`,
-  and identity warnings surfaced per §6.2.
-- `openhouse read trades 2024 --ticker <X>` answers from parsed data alone — no
+- `openhouse clerk pull 2024` downloads the index + all e-filed PTR and FD PDFs,
+  resumably, with a complete `pull-manifest.json`.
+- `openhouse clerk parse 2024` produces `filings.json` plus per-body JSON for every
+  e-filed filing, with scanned filings catalogued (not parsed) in
+  `unparsed-manifest.json`, and identity warnings surfaced per §6.2.
+- `openhouse clerk read trades 2024 --ticker <X>` answers from parsed data alone — no
   network, no opening PDFs by hand — in both JSON and `--table` form.
 - A multi-year range (`2019-2024`) works for all three commands.
 - Re-running any command is idempotent; `parse` and `read` need no network.

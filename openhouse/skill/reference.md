@@ -7,7 +7,7 @@ current CLI; the on-disk JSON shape is the contract.
 
 ### Filing metadata (always present, from the index)
 
-Every record in `parsed/<year>/filings.json`:
+Every record in `parsed/clerk/<year>/filings.json`:
 
 ```json
 {
@@ -18,7 +18,7 @@ Every record in `parsed/<year>/filings.json`:
   "state_district": { "raw": "GA12", "state": "GA", "district": 12 },
   "filing_type": { "code": "P", "label": "periodic_transaction_report" },
   "filing_date": "2024-01-08",
-  "source_pdf": "raw/2024/ptr/20024277.pdf",
+  "source_pdf": "raw/clerk/2024/ptr/20024277.pdf",
   "pdf_class": "efiled",
   "parse_status": "ok"
 }
@@ -53,8 +53,8 @@ one-line per-year summary (`match_summary` in the manifest).
 
 ### Filing bodies
 
-One JSON per filing under `parsed/<year>/ptr/<DocID>.json` (PTR transactions) or
-`parsed/<year>/fd/<DocID>.json` (annual-FD schedules). Filings that did not parse
+One JSON per filing under `parsed/clerk/<year>/ptr/<DocID>.json` (PTR transactions) or
+`parsed/clerk/<year>/fd/<DocID>.json` (annual-FD schedules). Filings that did not parse
 (scanned / missing / odd) are not bodies — they appear in
 `unparsed-manifest.json` instead, never as a silent gap.
 
@@ -78,13 +78,13 @@ Parse preserves the **raw code** so an unrecognized letter never drops a filing.
 
 ## Manifests
 
-- `pull-manifest.json` (per year, in `raw/<year>/`) — per DocID: URL, HTTP
+- `pull-manifest.json` (per year, in `raw/clerk/<year>/`) — per DocID: URL, HTTP
   status, byte size, sha256, fetched-at.
-- `parse-manifest.json` (per year, in `parsed/<year>/`) — counts by filing type,
+- `parse-manifest.json` (per year, in `parsed/clerk/<year>/`) — counts by filing type,
   `efiled` vs `scanned` vs `missing`, ok vs error, `identity_warnings` (each with
   its `reason`), a `match_summary` (matched / unmatched-by-reason / `suspicious`
   filer_ids), and the **integer schema generation** it was produced at. If your
-  installed openhouse reports a newer generation, re-run `parse`.
+  installed openhouse reports a newer generation, re-run `clerk parse`.
 - `unparsed-manifest.json` — every not-fully-parsed filing with `doc_id`,
   `filer_id`, and a `reason` (`scanned`, `missing`, `extract_failed`,
   `unknown_type`, `validation_error`) — the OCR / follow-up backlog.
@@ -97,28 +97,28 @@ watch stderr for the residual line.
 
 **Every PTR a member filed in a year:**
 ```
-openhouse read filings 2024 --member pelosi --type ptr
+openhouse clerk read filings 2024 --member pelosi --type ptr
 ```
 
 **One filing in full (metadata + body):**
 ```
-openhouse read filing 20024277
+openhouse clerk read filing 20024277
 ```
 
 **Every trade in a symbol, soundly (no false positives — "at least these"):**
 ```
-openhouse read trades 2023-2024 --ticker NVDA
+openhouse clerk read trades 2023-2024 --ticker NVDA
 ```
 
 **Don't-miss-a-trade search (over-matches — "at most these"):**
 ```
-openhouse read trades 2024 --asset nvidia
+openhouse clerk read trades 2024 --asset nvidia
 ```
 Use `--asset` when the filer may have omitted the ticker; discard spurious hits.
 
 **Purchases over $50k by a member, bounded by transaction date:**
 ```
-openhouse read trades 2023-2024 --member khanna --type P --min-amount 50000 --since 2023-01-01
+openhouse clerk read trades 2023-2024 --member khanna --type P --min-amount 50000 --since 2023-01-01
 ```
 Note: the range is the **filing** year; a transaction can predate its filing (a
 Dec-2023 trade in a 2024 filing), so widen the range when bounding by
@@ -126,14 +126,14 @@ transaction date.
 
 **Per-year roll-up:**
 ```
-openhouse read summary 2019-2024 --table
+openhouse clerk read summary 2019-2024 --table
 ```
 
 **Pull then parse then query, end to end:**
 ```
-openhouse pull 2024 --contact "Jane Doe <jane@example.com>"
-openhouse parse 2024
-openhouse read trades 2024 --ticker AAPL
+openhouse clerk pull 2024 --contact "Jane Doe <jane@example.com>"
+openhouse clerk parse 2024
+openhouse clerk read trades 2024 --ticker AAPL
 ```
 
 ## Trust guarantees, restated
