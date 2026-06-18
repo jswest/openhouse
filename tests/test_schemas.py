@@ -28,7 +28,7 @@ def _base_kwargs(**overrides):
         state_district=StateDistrict(raw="GA12", state="GA", district=12),
         filing_type=FilingTypeInfo.from_code("P"),
         filing_date=date(2024, 1, 8),
-        source_pdf="raw/2024/ptr/20024277.pdf",
+        source_pdf="raw/clerk/2024/ptr/20024277.pdf",
         pdf_class="efiled",
         parse_status="ok",
     )

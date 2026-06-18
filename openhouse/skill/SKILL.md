@@ -8,12 +8,13 @@ description: Pull, parse, and query U.S. House financial-disclosure filings (ann
 `openhouse` turns U.S. House of Representatives financial disclosures — annual
 Financial Disclosure (FD) statements and STOCK Act Periodic Transaction Reports
 (PTRs) — into normalized JSON you can query. Three verbs, one data directory, no
-database:
+database. The CLI is source-scoped — the House-Clerk pipeline lives under the
+`clerk` source (a sibling `fec` source is scaffolded but not yet implemented):
 
 ```
-openhouse pull <years>    # network: fetch the index + PDFs from the Clerk
-openhouse parse <years>   # offline: PDFs + index → normalized JSON, nothing dropped
-openhouse read <query>    # offline: ask the parsed data a question
+openhouse clerk pull <years>    # network: fetch the index + PDFs from the Clerk
+openhouse clerk parse <years>   # offline: PDFs + index → normalized JSON, nothing dropped
+openhouse clerk read <query>    # offline: ask the parsed data a question
 ```
 
 `<years>` is `YYYY` or `YYYY-YYYY` (inclusive), e.g. `2024` or `2019-2024`. The
@@ -32,10 +33,10 @@ to stderr**, and exits non-zero on error. So pipe stdout into `jq` and let
 stderr scroll. Add `--table` to `read` for a human-readable table instead of
 JSON (garnish — the JSON is the contract).
 
-## pull (the only network step)
+## clerk pull (the only network step)
 
 ```
-openhouse pull 2024 --contact "Jane Doe <jane@example.com>"
+openhouse clerk pull 2024 --contact "Jane Doe <jane@example.com>"
 ```
 
 `pull` is the **only** command that touches the network. It is polite by design
@@ -46,27 +47,27 @@ is **required** so the operator is identifiable; set it inline or via the
 `--data-dir`, `--force`. Don't lower `--delay` casually — the Clerk has 403'd
 naive clients.
 
-## parse (offline normalization)
+## clerk parse (offline normalization)
 
 ```
-openhouse parse 2024
+openhouse clerk parse 2024
 ```
 
-Offline and deterministic. Reads `raw/<year>/`, writes normalized JSON to
-`parsed/<year>/`. **Never silently drops a filing**: e-filed PDFs become
+Offline and deterministic. Reads `raw/clerk/<year>/`, writes normalized JSON to
+`parsed/clerk/<year>/`. **Never silently drops a filing**: e-filed PDFs become
 structured records; scanned/paper/odd filings are catalogued in
 `unparsed-manifest.json` with a reason. `--strict` exits non-zero if any filing
 errors.
 
-## read (offline query)
+## clerk read (offline query)
 
 Four subcommands, each `<range>`-scoped except `filing`:
 
 ```
-openhouse read filings 2024 --member adams --type ptr
-openhouse read filing 20024277
-openhouse read trades 2023-2024 --ticker NVDA --table
-openhouse read summary 2024
+openhouse clerk read filings 2024 --member adams --type ptr
+openhouse clerk read filing 20024277
+openhouse clerk read trades 2023-2024 --ticker NVDA --table
+openhouse clerk read summary 2024
 ```
 
 - `filings <range>` — matching filing-metadata records. Filters: `--type`,
@@ -77,8 +78,8 @@ openhouse read summary 2024
   `--since`, `--until`, `--min-amount`.
 - `summary <range>` — per-year roll-up from the manifests.
 
-**This skill queries EXISTING parsed data with `read` only.** Do not `pull` or
-`parse` to satisfy a query — those are acquisition steps, not query steps. If a
+**This skill queries EXISTING parsed data with `clerk read` only.** Do not
+`clerk pull` or `clerk parse` to satisfy a query — those are acquisition steps, not query steps. If a
 `read` comes back empty, it almost always means the wrong data directory, not
 missing data: check `--data-dir` / `OPENHOUSE_DATA_DIR` points at a parsed
 corpus. A range query against a dir with no parsed years now **fails loudly**
@@ -110,13 +111,14 @@ the residual before trusting a count.**
 
 ```
 <data-dir>/
-  raw/<year>/      <year>FD.xml, <year>FD.txt, pull-manifest.json, ptr/<DocID>.pdf, fd/<DocID>.pdf
-  parsed/<year>/   filings.json, ptr/<DocID>.json, fd/<DocID>.json, parse-manifest.json, unparsed-manifest.json
+  raw/clerk/<year>/      <year>FD.xml, <year>FD.txt, pull-manifest.json, ptr/<DocID>.pdf, fd/<DocID>.pdf
+  parsed/clerk/<year>/   filings.json, ptr/<DocID>.json, fd/<DocID>.json, parse-manifest.json, unparsed-manifest.json
 ```
 
 `filings.json` is the year's roll-up index; one JSON per filing body. The
 `parse-manifest.json` records counts and the integer schema generation it was
-produced at — re-`parse` after upgrading openhouse if that generation moved.
+produced at — re-run `clerk parse` after upgrading openhouse if that generation
+moved.
 
 See `reference.md` for record schemas, the FilingType code table, and query
 recipes.

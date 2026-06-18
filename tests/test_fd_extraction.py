@@ -1284,7 +1284,7 @@ _ONE_FD_XML = """<?xml version="1.0" encoding="utf-8"?>
 
 
 def _seed_one_fd(data_dir: Path, pdf_src: Path, *, year: int = 2020) -> None:
-    raw = data_dir / "raw" / str(year)
+    raw = data_dir / "raw" / "clerk" / str(year)
     (raw / "fd").mkdir(parents=True, exist_ok=True)
     (raw / f"{year}FD.xml").write_text(_ONE_FD_XML)
     (raw / "fd" / "10042852.pdf").write_bytes(pdf_src.read_bytes())
@@ -1292,8 +1292,8 @@ def _seed_one_fd(data_dir: Path, pdf_src: Path, *, year: int = 2020) -> None:
 
 def test_parse_writes_fd_body_file(tmp_path):
     _seed_one_fd(tmp_path, THOMPSON)
-    records = build_filing_records(tmp_path / "raw" / "2020" / "2020FD.xml", 2020)
-    parsed_dir = tmp_path / "parsed" / "2020"
+    records = build_filing_records(tmp_path / "raw" / "clerk" / "2020" / "2020FD.xml", 2020)
+    parsed_dir = tmp_path / "parsed" / "clerk" / "2020"
     parsed_dir.mkdir(parents=True, exist_ok=True)
     unparsed = _classify_records(
         records,
@@ -1318,7 +1318,7 @@ def test_parse_extension_writes_no_fd_body(tmp_path, monkeypatch):
     # An efiled fd-family extension (no schedules) stays efiled/ok with no body
     # file and no unparsed entry — present in filings.json, never dropped.
     xml = _ONE_FD_XML.replace("<FilingType>O</FilingType>", "<FilingType>X</FilingType>")
-    raw = tmp_path / "raw" / "2020"
+    raw = tmp_path / "raw" / "clerk" / "2020"
     (raw / "fd").mkdir(parents=True, exist_ok=True)
     (raw / "2020FD.xml").write_text(xml)
     (raw / "fd" / "10042852.pdf").write_text("placeholder")
@@ -1332,7 +1332,7 @@ def test_parse_extension_writes_no_fd_body(tmp_path, monkeypatch):
     monkeypatch.setattr("openhouse.parse.extract_fd_schedules", _raise_not_fd)
 
     records = build_filing_records(raw / "2020FD.xml", 2020)
-    parsed_dir = tmp_path / "parsed" / "2020"
+    parsed_dir = tmp_path / "parsed" / "clerk" / "2020"
     parsed_dir.mkdir(parents=True, exist_ok=True)
     unparsed = _classify_records(
         records,
@@ -1353,7 +1353,7 @@ def test_parse_annual_fd_with_lost_headings_is_extract_failed(tmp_path, monkeypa
     # that is a REAL extraction failure (an invisible gap), not a benign cover
     # sheet. It must land in the unparsed manifest as extract_failed (status
     # error), never silently ok with no body.
-    raw = tmp_path / "raw" / "2020"
+    raw = tmp_path / "raw" / "clerk" / "2020"
     (raw / "fd").mkdir(parents=True, exist_ok=True)
     (raw / "2020FD.xml").write_text(_ONE_FD_XML)  # FilingType O
     (raw / "fd" / "10042852.pdf").write_text("placeholder")
@@ -1366,7 +1366,7 @@ def test_parse_annual_fd_with_lost_headings_is_extract_failed(tmp_path, monkeypa
     monkeypatch.setattr("openhouse.parse.extract_fd_schedules", _raise_not_fd)
 
     records = build_filing_records(raw / "2020FD.xml", 2020)
-    parsed_dir = tmp_path / "parsed" / "2020"
+    parsed_dir = tmp_path / "parsed" / "clerk" / "2020"
     parsed_dir.mkdir(parents=True, exist_ok=True)
     unparsed = _classify_records(
         records,

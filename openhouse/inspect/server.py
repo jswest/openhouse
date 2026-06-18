@@ -89,8 +89,8 @@ class ReviewSession:
         filings = self._load_filings()
         if filings is None:
             raise InspectError(
-                f"{year} is not parsed (no parsed/{year}/filings.json); "
-                f"run `openhouse parse {year}` first."
+                f"{year} is not parsed (no parsed/clerk/{year}/filings.json); "
+                f"run `openhouse clerk parse {year}` first."
             )
         self._all = filings
         reviewable = core.reviewable(filings)
@@ -101,7 +101,7 @@ class ReviewSession:
 
     # -- loading -----------------------------------------------------------
     def _year_dir(self) -> Path:
-        return self.data_dir / "parsed" / str(self.year)
+        return self.data_dir / "parsed" / "clerk" / str(self.year)
 
     def _load_filings(self) -> Optional[list[dict]]:
         path = self._year_dir() / "filings.json"

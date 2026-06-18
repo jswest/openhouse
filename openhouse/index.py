@@ -202,8 +202,9 @@ def build_filing_records(
     back to ``name:`` — the enrichment is optional, never a gate.
 
     ``source_pdf`` is the relative path the body *would* live at —
-    ``raw/<year>/<family>/<doc_id>.pdf`` (``ptr`` for FilingType ``P``, else
-    ``fd``, the §2.2 routing) — or ``None`` when the row carries no DocID.
+    ``raw/clerk/<year>/<family>/<doc_id>.pdf`` (``ptr`` for FilingType ``P``,
+    else ``fd``, the §2.2 routing; the source-namespaced layout, #174) — or
+    ``None`` when the row carries no DocID.
     ``pdf_class`` is left ``None`` here (the per-PDF classification pass is #7);
     ``parse_status`` is ``"ok"`` (the metadata record always parses).
 
@@ -224,7 +225,7 @@ def build_filing_records(
 
         family = "ptr" if raw_type == "P" else "fd"
         source_pdf = (
-            f"raw/{year}/{family}/{doc_id}.pdf" if doc_id else None
+            f"raw/clerk/{year}/{family}/{doc_id}.pdf" if doc_id else None
         )
 
         name_key = compute_name_key(

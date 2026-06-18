@@ -7,7 +7,7 @@
     "state_district": { "raw": "NY01", "state": "NY", "district": 1 },
     "filing_type": { "code": "P", "label": "periodic_transaction_report" },
     "filing_date": "2022-02-10",
-    "source_pdf": "raw/2022/ptr/20200001.pdf",
+    "source_pdf": "raw/clerk/2022/ptr/20200001.pdf",
     "pdf_class": "efiled",
     "parse_status": "ok"
   },
@@ -19,7 +19,7 @@
     "state_district": { "raw": "WA09", "state": "WA", "district": 9 },
     "filing_type": { "code": "O", "label": "annual_report" },
     "filing_date": "2022-05-15",
-    "source_pdf": "raw/2022/fd/10200002.pdf",
+    "source_pdf": "raw/clerk/2022/fd/10200002.pdf",
     "pdf_class": "efiled",
     "parse_status": "ok"
   }

@@ -176,7 +176,7 @@ def test_pull_index_year_extracts_xml_and_txt(tmp_path):
         client, 2024, tmp_path, sleep=no_sleep
     )
 
-    year_dir = tmp_path / "raw" / "2024"
+    year_dir = tmp_path / "raw" / "clerk" / "2024"
     assert (year_dir / "2024FD.xml").exists()
     assert (year_dir / "2024FD.txt").exists()
     assert result["status"] == "fetched"
@@ -254,8 +254,8 @@ def test_pull_index_only_multiyear_paces_between_years(tmp_path):
         delay=2.5,
     )
     assert rc == 0
-    assert (tmp_path / "raw" / "2023" / "2023FD.xml").exists()
-    assert (tmp_path / "raw" / "2024" / "2024FD.xml").exists()
+    assert (tmp_path / "raw" / "clerk" / "2023" / "2023FD.xml").exists()
+    assert (tmp_path / "raw" / "clerk" / "2024" / "2024FD.xml").exists()
     # One pacing sleep between the two years; none before the first.
     assert sleeps == [2.5]
 
@@ -282,7 +282,7 @@ def test_pull_without_index_only_fetches_index_then_pdfs(tmp_path, capsys):
         sleep=no_sleep,
     )
     assert rc == 0
-    year_dir = tmp_path / "raw" / "2024"
+    year_dir = tmp_path / "raw" / "clerk" / "2024"
     assert (year_dir / "2024FD.xml").exists()
     # The P row (DocID 20024277) routes to ptr/, a non-P row to fd/.
     assert (year_dir / "ptr" / "20024277.pdf").exists()
@@ -410,7 +410,7 @@ def test_pull_reference_fetch_failure_is_non_fatal(tmp_path, capsys):
         sleep=no_sleep,
     )
     assert rc == 0  # the pull as a whole succeeds despite the reference failure
-    year_dir = tmp_path / "raw" / "2024"
+    year_dir = tmp_path / "raw" / "clerk" / "2024"
     assert (year_dir / "2024FD.xml").exists()
     # PDFs still downloaded — the abort happened before this in the old code.
     assert (year_dir / "ptr" / "20024277.pdf").exists()
@@ -426,14 +426,14 @@ def test_pull_reference_fetch_failure_is_non_fatal(tmp_path, capsys):
 def test_cli_rejects_bad_year_range():
     from openhouse.cli import main
 
-    rc = main(["pull", "2007", "--index-only"])
+    rc = main(["clerk", "pull", "2007", "--index-only"])
     assert rc == 2  # before MIN_YEAR → YearRangeError → exit 2
 
 
 def test_cli_rejects_reversed_range():
     from openhouse.cli import main
 
-    rc = main(["pull", "2024-2019", "--index-only"])
+    rc = main(["clerk", "pull", "2024-2019", "--index-only"])
     assert rc == 2
 
 
@@ -449,7 +449,7 @@ FD_DOC = "10066961"  # FilingType O → financial-pdfs
 
 def write_index(tmp_path: Path, year: int = 2024) -> Path:
     """Lay down ``raw/<year>/<year>FD.xml`` from the trimmed fixture (no network)."""
-    year_dir = tmp_path / "raw" / str(year)
+    year_dir = tmp_path / "raw" / "clerk" / str(year)
     year_dir.mkdir(parents=True)
     (year_dir / f"{year}FD.xml").write_bytes(
         (FIXTURES / "2024FD-trimmed.xml").read_bytes()
@@ -484,8 +484,8 @@ def test_pdf_routing_p_to_ptr_else_fd(tmp_path):
 
     pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
 
-    ptr_pdf = tmp_path / "raw" / "2024" / "ptr" / f"{PTR_DOC}.pdf"
-    fd_pdf = tmp_path / "raw" / "2024" / "fd" / f"{FD_DOC}.pdf"
+    ptr_pdf = tmp_path / "raw" / "clerk" / "2024" / "ptr" / f"{PTR_DOC}.pdf"
+    fd_pdf = tmp_path / "raw" / "clerk" / "2024" / "fd" / f"{FD_DOC}.pdf"
     assert ptr_pdf.exists()
     assert fd_pdf.exists()
     # The P DocID hit the ptr-pdfs URL; the O DocID hit financial-pdfs.
@@ -527,7 +527,7 @@ def test_pdf_types_filter_fetches_only_ptr(tmp_path):
     pull_pdfs_year(
         client, 2024, tmp_path, FETCHED_AT, types=["ptr"], sleep=no_sleep
     )
-    year_dir = tmp_path / "raw" / "2024"
+    year_dir = tmp_path / "raw" / "clerk" / "2024"
     # Only the PTR family landed on disk; no fd/ directory was created.
     assert (year_dir / "ptr" / f"{PTR_DOC}.pdf").exists()
     assert not (year_dir / "fd").exists()
@@ -544,7 +544,7 @@ def test_pdf_404_recorded_non_fatally(tmp_path):
 
     result = pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
 
-    year_dir = tmp_path / "raw" / "2024"
+    year_dir = tmp_path / "raw" / "clerk" / "2024"
     # The 404'd PDF is absent on disk but the FD was still fetched (non-fatal).
     assert not (year_dir / "ptr" / f"{PTR_DOC}.pdf").exists()
     assert (year_dir / "fd" / f"{FD_DOC}.pdf").exists()
@@ -567,7 +567,7 @@ def test_pull_manifest_content_and_injected_fetched_at(tmp_path):
     pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
 
     manifest = json.loads(
-        (tmp_path / "raw" / "2024" / "pull-manifest.json").read_text()
+        (tmp_path / "raw" / "clerk" / "2024" / "pull-manifest.json").read_text()
     )
     assert manifest["fetched_at"] == FETCHED_AT
     fd_entry = manifest["filings"][FD_DOC]
@@ -583,7 +583,7 @@ def test_pull_manifest_content_and_injected_fetched_at(tmp_path):
 
 def test_pull_pdfs_missing_index_is_error(tmp_path):
     # No index on disk → cannot enumerate → PullError (never a silent gap).
-    (tmp_path / "raw" / "2024").mkdir(parents=True)
+    (tmp_path / "raw" / "clerk" / "2024").mkdir(parents=True)
     client = make_client(pdf_handler())
     with pytest.raises(PullError):
         pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
@@ -628,7 +628,7 @@ def test_pdf_manifest_written_even_when_year_interrupted(tmp_path):
     with pytest.raises(PullError):
         pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
 
-    manifest_path = tmp_path / "raw" / "2024" / "pull-manifest.json"
+    manifest_path = tmp_path / "raw" / "clerk" / "2024" / "pull-manifest.json"
     assert manifest_path.exists()  # written despite the interruption
     filings = json.loads(manifest_path.read_text())["filings"]
     # Exactly the one file fetched before the 403 is recorded — not a silent gap.
@@ -737,7 +737,7 @@ def test_pdf_write_is_atomic_no_partial_pdf_on_interrupt(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
 
-    year_dir = tmp_path / "raw" / "2024"
+    year_dir = tmp_path / "raw" / "clerk" / "2024"
     # No complete .pdf was promoted, and no .part is masquerading as a body.
     assert list(year_dir.rglob("*.pdf")) == []
     # The manifest was still written by the finally (with what completed: none).
@@ -749,7 +749,7 @@ def test_pdf_no_part_files_left_after_a_clean_run(tmp_path):
     write_index(tmp_path)
     client = make_client(pdf_handler())
     pull_pdfs_year(client, 2024, tmp_path, FETCHED_AT, sleep=no_sleep)
-    assert list((tmp_path / "raw" / "2024").rglob("*.part")) == []
+    assert list((tmp_path / "raw" / "clerk" / "2024").rglob("*.part")) == []
 
 
 def test_pdf_year_summary_reports_counts(tmp_path, capsys):
@@ -786,9 +786,9 @@ def test_doc_id_fetches_exactly_one_pdf(tmp_path):
     pdf_urls = _pdf_urls(handler)
     assert len(pdf_urls) == 1
     assert pdf_urls[0].endswith(f"ptr-pdfs/2024/{PTR_DOC}.pdf")
-    assert (tmp_path / "raw" / "2024" / "ptr" / f"{PTR_DOC}.pdf").exists()
+    assert (tmp_path / "raw" / "clerk" / "2024" / "ptr" / f"{PTR_DOC}.pdf").exists()
     # No other family's body was fetched.
-    assert not (tmp_path / "raw" / "2024" / "fd").exists()
+    assert not (tmp_path / "raw" / "clerk" / "2024" / "fd").exists()
     assert result["fetched"] == 1
 
 
@@ -818,11 +818,11 @@ def test_doc_id_via_pull_fetches_index_then_one_pdf(tmp_path):
     )
     assert rc == 0
     # Index fetched (so the filing's family/metadata is known), one PDF only.
-    assert (tmp_path / "raw" / "2024" / "2024FD.xml").exists()
+    assert (tmp_path / "raw" / "clerk" / "2024" / "2024FD.xml").exists()
     assert len(pdf_calls) == 1
     assert pdf_calls[0].endswith(f"financial-pdfs/2024/{FD_DOC}.pdf")
-    assert (tmp_path / "raw" / "2024" / "fd" / f"{FD_DOC}.pdf").exists()
-    assert not (tmp_path / "raw" / "2024" / "ptr").exists()
+    assert (tmp_path / "raw" / "clerk" / "2024" / "fd" / f"{FD_DOC}.pdf").exists()
+    assert not (tmp_path / "raw" / "clerk" / "2024" / "ptr").exists()
 
 
 def test_doc_id_requires_exactly_one_year(tmp_path):
@@ -877,7 +877,7 @@ def test_member_fetches_only_matching_filers_pdfs(tmp_path):
     from openhouse.pull import doc_ids_for_member
 
     write_index(tmp_path)
-    xml_path = tmp_path / "raw" / "2024" / "2024FD.xml"
+    xml_path = tmp_path / "raw" / "clerk" / "2024" / "2024FD.xml"
 
     # "Adams" is the PTR filer (DocID 20024277) in the trimmed fixture.
     matches = doc_ids_for_member(xml_path, 2024, "Adams")
@@ -918,7 +918,7 @@ def test_member_via_pull_narrows_downloads(tmp_path):
         sleep=no_sleep,
     )
     assert rc == 0
-    assert (tmp_path / "raw" / "2024" / "2024FD.xml").exists()
+    assert (tmp_path / "raw" / "clerk" / "2024" / "2024FD.xml").exists()
     assert len(pdf_calls) == 1
     assert pdf_calls[0].endswith(f"financial-pdfs/2024/{FD_DOC}.pdf")
 
@@ -927,7 +927,7 @@ def test_member_no_match_fetches_no_pdfs(tmp_path):
     from openhouse.pull import doc_ids_for_member
 
     write_index(tmp_path)
-    xml_path = tmp_path / "raw" / "2024" / "2024FD.xml"
+    xml_path = tmp_path / "raw" / "clerk" / "2024" / "2024FD.xml"
     matches = doc_ids_for_member(xml_path, 2024, "Nonexistent McPerson")
     assert matches == set()
 

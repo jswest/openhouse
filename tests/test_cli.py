@@ -81,16 +81,16 @@ from openhouse.cli import main  # noqa: E402
 
 
 def test_inspect_rejects_year_range():
-    assert main(["inspect", "2021-2022", "--sample", "0.5"]) == 2
+    assert main(["clerk", "inspect", "2021-2022", "--sample", "0.5"]) == 2
 
 
 def test_inspect_rejects_out_of_range_sample():
-    assert main(["inspect", "2022", "--sample", "1.5"]) == 2
-    assert main(["inspect", "2022", "--sample", "0"]) == 2
+    assert main(["clerk", "inspect", "2022", "--sample", "1.5"]) == 2
+    assert main(["clerk", "inspect", "2022", "--sample", "0"]) == 2
 
 
 def test_inspect_unparsed_year_exits_1(tmp_path, capsys):
-    rc = main(["inspect", "2022", "--sample", "0.5", "--data-dir", str(tmp_path)])
+    rc = main(["clerk", "inspect", "2022", "--sample", "0.5", "--data-dir", str(tmp_path)])
     assert rc == 1
     assert "not parsed" in capsys.readouterr().err
 
@@ -232,19 +232,19 @@ def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     if verb == "pull":
         cap = _capture_pull_data_dir(monkeypatch)
-        argv_flag = ["pull", "2024", "--data-dir", "/flag/store"]
-        argv_env = ["pull", "2024"]
-        argv_default = ["pull", "2024"]
+        argv_flag = ["clerk", "pull", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["clerk", "pull", "2024"]
+        argv_default = ["clerk", "pull", "2024"]
     elif verb == "parse":
         cap = _capture_parse_data_dir(monkeypatch)
-        argv_flag = ["parse", "2024", "--data-dir", "/flag/store"]
-        argv_env = ["parse", "2024"]
-        argv_default = ["parse", "2024"]
+        argv_flag = ["clerk", "parse", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["clerk", "parse", "2024"]
+        argv_default = ["clerk", "parse", "2024"]
     else:
         cap = _capture_read_data_dir(monkeypatch)
-        argv_flag = ["read", "filings", "2024", "--data-dir", "/flag/store"]
-        argv_env = ["read", "filings", "2024"]
-        argv_default = ["read", "filings", "2024"]
+        argv_flag = ["clerk", "read", "filings", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["clerk", "read", "filings", "2024"]
+        argv_default = ["clerk", "read", "filings", "2024"]
 
     # `read` against these absent dirs now fails loudly (#79); that is fine — this
     # test asserts the spy captured the RESOLVED path, not the exit code. pull/parse
@@ -295,7 +295,7 @@ def test_top_help_shows_pipeline_epilog(capsys):
 def test_subcommand_help_has_examples(capsys):
     for verb in ("pull", "parse", "read"):
         with pytest.raises(SystemExit) as exc:
-            cli_mod.main([verb, "--help"])
+            cli_mod.main(["clerk", verb, "--help"])
         assert exc.value.code == 0
         assert "examples:" in capsys.readouterr().out
 
@@ -314,7 +314,7 @@ def test_pull_targeted_flags_thread_into_pull(monkeypatch):
     monkeypatch.setattr(pull_mod, "pull", fake_pull)
     rc = cli_mod.main(
         [
-            "pull", "2020-2024",
+            "clerk", "pull", "2020-2024",
             "--contact", "Jane Doe <jane@example.com>",
             "--member", "Pelosi",
             "--newest-first",
@@ -335,7 +335,7 @@ def test_pull_doc_id_flag_threads_into_pull(monkeypatch):
 
     monkeypatch.setattr(pull_mod, "pull", fake_pull)
     rc = cli_mod.main(
-        ["pull", "2024", "--contact", "Jane Doe <jane@example.com>",
+        ["clerk", "pull", "2024", "--contact", "Jane Doe <jane@example.com>",
          "--doc-id", "20024277"]
     )
     assert rc == 0
@@ -345,7 +345,7 @@ def test_pull_doc_id_flag_threads_into_pull(monkeypatch):
 
 def test_pull_help_lists_targeted_examples(capsys):
     with pytest.raises(SystemExit) as exc:
-        cli_mod.main(["pull", "--help"])
+        cli_mod.main(["clerk", "pull", "--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "--member" in out and "--doc-id" in out and "--newest-first" in out
