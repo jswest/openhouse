@@ -1183,18 +1183,18 @@ def _fd_amount_entries(
 
     adj_idxs = [i for i, (s, e, _) in enumerate(openers) if adjacent_high(e)]
     best: tuple[list, list[tuple[int, int]]] | None = None
+    degrade: tuple[list, list[tuple[int, int]]] | None = None
     for k in range(len(adj_idxs) + 1):
         for combo in itertools.combinations(adj_idxs, k):
             entries, wrapped, consistent = build(frozenset(combo))
+            if k == 0:
+                degrade = (entries, wrapped)  # the no-split reading — fallback
             if consistent:
                 best = (entries, wrapped)
                 break
         if best:
             break
-    if best is None:
-        entries, wrapped, _ = build(frozenset())  # no consistent split — degrade
-        best = (entries, wrapped)
-    entries, wrapped = best
+    entries, wrapped = best if best is not None else degrade
     # Exact-dollar column values (GH-0166 / GH-0160): a Schedule A income column
     # can hold a single exact figure (``$4,425.09``) rather than a ``$lo - $hi``
     # bucket — the same point-not-bucket shape PTR rows use (#49). Such a token is
@@ -1211,9 +1211,7 @@ def _fd_amount_entries(
             continue
         entries.append((m.start(), m.end(), _parse_exact_amount(m.group(0))))
     entries.sort()
-    # Any range still inverted (an unfixable single-column wrap) degrades to None.
-    cleaned = [(s, e, None if inverted(r) else r) for s, e, r in entries]
-    return cleaned, wrapped
+    return entries, wrapped
 
 
 def _schedule_a_amounts(
