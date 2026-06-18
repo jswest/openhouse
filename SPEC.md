@@ -1029,3 +1029,41 @@ bulk data and is **not faked**. Consequence (stated in both manifests): a member
 org-level totals may count a parent and its subsidiary PAC as two separate orgs,
 and the $10k invariant may legitimately trip across that un-collapsed pair.
 Sourcing affiliation is a future enhancement.
+
+### 13.9 `fec read` — query contract (#172)
+
+Offline, read-only, deterministic query over `parsed/fec/<cycle>/` (what `fec
+parse` wrote) — the FEC analogue of the clerk lane's `read` (§5). A **pure
+function**: it never touches `raw/` or the network and never writes a byte. Two
+subcommands, inverses over the same kept Path-1 contribution set; both take the
+**same `<year>` / `<year>-<year>`** argument, expanded to the enclosing cycle(s)
+(§13.4) with the one-line stderr expansion note.
+
+- `openhouse fec read donors <member> <year|range>` — the connected-SSF PACs that
+  gave to the member, **rolled up to organization** (key = `org_rollup_key`:
+  `connected_organization_name` else committee `name`, §13.8), each
+  `{org, organization_type, total, n_contributions}`, sorted by total desc (org
+  name asc tie-break). `--member` matches case-insensitive substring over the
+  member-link `bioguide_id` — the only identity the link carries (name-string
+  matching, not true identity — §6.2). `--org-type` slices the tagged set to one
+  connected-SSF class (the §13.3 labels, e.g. `labor`); an unknown class fails
+  loudly (exit 2).
+- `openhouse fec read pac <org> <year|range>` — the inverse: the members an org's
+  PAC(s) supported, each `{bioguide_id, total, n_contributions}`, sorted by total
+  desc. `<org>` matches case-insensitive substring over the org rollup key (a
+  fuzzy name match, not verified identity). A receipt whose recipient committee
+  has no member link is reported as an `unattributed` count on stderr, never
+  dropped.
+
+**Sound-or-complete (every response declares its guarantee, §CLAUDE.md).** The
+answer is **complete over the Path-1 itemized connected-SSF receipts** `fec parse`
+kept; the **residual** (stderr, reflected in `--table` runs too) names the
+filtered contributions the parse counted (`not_connected_ssf` +
+`unresolved_committee`), the affiliation-not-collapsed caveat (§13.8), and the
+framing from §13.7: this is the **disclosed candidate-side** hard-money slice, not
+total influence — no dark money, no super-PAC IE, no soft money. The residual
+numbers are read straight from each cycle's `fec-parse-manifest.json` counts
+(never recomputed). JSON to stdout, prose/guarantee/residual to stderr, exit 0
+unless a query genuinely failed (an un-parsed cycle in a range is a clean skip
+reported on stderr; a data dir with **no** parsed cycles for the range fails
+loudly — exit 1 — rather than report a misleading empty match).

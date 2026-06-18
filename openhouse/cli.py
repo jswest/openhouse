@@ -284,7 +284,7 @@ typical workflow:
 
 sources:
   clerk    U.S. House financial disclosures (annual FDs + PTRs) — implemented
-  fec      Federal Election Commission data — scaffolded, not yet implemented (#167)
+  fec      Federal Election Commission data (Path-1 connected-SSF PAC money) — pull/parse/read
 
 clerk stages:
   pull     network — download the index + PDFs into <data>/raw/clerk/
@@ -303,12 +303,11 @@ Run `openhouse <source> <verb> --help` for a command's own options."""
 
 
 # The FEC source verbs (#174). They exist so `openhouse fec …` parses and
-# `openhouse fec --help` lists them; `pull` (#170) and `parse` (#171) are now
-# real (year/range-scoped like clerk's, expanded to a cycle), while `read` and the
-# FEC nouns (donors/pac) remain stubs until later #167 sub-issues. The name is kept
-# for the single intercept point below — a verb is dispatched if real, else the
-# "not yet implemented" stub message fires.
-_FEC_STUB_VERBS = ("pull", "parse", "read", "donors", "pac")
+# `openhouse fec --help` lists them; `pull` (#170), `parse` (#171), and `read`
+# (#172, with the donors/pac subcommands) are now all real (year/range-scoped like
+# clerk's, expanded to a cycle). The tuple is the single intercept point below — a
+# verb is dispatched if real, else the "not yet implemented" stub message fires.
+_FEC_VERBS = ("pull", "parse", "read")
 
 
 def _run_fec_pull(flag_argv, cycles, *, fec_pull_mod, fetched_at) -> int:
@@ -608,16 +607,17 @@ def _add_clerk_verbs(subparsers) -> None:
 
 
 def _add_fec_verbs(subparsers) -> None:
-    """Scaffold the FEC source verbs as stubs (#174). Real behavior is #167.
+    """Register the FEC source verbs (#174). pull/parse/read are real (#170-#172).
 
     Each verb parses (so `openhouse fec <verb> --help` works and the grammar is
-    symmetric with clerk) but :func:`main` short-circuits the FEC source to a
-    clear "not yet implemented" error before any of this is dispatched.
+    symmetric with clerk); :func:`main` intercepts the FEC source before this
+    argparse dispatch and routes each real verb (`read` owns its own sub-parser
+    with the donors/pac subcommands, like clerk read).
     """
-    for verb in _FEC_STUB_VERBS:
+    for verb in _FEC_VERBS:
         subparsers.add_parser(
             verb,
-            help=f"{verb} (FEC) — not yet implemented (#167)",
+            help=f"{verb} (FEC, Path-1 connected-SSF PAC money)",
             add_help=False,
         )
 
@@ -654,12 +654,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     fec_p = sources.add_parser(
         "fec",
-        help="Federal Election Commission data — scaffolded, not yet implemented (#167)",
+        help="Federal Election Commission data (Path-1 connected-SSF PAC money)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Federal Election Commission data (Path 1: connected-SSF PAC money). "
-            "Scaffolded (#174/#168); the verbs are stubs — real FEC behavior lands "
-            "in later sub-issues (#167). " + _FEC_LEGAL_NOTICE
+            "pull (network) → parse (offline) → read donors/pac (offline query). "
+            + _FEC_LEGAL_NOTICE
         ),
     )
     _add_fec_verbs(fec_p.add_subparsers(dest="command", required=True))
@@ -719,20 +719,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # The FEC source is scaffolded only (#174): real behavior is a later sub-issue
-    # (#167). Intercept it before argparse so a stub verb can carry args (e.g.
-    # `fec pull 2024`) without the stub sub-parser having to model each one, while
-    # `openhouse fec --help` still routes through argparse below. A bare
-    # `openhouse fec` (no verb) falls through to argparse, which reports the
-    # required-verb error.
+    # The FEC source (#174) is intercepted before argparse so a verb can carry args
+    # (e.g. `fec pull 2024`, `fec read donors A000370 2024`) without the source
+    # sub-parser having to model each one, while `openhouse fec --help` still routes
+    # through argparse below. A bare `openhouse fec` (no verb) falls through to
+    # argparse, which reports the required-verb error.
     #
-    # The year→cycle grammar is REAL even though the body is a stub (#168): the
-    # year-scoped verbs (pull/parse) parse + validate their <year>/<range> with the
-    # shared clerk parser, then expand each named year to its enclosing FEC cycle
-    # (§13), emitting the one-line stderr note when expansion happens — exactly the
-    # §5 `trades` filing-year-note pattern. Only AFTER parsing + expanding does the
-    # stub exit "not yet implemented", so the grammar is testable now.
-    if raw_argv[:1] == ["fec"] and len(raw_argv) >= 2 and raw_argv[1] in _FEC_STUB_VERBS:
+    # The year-scoped verbs (pull/parse) parse + validate their <year>/<range> with
+    # the shared clerk parser, then expand each named year to its enclosing FEC
+    # cycle (§13), emitting the one-line stderr note when expansion happens — exactly
+    # the §5 `trades` filing-year-note pattern. `read` owns its own sub-parser
+    # (fec_read.py) and expands the range itself (the donors/pac <year|range> arg).
+    if raw_argv[:1] == ["fec"] and len(raw_argv) >= 2 and raw_argv[1] in _FEC_VERBS:
         verb = raw_argv[1]
         if verb in ("pull", "parse"):
             if len(raw_argv) < 3:
@@ -782,9 +780,20 @@ def main(argv: list[str] | None = None) -> int:
                     fec_parse_mod=fec_parse_mod,
                     fetched_at=fetched_at,
                 )
+        if verb == "read":
+            # `fec read` owns its own sub-parser (fec_read.py) — donors/pac are its
+            # subcommands, not top-level verbs. Hand it everything after the
+            # `fec read` tokens verbatim (it accepts --data-dir/--table before OR
+            # after its subcommand, which a stub sub-parser could not express).
+            # Pure function over parsed/fec/ — fully offline. Lazy import keeps the
+            # clerk verbs free of the FEC module's cost.
+            from . import fec_read as fec_read_mod
+
+            return fec_read_mod.run(raw_argv[2:], current_year=current_year)
+        # Unreachable: every member of _FEC_VERBS is dispatched above. Guard so a
+        # future verb added to the tuple without a branch fails loudly, not silently.
         print(
-            f"error: `openhouse fec {verb}` is not yet implemented "
-            f"(the FEC source is scaffolded; see #167).",
+            f"error: `openhouse fec {verb}` has no dispatch branch (internal bug).",
             file=sys.stderr,
         )
         return 1
