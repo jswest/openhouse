@@ -397,38 +397,6 @@ def _filter_filings(filings: list[dict], args) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Table rendering (human garnish — stdout, aligned columns).
-# ---------------------------------------------------------------------------
-
-
-def _render_table(rows: list[list[str]], headers: list[str]) -> str:
-    """Render aligned columns. Empty ``rows`` → just the header line."""
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(cell))
-    lines = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip()]
-    for row in rows:
-        lines.append(
-            "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
-        )
-    return "\n".join(lines)
-
-
-def _emit(payload, *, table: bool, table_fn) -> None:
-    """Emit ``payload`` to stdout: JSON by default, or a rendered table.
-
-    ``table_fn`` builds ``(headers, rows)`` from the payload only when ``--table``
-    is set, so the JSON path never pays for table formatting.
-    """
-    if table:
-        headers, rows = table_fn(payload)
-        print(_render_table(rows, headers))
-    else:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-
-
-# ---------------------------------------------------------------------------
 # Subcommand: filings
 # ---------------------------------------------------------------------------
 
@@ -465,7 +433,7 @@ def cmd_filings(args, data_dir: Path, years: list[int]) -> int:
         filings = _load_year_filings(data_dir, year) or []
         matched.extend(_filter_filings(filings, args))
 
-    _emit(matched, table=args.table, table_fn=_filings_table)
+    cli_mod._emit(matched, table=args.table, table_fn=_filings_table)
     _print_residual(data_dir, present)
     return 0
 
@@ -553,7 +521,7 @@ def cmd_filing(args, data_dir: Path) -> int:
         )
 
     payload = {"filing": filing, "body": body}
-    _emit(payload, table=args.table, table_fn=_filing_detail_table)
+    cli_mod._emit(payload, table=args.table, table_fn=_filing_detail_table)
     return 0
 
 
@@ -730,7 +698,7 @@ def cmd_trades(args, data_dir: Path, years: list[int]) -> int:
     _warn_schema_drift(data_dir, present)
 
     trades = _collect_trades(data_dir, present, args)
-    _emit(trades, table=args.table, table_fn=_trades_table)
+    cli_mod._emit(trades, table=args.table, table_fn=_trades_table)
 
     # Declared-guarantee notes on stderr, so the bound is visible per query mode.
     if args.ticker:
@@ -815,7 +783,7 @@ def cmd_summary(args, data_dir: Path, years: list[int]) -> int:
         )
 
     payload = {"years": year_summaries}
-    _emit(payload, table=args.table, table_fn=_summary_table)
+    cli_mod._emit(payload, table=args.table, table_fn=_summary_table)
     _print_residual(data_dir, present)
     return 0
 

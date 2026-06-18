@@ -37,13 +37,22 @@ from pathlib import Path
 from typing import Optional
 
 from . import cli as cli_mod
-from .fec_parse import org_rollup_key
-from .schemas import FEC_ORG_TYPE_LABELS, FEC_SCHEMA_VERSION, FecCommittee
+from .schemas import FEC_ORG_TYPE_LABELS, FEC_SCHEMA_VERSION
 
 # The org-type labels a --org-type filter may name (the §13 connected-SSF classes,
 # e.g. "corporation" / "labor"). Surfaced in --help and validated against, so a
 # typo fails loudly rather than silently matching nothing.
 _ORG_TYPE_LABELS = frozenset(FEC_ORG_TYPE_LABELS.values())
+
+
+def _org_key(committee: dict) -> str:
+    """The org-rollup key for a committee dict (the dict-path twin of
+    :func:`openhouse.fec_parse.org_rollup_key`): ``connected_organization_name``
+    else ``name`` (SPEC §13). fec_read consumes parsed JSON as plain dicts
+    (mirroring read.py's no-schema-class stance), so it reads the same key
+    ``fec_parse`` wrote without rebuilding a ``FecCommittee``.
+    """
+    return committee.get("connected_organization_name") or committee.get("name")
 
 
 class FecReadError(Exception):
@@ -252,9 +261,14 @@ def _member_bioguides(data_dir: Path, cycles: list[int], needle: str) -> set[str
     return out
 
 
-def _member_committees(data_dir: Path, cycles: list[int], needle: str) -> set[str]:
-    """The recipient ``committee_id``s belonging to members matching ``needle``."""
-    bioguides = _member_bioguides(data_dir, cycles, needle)
+def _member_committees(
+    data_dir: Path, cycles: list[int], bioguides: set[str]
+) -> set[str]:
+    """The recipient ``committee_id``s belonging to the given ``bioguides``.
+
+    Takes the already-resolved bioguide set (the caller matches the ``--member``
+    needle once, then passes it here) so the member-links aren't scanned twice.
+    """
     committees: set[str] = set()
     for cycle in cycles:
         for link in _load_member_links(data_dir, cycle):
@@ -283,32 +297,6 @@ def _committee_to_bioguide(data_dir: Path, cycles: list[int]) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Table rendering (human garnish — stdout). Reused shape from read.py.
-# ---------------------------------------------------------------------------
-
-
-def _render_table(rows: list[list[str]], headers: list[str]) -> str:
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(cell))
-    lines = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip()]
-    for row in rows:
-        lines.append(
-            "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
-        )
-    return "\n".join(lines)
-
-
-def _emit(payload, *, table: bool, table_fn) -> None:
-    if table:
-        headers, rows = table_fn(payload)
-        print(_render_table(rows, headers))
-    else:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-
-
-# ---------------------------------------------------------------------------
 # Subcommand: donors <member> <range>
 # ---------------------------------------------------------------------------
 
@@ -332,7 +320,7 @@ def _rollup_donors(
 ) -> list[dict]:
     """Roll the connected-SSF receipts to ``recipients`` up to organization.
 
-    Key = ``org_rollup_key`` (connected_organization_name else committee name, as
+    Key = ``_org_key`` (connected_organization_name else committee name, as
     #171 wrote it). Each entry carries the contributing committee's normalized
     ``organization_type`` so ``--org-type`` can slice the tagged set. Sorted by
     total desc, then org name asc for a deterministic tie-break.
@@ -352,7 +340,7 @@ def _rollup_donors(
             otype = committee.get("organization_type")
             if org_type is not None and otype != org_type:
                 continue
-            key = org_rollup_key(FecCommittee(**committee))
+            key = _org_key(committee)
             entry = totals.setdefault(
                 key, {"org": key, "organization_type": otype, "total": 0.0, "n_contributions": 0}
             )
@@ -367,10 +355,25 @@ def cmd_donors(args, data_dir: Path, cycles: list[int]) -> int:
     _require_present(data_dir, present, cycles)
     _warn_schema_drift(data_dir, present)
 
-    recipients = _member_committees(data_dir, present, args.member)
+    # An empty bioguide set is NOT an empty result over a matched member — it is "no
+    # member matched at all". Printing the completeness guarantee here would be a
+    # false claim (nothing was matched, so "none omitted" bounds nothing). Say so
+    # honestly and skip the guarantee (mirrors how clerk read leaves an unmatched
+    # --member with no records, adapted to the bioguide-only identity §6.2 carries).
+    bioguides = _member_bioguides(data_dir, present, args.member)
+    if not bioguides:
+        cli_mod._emit([], table=args.table, table_fn=_donors_table)
+        print(
+            f'no member matched "{args.member}" (fec read matches a substring over '
+            f'bioguide_id, e.g. "A000370"); nothing to report.',
+            file=sys.stderr,
+        )
+        return 0
+
+    recipients = _member_committees(data_dir, present, bioguides)
     rollup = _rollup_donors(data_dir, present, recipients, args.org_type)
 
-    _emit(rollup, table=args.table, table_fn=_donors_table)
+    cli_mod._emit(rollup, table=args.table, table_fn=_donors_table)
     if args.org_type is not None:
         print(
             f"note: --org-type {args.org_type!r} slices the tagged set to that "
@@ -401,7 +404,7 @@ def _rollup_pac(
     """Roll the receipts FROM committees whose org key matches ``org`` up to member.
 
     Inverse of ``donors``: select the contributing committees whose
-    ``org_rollup_key`` contains ``org`` (case-insensitive substring — a fuzzy
+    ``_org_key`` contains ``org`` (case-insensitive substring — a fuzzy
     name-string match over the org name, NOT verified identity), then group their
     receipts by recipient member (``committee_id`` → ``bioguide_id`` via the
     links). A receipt whose recipient committee has no member link is counted in
@@ -416,7 +419,7 @@ def _rollup_pac(
         matching = {
             cid
             for cid, c in committees.items()
-            if _ci_contains(org_rollup_key(FecCommittee(**c)), org)
+            if _ci_contains(_org_key(c), org)
         }
         for c in _load_contributions(data_dir, cycle):
             if c.get("contributor_committee_id") not in matching:
@@ -442,7 +445,7 @@ def cmd_pac(args, data_dir: Path, cycles: list[int]) -> int:
 
     rollup, unattributed = _rollup_pac(data_dir, present, args.org)
 
-    _emit(rollup, table=args.table, table_fn=_pac_table)
+    cli_mod._emit(rollup, table=args.table, table_fn=_pac_table)
     if unattributed:
         print(
             f"note: {unattributed} receipt(s) from a matching PAC went to a "
@@ -509,8 +512,8 @@ def build_read_parser() -> argparse.ArgumentParser:
     p_donors.add_argument(
         "--org-type",
         dest="org_type",
-        help="slice to one connected-SSF class: "
-        + " | ".join(sorted(_ORG_TYPE_LABELS)),
+        choices=sorted(_ORG_TYPE_LABELS),
+        help="slice to one connected-SSF class",
     )
 
     # pac <org> <range>
@@ -543,14 +546,6 @@ def run(remainder: list[str], *, current_year: int) -> int:
     args = parser.parse_args(remainder)
     data_dir = cli_mod.resolve_data_dir(getattr(args, "data_dir", None))
     args.table = getattr(args, "table", False)
-
-    if getattr(args, "org_type", None) is not None and args.org_type not in _ORG_TYPE_LABELS:
-        print(
-            f"error: --org-type {args.org_type!r} is not a connected-SSF class; "
-            f"choose one of {sorted(_ORG_TYPE_LABELS)}.",
-            file=sys.stderr,
-        )
-        return 2
 
     try:
         years = cli_mod.parse_year_range(args.range, current_year)

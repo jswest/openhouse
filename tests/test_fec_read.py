@@ -102,13 +102,13 @@ def test_donors_org_type_slice(tmp_path, capsys):
 
 
 def test_donors_bad_org_type_rejected(tmp_path, capsys):
-    """An --org-type that is not a connected-SSF class fails loudly (exit 2)."""
+    """An --org-type outside the connected-SSF classes fails loudly (argparse exit 2)."""
     data = _seed_and_parse(tmp_path)
-    code, _, err = _run(
-        ["donors", "A000370", "2024", "--org-type", "frobnicate"], data, capsys
-    )
-    assert code == 2
-    assert "not a connected-SSF class" in err
+    with pytest.raises(SystemExit) as exc:
+        _run(["donors", "A000370", "2024", "--org-type", "frobnicate"], data, capsys)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice: 'frobnicate'" in err
 
 
 def test_pac_inverse_attributes_to_member(tmp_path, capsys):
@@ -134,6 +134,18 @@ def test_guarantee_and_residual_on_stderr(tmp_path, capsys):
     assert "not total influence" in err
     assert "no dark money" in err
     assert "Affiliated parent+subsidiary PACs are NOT collapsed" in err
+
+
+def test_unmatched_member_does_not_claim_completeness(tmp_path, capsys):
+    """A member query that matches NO bioguide must NOT print the completeness
+    guarantee (that would be a false 'none omitted' claim) — it says so honestly."""
+    data = _seed_and_parse(tmp_path)
+    code, out, err = _run(["donors", "Z999999", "2024"], data, capsys)
+    assert code == 0
+    assert json.loads(out) == []
+    assert 'no member matched "Z999999"' in err
+    assert "none omitted" not in err
+    assert "guarantee: complete over" not in err
 
 
 def test_table_output(tmp_path, capsys):

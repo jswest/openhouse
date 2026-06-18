@@ -282,10 +282,8 @@ def load_legislator_index(data_dir: Path) -> LegislatorIndex:
 # The classification mirrors §6.2's ``identity_warnings`` exactly: a member with
 # no resolvable FEC id is NEVER given a guessed one — it lands in a residual
 # warning, classified by reason. ``no_fec_id`` is the one this offline pass
-# emits; ``ambiguous_committee`` and ``unmatched`` are the seams #170's network
-# committee-resolution pass will exercise (declared here so the residual vocabulary
-# is stable across the two waves). Sound over complete: a missed link is recoverable
-# from the residual; a fabricated candidate id is not (CLAUDE.md).
+# emits. Sound over complete: a missed link is recoverable from the residual; a
+# fabricated candidate id is not (CLAUDE.md).
 
 # The unresolved-committee sentinel on a link whose candidate id is known but whose
 # principal-committee id is the #170 network seam. The #168 model types
@@ -293,15 +291,10 @@ def load_legislator_index(data_dir: Path) -> LegislatorIndex:
 # (never a fabricated ``C########``), distinguishable downstream from a real id.
 UNRESOLVED_COMMITTEE = ""
 
-# Residual reason buckets for a member with no resolvable FEC link (#169),
+# Residual reason bucket for a member with no resolvable FEC link (#169),
 # mirroring §6.2's classified ``identity_warnings``:
-#   * no_fec_id          — the CC0 roster carries no ``id.fec`` for this bioguide
-#                          (this offline pass's only live reason).
-#   * ambiguous_committee — candidate id known, but OpenFEC returns >1 principal
-#                          committee with no single pick — the #170 network seam.
-#   * unmatched          — candidate id known, but OpenFEC has no committee for it
-#                          — the #170 network seam.
-FEC_LINK_REASONS = ("no_fec_id", "ambiguous_committee", "unmatched")
+#   * no_fec_id — the CC0 roster carries no ``id.fec`` for this bioguide
+#                 (this offline pass's only live reason).
 
 
 def build_fec_member_links(
@@ -322,8 +315,8 @@ def build_fec_member_links(
     Returns ``(links, warnings)``: ``links`` in first-appearance bioguide order
     then ``id.fec`` order (deterministic); ``warnings`` one entry per unresolved
     member, ``{"bioguide_id", "reason"}`` — the §6.2 ``identity_warnings`` shape,
-    classified by :data:`FEC_LINK_REASONS`. Input bioguides are deduped in
-    first-seen order so the output is independent of how often a member filed.
+    classified ``no_fec_id``. Input bioguides are deduped in first-seen order so
+    the output is independent of how often a member filed.
     """
     links: list[FecMemberCandidateLink] = []
     warnings: list[dict] = []
