@@ -7,11 +7,10 @@ at ``raw/reference/`` by ``clerk pull``.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-from .legislators import LEGISLATORS_FILES, REFERENCE_SUBDIR, _norm_name
+from .legislators import REFERENCE_SUBDIR, _norm_name, load_legislator_records
 
 
 # ---------------------------------------------------------------------------
@@ -19,84 +18,64 @@ from .legislators import LEGISLATORS_FILES, REFERENCE_SUBDIR, _norm_name
 # ---------------------------------------------------------------------------
 
 
-def _load_records(data_dir: Path) -> tuple[list[dict], int]:
-    """Load the union of current + historical legislators from disk.
+class ReferenceDataError(RuntimeError):
+    """Raised when no reference data is on disk to search."""
 
-    Missing files are silently skipped; malformed files warn to stderr.
-    Raises :class:`ReferenceDataError` if neither file is present.
+
+def _load_records(data_dir: Path) -> tuple[list[dict], int]:
+    """Return ``(records, total)`` for the cached legislator set.
+
+    Raises :class:`ReferenceDataError` when neither reference file is present —
+    the lookup has nothing to search. (A present-but-unreadable file is warned
+    about and skipped by the shared loader, not treated as absent.)
     """
-    ref_dir = data_dir / REFERENCE_SUBDIR
-    records: list[dict] = []
-    found_any = False
-    for fname in LEGISLATORS_FILES:
-        path = ref_dir / fname
-        if not path.exists():
-            continue
-        found_any = True
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                records.extend(data)
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"warning: could not read {path}: {exc}",
-                file=sys.stderr,
-            )
+    records, found_any = load_legislator_records(data_dir)
     if not found_any:
         raise ReferenceDataError(
-            f"no reference data under {ref_dir}; "
+            f"no reference data under {data_dir / REFERENCE_SUBDIR}; "
             f"run 'openhouse clerk pull <year>' to fetch it"
         )
     return records, len(records)
 
 
-class ReferenceDataError(RuntimeError):
-    """Raised when the on-disk reference data is absent or unreadable."""
-
-
-def _matches(record: dict, needle: str) -> bool:
-    """Case-insensitive substring match on bioguide id or any name field.
-
-    Names are diacritic-normalised first (``"gonzalez"`` matches ``"González-Colón"``).
-    """
-    bioguide = (record.get("id") or {}).get("bioguide", "")
-    if needle.lower() in bioguide.lower():
-        return True
-    name = record.get("name") or {}
-    norm_needle = _norm_name(needle)
-    for field in ("first", "last", "official_full"):
-        value = name.get(field) or ""
-        if norm_needle in _norm_name(value):
-            return True
-    return False
-
-
 def _to_row(record: dict) -> dict:
     """Flatten a raw legislator record into an output row dict."""
-    bioguide = (record.get("id") or {}).get("bioguide", "")
     name_obj = record.get("name") or {}
     display_name = name_obj.get("official_full") or (
         f"{name_obj.get('first', '')} {name_obj.get('last', '')}".strip()
     )
     terms = record.get("terms") or []
     last_term = terms[-1] if terms else {}
-    chamber = last_term.get("type", "")
-    state = last_term.get("state", "")
     return {
         "name": display_name,
-        "bioguide_id": bioguide,
-        "chamber": chamber,
-        "state": state,
+        "bioguide_id": (record.get("id") or {}).get("bioguide") or "",
+        "chamber": last_term.get("type", ""),
+        "state": last_term.get("state", ""),
     }
 
 
 def search(needle: str, data_dir: Path) -> tuple[list[dict], int]:
     """Return ``(rows, total_searched)`` for all legislators matching ``needle``.
 
-    Raises :class:`ReferenceDataError` if neither reference file is on disk.
+    Matching is case-insensitive on the bioguide id and diacritic-insensitive on
+    the name fields (``"gonzalez"`` matches ``"González-Colón"``). Raises
+    :class:`ReferenceDataError` if no reference file is on disk.
     """
     records, total = _load_records(data_dir)
-    rows = [_to_row(r) for r in records if _matches(r, needle)]
+    needle_lower = needle.lower()
+    norm_needle = _norm_name(needle)
+
+    def matches(record: dict) -> bool:
+        bioguide = (record.get("id") or {}).get("bioguide") or ""
+        if needle_lower in bioguide.lower():
+            return True
+        name = record.get("name") or {}
+        return any(
+            norm_needle in _norm_name(name.get(f) or "")
+            for f in ("first", "last", "official_full")
+        )
+
+    rows = [_to_row(r) for r in records if matches(r)]
     rows.sort(key=lambda r: (r["name"], r["bioguide_id"]))
     return rows, total
 
@@ -160,10 +139,11 @@ def run(argv: list[str]) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    cols = ["name", "bioguide_id", "chamber", "state"]
     _emit(
         rows,
         table=args.table,
-        table_fn=_table_fn,
+        table_fn=lambda rs: (cols, [[r[c] for c in cols] for r in rs]),
     )
 
     ref_dir = resolved_dir / REFERENCE_SUBDIR
@@ -174,9 +154,3 @@ def run(argv: list[str]) -> int:
         file=sys.stderr,
     )
     return 0
-
-
-def _table_fn(rows: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Build ``(headers, rows)`` for :func:`cli._emit` table rendering."""
-    headers = ["name", "bioguide_id", "chamber", "state"]
-    return headers, [[r[h] for h in headers] for r in rows]

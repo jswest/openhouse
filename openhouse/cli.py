@@ -726,6 +726,8 @@ def build_parser() -> argparse.ArgumentParser:
     # `reference` is a TOOL-LEVEL verb (#184): it searches the shared CC0
     # congress-legislators set — a cross-source identity lookup, not a data
     # source's pipeline — so it stays at the top level, not under clerk/fec.
+    # add_help=False: reference.py owns the real parser (positional + flags); this
+    # stub exists only so `openhouse --help` enumerates the command.
     sources.add_parser(
         "reference",
         help="look up legislators by name or bioguide-id substring (offline)",
