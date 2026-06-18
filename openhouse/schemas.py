@@ -95,7 +95,21 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 # ``filings.json`` bytes, so a tree migrated by a bare ``mv`` (which relocates the
 # JSON but not its embedded paths) must be re-parsed for ``source_pdf`` to point at
 # the moved bytes — the bump makes ``read``'s schema-drift warning surface that.
-SCHEMA_VERSION = 10
+# Generation 11 (GH-0166): the column/row-reconstruction omnibus. A single
+# generalized fix to the shared two-layer reconstruction in ``pdf.py`` resolves a
+# family of per-schedule regressions that kept reopening (#160/#162/#163/#164/#165
+# + the #76 extension): FD Schedule A wrapped income-type second lines and
+# multi-wrapped value/income high bounds that landed at the de-wrapped row tail
+# (so ``value_of_asset`` / ``income_type`` / ``income_amount`` were dropped or
+# corrupted), exact (non-range) Schedule A income values, and open-ended ``Over
+# $X`` value handling; Schedule C source|type boundaries for multi-word/unknown
+# Type values; Schedule F Parties/Terms population plus suppression of phantom
+# row-splits on dates embedded in Terms prose; Schedule H multi-line source +
+# itinerary/location extraction; the Schedule I sibling (activity/date folded out
+# of source); and Schedule D wrapped ``date_incurred`` + comment-line bleed out of
+# ``liability_type``. All change parsed output bytes, so a re-parse from ``raw/``
+# is required — which the bump forces.
+SCHEMA_VERSION = 11
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.

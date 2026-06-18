@@ -14,6 +14,7 @@ Everything here is offline and deterministic: it opens only files already on dis
 
 from __future__ import annotations
 
+import itertools
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -988,14 +989,17 @@ def _group_items(lines: list[str], *, starts_item, starts_before=None) -> list[s
     return items
 
 
-# A dangling value-range low bound (``$100,001 - Interest``) whose high bound did
-# not follow on the same span — the income column (a word, e.g. ``Interest`` /
-# ``Rent``) intruded right after the dash and the value's high bound wrapped to the
-# line end (SPEC §2.2 column interleave). Requiring a *letter* after the dash (not
-# merely "not a $") is what distinguishes a real interleave from an ordinary
-# complete ``$lo - $hi`` bucket: the latter's dash is followed by whitespace then
-# ``$``, never a word, so it must not be mistaken for a dangling low.
-_FD_DANGLING_LOW_RE = re.compile(r"\$([\d,]+)\s+-\s+(?=[A-Za-z])")
+# The wrapped second line of a stacked ``Income Type(s)`` cell (GH-0166). The
+# Clerk's Schedule A income-type column holds a small closed set of categories;
+# two stacked ones (``Capital Gains,`` then ``Dividends``) wrap, and the second
+# line lands in the de-wrapped row tail. This matches the continuation category
+# there. Listed so the longest phrase wins; ``Capital Gains`` precedes its own
+# trailing-comma first line, which is already captured between the columns.
+_FD_A_INCOME_TYPE_CONT_RE = re.compile(
+    r"Capital Gains|Dividends|Interest|Rent|Royalties|Partnership Income|"
+    r"Tax-Deferred|Excepted Investment Fund|Excepted Trust",
+    re.IGNORECASE,
+)
 
 
 def _income_type_between(raw: str, start: int, end: int) -> str | None:
@@ -1024,6 +1028,14 @@ _FD_A_OVER_RE = re.compile(r"Over\s+\$[\d,]+", re.IGNORECASE)
 # Any bare money token — the candidate pool for wrapped high bounds, filtered in
 # ``_fd_amount_entries`` down to tokens claimed by no bucket/Over/dangling span.
 _FD_BARE_AMOUNT_RE = re.compile(r"\$[\d,]+")
+# An amount-column *opener* — a ``$lo -`` range start, low figure captured. Each
+# is one amount column; ``_fd_amount_entries`` (GH-0166) pairs each opener with
+# its high (the adjacent inline ``$hi`` or a wrapped bare token in the tail).
+_FD_AMOUNT_OPENER_RE = re.compile(r"\$([\d,]+)\s*-")
+# A single exact-dollar column value (``$4,425.09``) — cents required so it cannot
+# be confused with a bare whole-dollar wrapped high (GH-0166 / GH-0160). Serialized
+# as an ``{exact, label}`` point, the same shape PTR exact amounts use (#49).
+_FD_EXACT_AMOUNT_RE = re.compile(r"\$[\d,]+\.\d{2}")
 
 
 def _fd_columns(raw: str) -> str:
@@ -1068,93 +1080,139 @@ def _fd_amount_entries(
       every dangling resolves to ``None`` instead (degrade, never fabricate —
       #12). An unresolved dangling still holds its column slot.
 
-    **Cross-column contamination** (GH-0098): when *every* column's high bound
-    wraps, an earlier column's wrapped high can land in the de-wrapped text right
-    in front of a later column's ``$lo -`` start — so ``_FD_AMOUNT_RE`` greedily
-    glues ``$laterLow - $earlierHigh`` into a spurious complete bucket, crossing
-    the columns and leaving the row's first low dangling against the *wrong* high
-    (``value $250,001 - $50,000`` — ``high < low`` — with income overstated). The
-    tell is an **inverted** result: a bucket whose ``low > high`` cannot be a real
-    Clerk range, so the left-to-right pairing must have crossed columns. We first
-    build the entries reading buckets as written; if any range inverts, we re-read
-    treating each contaminating bucket (one preceded by a dangling low) as a split
-    ``$laterLow -`` start + a wrapped ``$earlierHigh`` bare, which restores column
-    order. A genuine inline bucket (``$201 - $1,000``) never inverts, so the
-    no-split reading already stands — the retry only fires on real contamination.
-    Any range still inverted after the retry degrades to ``None`` (slot held,
+    **Cross-column contamination** (GH-0098 / GH-0166): a column's high bound
+    wraps onto a following physical line, so pdfplumber's left-to-right re-flow
+    drops the bare ``$hi`` token at the de-wrapped *tail*, in column order. When
+    only one column wraps the bare lands cleanly after the row; when *several*
+    wrap, an earlier column's wrapped high can land right in front of a later
+    column's ``$lo -`` start, so the two glue into a textually-adjacent but
+    spurious bucket (``$15,001 - $1,000,000`` where ``$1,000,000`` is the *value*
+    column's wrapped high, not the *preceding* column's — Pou ``10068928``). Read
+    naively that crosses the columns and leaves the row's real first low dangling
+    against the wrong high (often inverting it).
+
+    The general resolver (GH-0166) treats every ``$lo -`` opener as a column and
+    searches for the **smallest set of textually-adjacent buckets to split** —
+    releasing each split bucket's ``$hi`` back into the ordered tail pool of bare
+    wrapped highs — such that every column pairs to a high with no inverted range
+    and no leftover dangling. A clean row (no wraps, or one wrap) needs no split
+    and the greedy reading already wins; a multi-wrap row recovers exactly when a
+    consistent column-ordered assignment exists. The split set is tiny (one per
+    amount column, ≤ 3–4), so the search is bounded. When no consistent
+    assignment exists the row degrades (danglings → ``None``, slot held,
     ``raw_text`` intact): an impossible bucket is never emitted (degrade, never
     fabricate — #12).
     """
+    overs = list(_FD_A_OVER_RE.finditer(cols, start))
+    over_spans = [m.span() for m in overs]
+
+    def in_over(pos: int) -> bool:
+        return any(a <= pos < b for a, b in over_spans)
+
+    def inverted(r: AmountRange | None) -> bool:
+        return bool(r and r.low is not None and r.high is not None and r.low > r.high)
+
+    # Every ``$lo -`` column opener (position order), skipping any inside an
+    # ``Over $X`` slot. Each opener is one amount column; its high is either the
+    # adjacent inline ``$hi`` or a wrapped bare token in the tail.
+    openers = [
+        (m.start(), m.end(), m.group(1))
+        for m in _FD_AMOUNT_OPENER_RE.finditer(cols, start)
+        if not in_over(m.start())
+    ]
+
+    def adjacent_high(opener_end: int) -> re.Match | None:
+        """The ``$hi`` immediately following an opener's dash (inline bucket)."""
+        return re.match(r"\s*(\$[\d,]+)", cols[opener_end:])
 
     def build(
-        split_contaminated: bool,
-    ) -> tuple[list[tuple[int, int, AmountRange | None]], list[tuple[int, int]]]:
-        letter_lows = list(_FD_DANGLING_LOW_RE.finditer(cols, start))
-        buckets: list[re.Match] = []
-        # (start, end, low) for lows split out of cross-column buckets.
-        split_lows: list[tuple[int, int, str]] = []
-        for m in _FD_AMOUNT_RE.finditer(cols, start):
-            if split_contaminated and any(d.start() < m.start() for d in letter_lows):
-                low = re.match(r"\$([\d,]+)\s*-\s*", m.group(0))
-                split_lows.append((m.start(), m.start() + low.end(), low.group(1)))
+        split: frozenset[int],
+    ) -> tuple[list[tuple[int, int, AmountRange | None]], list[tuple[int, int]], bool]:
+        """Resolve with the openers in ``split`` forced dangling (their inline
+        high, if any, released into the tail pool). Returns the entries, the
+        wrapped-high spans, and whether the assignment was *consistent* (every
+        dangling paired, no inversion)."""
+        consumed: list[tuple[int, int]] = []  # adjacent highs kept by their opener
+        dangling: list[int] = []  # opener indices needing a tail high
+        kept: dict[int, tuple[int, int, str]] = {}  # idx → (lo, hi, span_end)
+        for i, (s, e, lo) in enumerate(openers):
+            hm = adjacent_high(e)
+            if hm and i not in split:
+                hi = hm.group(1).lstrip("$")
+                kept[i] = (lo, hi, e + hm.end())
+                consumed.append((e + hm.start(1), e + hm.end()))
             else:
-                buckets.append(m)
-        spans = [m.span() for m in buckets]
-
-        def unclaimed(m: re.Match) -> bool:
-            # No overlap with any span already claimed by an earlier entry kind
-            # (reads ``spans`` at call time, so each ``spans +=`` below narrows it).
-            return not any(b0 < m.end() and m.start() < b1 for b0, b1 in spans)
-
-        overs = [m for m in _FD_A_OVER_RE.finditer(cols, start) if unclaimed(m)]
-        spans += [m.span() for m in overs]
-        # Column lows in column order: letter-followed danglings + split-out lows.
-        danglings = [(d.start(), d.end(), d.group(1)) for d in letter_lows]
-        danglings += split_lows
-        danglings.sort()
-        spans += [(s, e) for s, e, _ in danglings]
+                dangling.append(i)
+        # Tail pool: bare ``$N`` tokens that are not an opener's own low figure,
+        # not an opener's kept adjacent high, not a cents-bearing exact value,
+        # and not inside an ``Over`` slot. In document (column) order.
+        low_spans = [(s, s + len("$" + lo)) for s, e, lo in openers]
+        claimed = low_spans + consumed
         bares = [
             m
             for m in _FD_BARE_AMOUNT_RE.finditer(cols, start)
-            if unclaimed(m)
+            if not any(a <= m.start() < b for a, b in claimed)
+            and not in_over(m.start())
             and not cols[m.end() :].lstrip().startswith("-")  # a range's own low
             and not cols[m.end() :].startswith(".")  # an exact value's dollars
         ]
+        consistent = len(dangling) == len(bares)
+        wrapped: list[tuple[int, int]] = []
+        pairs: dict[int, tuple[str, str]] = {i: (lo, hi) for i, (lo, hi, _) in kept.items()}
+        if consistent:
+            for idx, b in zip(dangling, bares):
+                pairs[idx] = (openers[idx][2], b.group(0).lstrip("$"))
+                wrapped.append(b.span())
 
-        entries: list[tuple[int, int, AmountRange | None]] = [
-            (m.start(), m.end(), _bucket(m.group(0))) for m in buckets
-        ]
+        entries: list[tuple[int, int, AmountRange | None]] = []
+        for i, (s, e, lo) in enumerate(openers):
+            if i in pairs:
+                plo, phi = pairs[i]
+                rng = _parse_amount_range(f"${plo} - ${phi}")
+                if inverted(rng):
+                    rng, consistent = None, False  # inverted → not a valid assignment
+                # A kept inline bucket spans low..adjacent-high; a wrapped pairing
+                # holds only the opener slot (its high lives in ``wrapped``).
+                span_end = kept[i][2] if i in kept else e
+                entries.append((s, span_end, rng))
+            else:  # unresolved dangling — slot held, no range
+                entries.append((s, e, None))
         entries += [(m.start(), m.end(), None) for m in overs]
-        # Wrapped high bounds (the bares paired to danglings) are column data
-        # displaced out of their slot — report their spans so the asset-name
-        # slicer can strip them (GH-0099). Only the *paired* bares count; an
-        # unmatched/ambiguous wrap degrades to None and its tokens stay in the
-        # name verbatim (degrade, never fabricate — #12).
-        wrapped_high_spans: list[tuple[int, int]] = []
-        if danglings and len(danglings) == len(bares):
-            entries += [
-                (s, e, _parse_amount_range(f"${low} - {b.group(0)}"))
-                for (s, e, low), b in zip(danglings, bares)
-            ]
-            wrapped_high_spans = [b.span() for b in bares]
-        else:
-            entries += [(s, e, None) for s, e, _ in danglings]
         entries.sort()
-        return entries, wrapped_high_spans
+        return entries, wrapped, consistent
 
-    def is_inverted(r: AmountRange | None) -> bool:
-        return bool(r and r.low is not None and r.high is not None and r.low > r.high)
-
-    def inverted(es: list[tuple[int, int, AmountRange | None]]) -> bool:
-        return any(is_inverted(r) for _, _, r in es)
-
-    entries, wrapped = build(split_contaminated=False)
-    if inverted(entries):
-        retry, retry_wrapped = build(split_contaminated=True)
-        if not inverted(retry):
-            entries, wrapped = retry, retry_wrapped
-    # Never emit a range that is still inverted — degrade it to None.
-    cleaned = [(s, e, None if is_inverted(r) else r) for s, e, r in entries]
+    adj_idxs = [i for i, (s, e, _) in enumerate(openers) if adjacent_high(e)]
+    best: tuple[list, list[tuple[int, int]]] | None = None
+    for k in range(len(adj_idxs) + 1):
+        for combo in itertools.combinations(adj_idxs, k):
+            entries, wrapped, consistent = build(frozenset(combo))
+            if consistent:
+                best = (entries, wrapped)
+                break
+        if best:
+            break
+    if best is None:
+        entries, wrapped, _ = build(frozenset())  # no consistent split — degrade
+        best = (entries, wrapped)
+    entries, wrapped = best
+    # Exact-dollar column values (GH-0166 / GH-0160): a Schedule A income column
+    # can hold a single exact figure (``$4,425.09``) rather than a ``$lo - $hi``
+    # bucket — the same point-not-bucket shape PTR rows use (#49). Such a token is
+    # not a range opener, not a wrapped high already claimed by a dangling, and not
+    # inside an ``Over`` slot — so any remaining cents-bearing ``$N.dd`` token (the
+    # unambiguous exact marker) becomes its own column entry. We require the cents
+    # so a bare whole-dollar wrapped high that the consistency search left unpaired
+    # never masquerades as an exact value (degrade, never fabricate — #12).
+    claimed_spans = [(s, e) for s, e, _ in entries] + wrapped
+    for m in _FD_EXACT_AMOUNT_RE.finditer(cols, start):
+        if in_over(m.start()) or any(
+            a <= m.start() < b for a, b in claimed_spans
+        ):
+            continue
+        entries.append((m.start(), m.end(), _parse_exact_amount(m.group(0))))
+    entries.sort()
+    # Any range still inverted (an unfixable single-column wrap) degrades to None.
+    cleaned = [(s, e, None if inverted(r) else r) for s, e, r in entries]
     return cleaned, wrapped
 
 
@@ -1196,16 +1254,38 @@ def _schedule_a_amounts(
     cols = _fd_columns(raw)
 
     none_value = _FD_A_NONE_VALUE_RE.search(cols)
+    # Wrapped-name fallback (GH-0166 / GH-0160): when the asset name wraps so far
+    # that its ``[TYPE]`` tag lands *after* the value literal, the ``]``/``⇒``
+    # anchor ``_FD_A_NONE_VALUE_RE`` needs is gone (Smith ``10066320``: ``…Health
+    # Undetermined Royalties $4,425.09 Communications, Inc. [IP]``). A ``None``/
+    # ``Undetermined`` immediately followed by an income-type category is still
+    # unambiguously the value slot — a value literal is the only place that
+    # signature occurs (an income ``None`` sits *after* the type, never before it).
+    if none_value is None:
+        cand = _FD_A_NONE_BEFORE_TYPE_RE.search(cols)
+        # Only the *value* slot's literal qualifies: it must precede every amount
+        # opener. A ``None`` sitting after a ``$lo -`` is an income-current-year
+        # cell on the three-column candidate form (Hackett ``10035478``: ``…100%
+        # $250,001 - None Interest [OL] $500,000``), never the value — taking it
+        # as the value would shift the real value range out of its slot.
+        if cand:
+            first_opener = _FD_AMOUNT_OPENER_RE.search(cols)
+            if first_opener is None or cand.start() < first_opener.start():
+                none_value = cand
     entries: list[tuple[int, int, AmountRange | None]]
     wrapped: list[tuple[int, int]]
     if none_value:
         # The literal None occupies the value slot; amounts shift right. Anchor
-        # the slot at the literal word, not the ⇒/] before it — so stripping
-        # this column span (GH-0099) leaves the subholding arrow in the name.
+        # the slot at the literal word itself — not the ⇒/] before it (so stripping
+        # this column span (GH-0099) leaves the subholding arrow in the name) and
+        # not the income-type word after it (the wrapped-name fallback's match
+        # runs through the type, but the value slot ends at the literal so the
+        # income-type stays readable between the columns).
         lit = re.search(r"(?:None|Undetermined)\b", none_value.group(0))
         lit_start = none_value.start() + lit.start()
-        entries = [(lit_start, none_value.end(), None)]
-        rest, wrapped = _fd_amount_entries(cols, none_value.end())
+        lit_end = none_value.start() + lit.end()
+        entries = [(lit_start, lit_end, None)]
+        rest, wrapped = _fd_amount_entries(cols, lit_end)
         entries += rest
     else:
         entries, wrapped = _fd_amount_entries(cols)
@@ -1218,6 +1298,20 @@ def _schedule_a_amounts(
         if len(entries) > 1
         else None
     )
+    # Wrapped income-type second line (GH-0166 / GH-0160): the ``Income Type(s)``
+    # cell can hold two stacked categories (``Capital Gains, Dividends``). The
+    # first line (``Capital Gains,`` — note the trailing comma) prints between the
+    # value and income columns where ``_income_type_between`` reads it; the second
+    # line wraps to the de-wrapped *tail*, after the income amount, where it would
+    # otherwise be left dangling (a bare ``Dividends`` folded into the asset name
+    # and a corrupt ``Capital Gains,`` type). A trailing comma on the captured
+    # type is the tell the category continues; complete it from the row tail.
+    type_tail_span: tuple[int, int] | None = None
+    if income_type and income_type.rstrip().endswith(","):
+        cont = _FD_A_INCOME_TYPE_CONT_RE.search(cols, entries[1][1])
+        if cont:
+            income_type = f"{income_type.rstrip(', ')}, {cont.group(0)}"
+            type_tail_span = cont.span()
     # Two-income (Candidate/New-Filer) form, current-year column = literal None
     # (#132): the form prints Type | Current-Year | Preceding-Year. When the
     # current-year cell is ``None`` it carries no ``$`` so it never becomes an
@@ -1241,6 +1335,8 @@ def _schedule_a_amounts(
     spans += wrapped
     if len(entries) > 1:
         spans.append((entries[0][1], entries[1][0]))
+    if type_tail_span is not None:
+        spans.append(type_tail_span)
     # ``None``/``Undetermined`` value/income literals carry no ``$`` so they are
     # not amount entries, yet on a ⇒/]-anchored wrapped row they sit in the
     # column zone (``⇒ None None gfedc Name``) and bleed into the name. The
@@ -1305,9 +1401,10 @@ _FD_A_ROW_AFTER_ARROW_RE = re.compile(rf"⇒\s*(?i:SP|DC|JT)?\s*{_FD_VALUE_START
 # value low recovers the row: the wrapped tag/name fold in as continuations and
 # the column parser untangles them. Only a column *low* matches — a wrapped HIGH
 # lands as a bare ``$N`` with no trailing dash, so a continuation line never trips
-# this. Broader than ``_FD_DANGLING_LOW_RE`` (which requires a *word* after the
-# dash and which ``_fd_amount_entries`` still uses for its narrower wrapped-high
-# pairing): this also fires on a complete ``$lo - $hi`` value bucket.
+# this. It fires on any ``$lo -`` opener — a dangling low *or* a complete ``$lo -
+# $hi`` value bucket — since either marks a wrapped row whose value column prints
+# above its [TYPE] tag. (``_fd_amount_entries`` reuses the same opener shape via
+# ``_FD_AMOUNT_OPENER_RE`` to enumerate amount columns — GH-0166.)
 _FD_A_VALUE_LOW_RE = re.compile(r"\$[\d,]+\s*-")
 
 # A value column that *opens* with the literal ``None``/``Undetermined`` —
@@ -1320,6 +1417,19 @@ _FD_A_VALUE_LOW_RE = re.compile(r"\$[\d,]+\s*-")
 # in this position.
 _FD_A_NONE_VALUE_RE = re.compile(
     r"[\]⇒]\s*(?:SP|DC|JT)?\s*(?:None|Undetermined)\b", re.IGNORECASE
+)
+
+# A value literal whose ``]``/``⇒`` anchor wrapped off the line (GH-0166): a
+# ``None``/``Undetermined`` immediately followed by an income-type category. That
+# adjacency is unique to the *value* slot — the value→type→income column order
+# means a value literal is the only ``None``/``Undetermined`` that precedes a
+# type word; an income ``None`` always follows it. Used only as a fallback when
+# the bracket-anchored form misses (the asset name wrapped past its ``[TYPE]``).
+_FD_A_NONE_BEFORE_TYPE_RE = re.compile(
+    r"\b(?:None|Undetermined)\s+(?:"
+    + _FD_A_INCOME_TYPE_CONT_RE.pattern
+    + r")\b",
+    re.IGNORECASE,
 )
 
 # A literal ``None``/``Undetermined`` current-year income cell trailing the
@@ -1632,8 +1742,19 @@ def _parse_schedule_b(
 _FD_C_TYPE_PHRASES = (
     "Retirement Plan",
     "Annuity Plan",
+    # ``Pension Distribution`` / ``Pension Plan`` must precede bare ``Pension`` so
+    # the longest attested Type wins — Raskin ``10068086`` C[2] is ``Barbara
+    # Raskin Pension Plan | Pension Distribution`` (a source that itself ends
+    # ``Pension Plan``), so the trailing-anchored match must claim ``Pension
+    # Distribution`` and leave the source intact (GH-0166 / GH-0162).
+    "Pension Distribution",
     "Pension Plan",
     "Professional Services",
+    # ``Speech/panel fee`` / ``Speech fee`` — Moore ``10062886`` C activity-fee
+    # Types (GH-0166 / GH-0162). Listed before bare ``Fees`` so the multi-word
+    # phrase wins; the ``/`` form precedes the plain one (longest-first).
+    "Speech/panel fee",
+    "Speech fee",
     "Salary",
     "Pension",
     "Annuity",
@@ -1645,6 +1766,12 @@ _FD_C_TYPE_PHRASES = (
     "Honoraria",
     "Partnership Income",
     "Severance",
+    # Tax-form Type labels filers enter verbatim (Raskin/Moore — GH-0162). The
+    # form numbers are a closed set; matched case-insensitively like the rest.
+    "1099-NEC",
+    "1099-MISC",
+    "Wages",
+    "Distribution",
 )
 # An optional owner token (the owner column renders folded in front of the Type:
 # ``Member Retirement Plan`` / ``Spouse Pension`` — issue example Davis is
@@ -1753,9 +1880,22 @@ _FD_DATE_RE = re.compile(
 # word boundaries keep it from matching inside a formatted amount (the comma
 # grouping breaks any 4-digit run) or a longer number.
 _FD_D_BARE_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
-# A Schedule-D dangling value-range low bound — like ``_FD_DANGLING_LOW_RE`` (a
-# ``$lo -`` whose high bound spilled past an intruding column) but broadened to
-# also accept a *digit* after the dash, not just a letter. On a free-text/wrapped
+# A captured ``Date incurred`` that is missing its year (GH-0166 / GH-0165): the
+# free-text ``Various dates [in]`` form whose trailing year wrapped into the
+# amount column. Used to decide whether to recover a stranded bare year from the
+# type slice and re-attach it to the date.
+_FD_D_DATE_NEEDS_YEAR_RE = re.compile(
+    r"Various dates(?:\s+in)?\s*$", re.IGNORECASE
+)
+# A per-row ``COMMENTS:`` marker matched mid-string (the de-wrapped row folds the
+# comment line in after the columns): a plain ``C :``/``C:`` or the glyphs-lost
+# ``C\x00+:`` run. Schedules with no comment field (D) truncate their last column
+# here so the comment never bleeds in (GH-0166 / GH-0165). The leading space (or
+# string start) keeps it from matching a ``C:`` inside a column value.
+_FD_COMMENT_ANYWHERE_RE = re.compile(r"(?:^|\s)C(?:\x00+|\s*):")
+# A Schedule-D dangling value-range low bound — a ``$lo -`` whose high bound
+# spilled past an intruding column, broadened (vs the A/B opener) to also accept a
+# *digit* after the dash, not just a letter. On a free-text/wrapped
 # date the re-flow can land the displaced date year between the low bound and its
 # dash and the high bound (Schiff: ``Margin loan on portfolio $100,001 - 2022
 # $250,000``), so the follower is a digit, which the letter-only A/B pattern
@@ -1866,19 +2006,38 @@ def _parse_schedule_d(lines: list[str]) -> list[ScheduleDItem]:
         # type slice — otherwise they sweep into ``liability_type`` and the row
         # silently emits ``amount_range: null`` (the present amount, invisible).
         amount_range, type_end, amt_spans = _fd_d_amount(raw)
+        # A per-row ``COMMENTS:`` line folds onto the de-wrapped row after the
+        # columns (Schiff D[1]: ``… MD $500,000 C : Mortgage was acquired …``).
+        # Schedule D has no comment/description field, so the comment must never
+        # bleed into ``liability_type`` (GH-0166 / GH-0165) — truncate the type
+        # slice at the comment marker; ``raw_text`` keeps it verbatim.
+        comment_m = _FD_COMMENT_ANYWHERE_RE.search(raw)
+        if comment_m:
+            type_end = min(type_end, comment_m.start())
         ltype = None
         if date_m:
             # Type = text from the date to ``type_end`` with the displaced amount
             # tokens carved out. Rebase the spans to the post-date slice so a
             # wrapped low/high that landed mid-type is removed, rejoining the type.
             d_end = date_m.end()
+            # Wrapped ``Date incurred`` year (GH-0166 / GH-0165): a free-text date
+            # (``Various dates in``) whose year wrapped into the amount column
+            # (Schiff D[0]: ``Various dates in … $100,001 - 2022 $250,000``) leaves
+            # the date yearless and the displaced ``2022`` stranded in the type
+            # slice. The amount carve already removed the ``$`` tokens around it;
+            # lift the bare year out of the type and append it to the date so both
+            # fields read true.
+            year_span: tuple[int, int] | None = None
+            if _FD_D_DATE_NEEDS_YEAR_RE.search(date_incurred or ""):
+                year_m = _FD_D_BARE_YEAR_RE.search(raw, d_end, type_end)
+                if year_m:
+                    date_incurred = f"{date_incurred} {year_m.group(1)}"
+                    year_span = year_m.span()
+            type_spans = [(s - d_end, e - d_end) for s, e in amt_spans]
+            if year_span is not None:
+                type_spans.append((year_span[0] - d_end, year_span[1] - d_end))
             ltype = _scrub_field(
-                _strip_spans(
-                    raw[d_end:],
-                    type_end - d_end,
-                    [(s - d_end, e - d_end) for s, e in amt_spans],
-                )
-                or None
+                _strip_spans(raw[d_end:], type_end - d_end, type_spans) or None
             )
         items.append(
             ScheduleDItem(
@@ -2112,26 +2271,87 @@ def _parse_schedule_e(lines: list[str]) -> list[ScheduleEItem]:
     return items
 
 
+# Schedule F Terms-column opening keywords. The ``Parties | Terms`` boundary has
+# no delimiter, but the Terms free-text reliably opens with one of a small set of
+# agreement-description leads (verified across the cited filings: ``Health
+# coverage``, ``Pension``, ``Publishing agreement``, ``Restricted Shares``,
+# ``Contract for``, ``401(k) plan``, ``I was employed``). A row whose post-date
+# text contains one of these (not at position 0 — the Parties column comes first)
+# splits there: Parties before, Terms from the keyword on. Conservative: a row
+# with no recognized Terms lead leaves ``terms`` None and ``parties`` holds the
+# whole post-date text, with ``raw_text`` carrying the verbatim row regardless.
+_FD_F_TERMS_LEAD_RE = re.compile(
+    r"\b(Health\s+coverage|Pension|Retirement|Publishing\s+agreement|"
+    r"Restricted\s+Shares|Contract\s+for|Consulting|Severance|Deferred|"
+    r"Employment|Compensation|Royalt|Salary|401\(k\)|I\s+was\s+employed|"
+    r"Agreement\s+to|Continued\s+participation)",
+    re.IGNORECASE,
+)
+
+
+def _split_parties_terms(rest: str) -> tuple[str | None, str | None]:
+    """Best-effort ``Parties | Terms`` split of a Schedule F row's post-date text.
+
+    Splits at the first recognized Terms-opening keyword (``_FD_F_TERMS_LEAD_RE``)
+    that is not at the very start (the Parties column always comes first). When no
+    keyword is found the whole text is the Parties column and Terms stays ``None``
+    — the verbatim ``raw_text`` carries the row in full either way (GH-0163;
+    completeness over the known, residual in the text — CLAUDE.md)."""
+    if not rest:
+        return None, None
+    m = _FD_F_TERMS_LEAD_RE.search(rest)
+    if m and m.start() > 0:
+        parties = rest[: m.start()].strip(" ;,") or None
+        terms = rest[m.start() :].strip() or None
+        return parties, terms
+    return rest, None  # non-empty past the guard above — whole text is Parties
+
+
+def _f_starts(s: str) -> bool:
+    """A Schedule F row opens on a leading Date-column date — but NOT on a date
+    embedded in wrapped Terms prose (GH-0166 / GH-0163).
+
+    The F Date column is a ``Month YYYY`` or bare-year value (verified across the
+    cited filings); the row's Terms free-text routinely contains an ``MM/DD/YYYY``
+    that wraps to a line start (Moore: ``…scheduled to vest on`` / ``08/23/2023.
+    Currently valued at $80,731.50.``). Anchoring on any leading date split that
+    one agreement into phantom rows. A prose date carries a trailing ``.``/``,``
+    (it sits mid-sentence) and is a slash form, never the ``Month YYYY`` Date
+    column — so reject a leading date immediately followed by sentence
+    punctuation.
+    """
+    m = _FD_LEADING_DATE_RE.match(s)
+    if not m:
+        return False
+    return s[m.end() : m.end() + 1] not in (".", ",")
+
+
 def _parse_schedule_f(lines: list[str]) -> list[ScheduleFItem]:
     """Schedule F (agreements) → ``date``/``parties``/``terms`` + raw_text.
 
-    A row anchors on a leading ``Month YYYY`` date and folds the (heavily
-    wrapping) terms continuation lines in. ``parties`` and ``terms`` share the
-    rest of the columns with no stable delimiter, so only ``date`` is split off
-    confidently; parties/terms stay ``None`` and ``raw_text`` carries the row.
+    A row anchors on a leading Date-column date (``_f_starts`` — never an
+    ``MM/DD/YYYY`` buried in wrapped Terms prose, GH-0163) and folds the heavily
+    wrapping Terms continuation lines in. Columns are ``Date | Parties | Terms``;
+    the Parties|Terms boundary has no stable delimiter, so the split is
+    best-effort on the parties column's natural terminators (``;`` / ``&``
+    join lists; a known Terms-opening keyword starts the Terms column). When no
+    boundary reads cleanly ``terms`` stays ``None`` and ``raw_text`` carries the
+    whole row (completeness over the known, residual in the text — CLAUDE.md).
     """
     items: list[ScheduleFItem] = []
-    for raw in _group_items(
-        lines, starts_item=lambda s: bool(_FD_LEADING_DATE_RE.match(s))
-    ):
+    for raw in _group_items(lines, starts_item=_f_starts):
         scrubbed = _scrub_raw_text(raw)
         date_m = _FD_LEADING_DATE_RE.match(scrubbed)
         agreement_date = date_m.group(1) if date_m else None
+        parties = terms = None
+        if date_m:
+            rest = scrubbed[date_m.end() :].strip()
+            parties, terms = _split_parties_terms(rest)
         items.append(
             ScheduleFItem(
                 date=agreement_date,
-                parties=None,
-                terms=None,
+                parties=parties,
+                terms=terms,
                 raw_text=scrubbed,
             )
         )
@@ -2163,24 +2383,65 @@ _FD_H_DATES_RE = re.compile(
 )
 
 
+# The ``Days at Personal Expense`` column — a small integer between the Itinerary
+# and the inclusion checkboxes (verified ``0`` on the cited filings). On a wrapped
+# trip it is the de-wrapped boundary between the first physical line's tail
+# (Itinerary part 1) and the wrapped continuation (the rest of the Source name and
+# Itinerary). Anchored to a standalone 1–2 digit run so a year inside a city
+# (none occur) or an amount never trips it.
+_FD_H_DAYS_RE = re.compile(r"\s(\d{1,2})\s")
+# US state/territory postal codes plus the countries seen on the cited
+# itineraries — the closed ``region`` vocabulary that tells a real ``City,
+# Region`` itinerary token (``Palm Beach, FL`` / ``Mumbai, India``) from an
+# org-name fragment that merely has a comma (``Institute, Inc`` — GH-0164). Built
+# as a vocabulary because ``Inc``/``LLC``/``PC`` look exactly like a region word
+# positionally; only the closed set discriminates. Countries are extended as new
+# itineraries surface (raw_text always carries the verbatim row regardless).
+_US_STATE_CODES = (
+    "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS "
+    "MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI "
+    "WY DC PR VI GU AS MP US USA UK"
+).split()
+_FD_H_REGIONS = frozenset(_US_STATE_CODES) | {
+    "India", "Israel", "Canada", "Mexico", "Japan", "China", "Germany",
+    "France", "Italy", "Spain", "Taiwan", "Korea", "England", "Ireland",
+}
+# A ``City, Region`` itinerary token where ``Region`` is in the closed vocabulary
+# above. Only the *last* city word before the comma is matched (``Beach, FL``, not
+# ``Palm Beach, FL``): on a wrapped trip a multi-word city is itself split across
+# the wrap (``…- Palm`` / ``Beaches Beach, FL…``), so matching minimally puts the
+# resume boundary right at the comma-bearing word and leaves the Source-name
+# continuation (``Beaches``) ahead of it (GH-0164).
+_FD_H_CITY_RE = re.compile(
+    r"[A-Z][\w.]*,\s+(" + "|".join(_FD_H_REGIONS) + r")\b"
+)
+# An itinerary ``-`` leg separator (``Institute, Inc - Baltimore``): the next leg
+# of the trip. The surrounding spaces are load-bearing — a hyphenated name token
+# (``Tax-Deferred``) has no spaces around its dash, so this only fires between
+# itinerary legs.
+_FD_H_LEG_RE = re.compile(r"\s-\s")
+
+
 def _parse_schedule_h(lines: list[str]) -> list[ScheduleHItem]:
-    """Schedule H (travel payments) → ``source``/``dates`` + raw_text.
+    """Schedule H (travel payments) → ``source``/``dates``/``location`` + raw_text.
 
-    Columns are ``Source | Dates | Location | Items Provided``. The
-    column-header banner (``Source Dates Location Items``) is dropped upstream in
-    :func:`_segment_schedules` (``_FD_FURNITURE_RE``), so the parser sees only
-    rows. A single trip's ``Location``/``Items`` text wraps across physical lines
-    on real forms (Green 2020/10040812 — GH-0103); left to ``_salvage_raw`` that
-    shreds one trip into several raw_text-only fragments. We coalesce instead:
-    each row anchors on the line bearing the ``Dates`` column (a date or
-    date-range) and folds the wrapped continuation lines in, so one trip is one
-    item.
+    Columns are ``Source | Start/End Dates | Itinerary | Days | <inclusions>``. The
+    column-header banner is dropped upstream in :func:`_segment_schedules`, so the
+    parser sees only rows; each row anchors on the line bearing the ``Dates``
+    column and folds wrapped continuation lines in, so one trip is one item (#147).
 
-    The ``Dates`` signature is the only stable interior delimiter, so we split it
-    off confidently — ``source`` is the text before it, ``dates`` the matched
-    span. ``Location`` and ``Items`` merge with no reliable boundary, so both stay
-    ``None`` (best-effort, #17 scope) and the verbatim ``raw_text`` carries the
-    full row. A row with no recognizable date keeps everything in ``raw_text``.
+    Multi-line reconstruction (GH-0166 / GH-0164). A trip's Source name and
+    Itinerary both wrap, and pdfplumber's left-to-right re-flow interleaves them
+    at the de-wrapped tail: ``Source(p1) <dates> Itin(p1) <days> Source(p2)
+    Itin(p2)``. Reading ``source`` as only the pre-dates text truncated multi-line
+    source names (``Conservative Partnership`` for ``Conservative Partnership
+    Institute, Inc``) and dropped the Itinerary entirely. We rebuild both: the
+    ``<days>`` integer is the boundary between Itin(p1) and the wrapped tail; in
+    that tail the wrapped Source name precedes the resumed Itinerary, which is
+    marked by the first ``City, Region`` token or a ``-`` leg separator. ``source``
+    rejoins p1 + the leading tail; ``location`` (the Itinerary) rejoins Itin(p1) +
+    the resumed tail. ``items`` has no stable boundary and stays ``None``; a row
+    with no recognizable date keeps everything in ``raw_text``.
     """
     items: list[ScheduleHItem] = []
     for raw in _group_items(
@@ -2188,17 +2449,55 @@ def _parse_schedule_h(lines: list[str]) -> list[ScheduleHItem]:
     ):
         scrubbed = _scrub_raw_text(raw)
         date_m = _FD_H_DATES_RE.search(scrubbed)
-        if date_m:
-            dates = date_m.group("dates").strip()
-            source = _scrub_field(scrubbed[: date_m.start()].strip()) or None
-        else:
-            dates = None
-            source = None
+        if not date_m:
+            items.append(
+                ScheduleHItem(
+                    source=None, dates=None, location=None, items=None,
+                    raw_text=scrubbed,
+                )
+            )
+            continue
+        dates = date_m.group("dates").strip()
+        source_p1 = scrubbed[: date_m.start()].strip()
+        after = scrubbed[date_m.end() :].strip()
+        location = None
+        source = _scrub_field(source_p1) or None
+        days_m = _FD_H_DAYS_RE.search(after)
+        if days_m:
+            itin_p1 = after[: days_m.start()].strip()
+            tail = after[days_m.end() :].strip()
+            # In the wrapped tail the Source-name continuation precedes the resumed
+            # Itinerary. The Itinerary resumes at the earlier of two signals: a
+            # ``- `` leg separator (the next itinerary leg, e.g. Harris ``Institute,
+            # Inc - Baltimore``) or a ``City, Region`` token completing a cut-off
+            # leg (Schiff ``Beaches`` then ``Beach, FL``; Waltz ``(MECEA)`` then
+            # ``Mumbai, India``). The earliest signal bounds Source(p2); the rest
+            # is Itinerary(p2). A tail with neither is all Source continuation.
+            city_m = _FD_H_CITY_RE.search(tail)
+            leg_m = _FD_H_LEG_RE.search(tail)
+            cuts = [m.start() for m in (city_m, leg_m) if m]
+            if cuts:
+                cut = min(cuts)  # the Itinerary resumes here (0 if no Source wrap)
+                source_p2 = tail[:cut].strip(" -")
+                itin_p2 = tail[cut:].strip()
+            else:
+                source_p2, itin_p2 = tail, ""  # no itinerary signal — all Source
+            source = (
+                _scrub_field(f"{source_p1} {source_p2}".strip()) or None
+            )
+            location = (
+                _scrub_field(f"{itin_p1} {itin_p2}".strip(" -")) or None
+            )
+        # No Days column: the older single-``Dates``-column (dash-range) format
+        # carries no Days marker, so the Itinerary|Items boundary is unrecoverable
+        # — leave ``location`` None (the by-design merge) and keep the row in
+        # ``raw_text``. Only the modern Start/End + Days layout (the GH-0164 cited
+        # filings) reconstructs the Itinerary above.
         items.append(
             ScheduleHItem(
                 source=source,
                 dates=dates,
-                location=None,
+                location=location,
                 items=None,
                 raw_text=scrubbed,
             )
@@ -2266,17 +2565,52 @@ def _parse_schedule_g(lines: list[str]) -> list[ScheduleGItem]:
     return items
 
 
+# A Schedule I ``Date`` column value (``04/22/2022`` / ``04/2022``) — a clean
+# interior anchor that lets the Source|Activity head split off from the Date|Amount
+# tail (GH-0164). Captured so the field extraction uses the anchoring match.
+_FD_I_DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{4}|\d{1,2}/\d{4})\b")
+
+
 def _parse_schedule_i(lines: list[str]) -> list[ScheduleIItem]:
-    """Schedule I (charity in lieu of honoraria) → ``source``/``amount`` + raw_text
-    (``Source | Activity | Date | Amount``; see :func:`_split_trailing_dollar`).
+    """Schedule I (charity in lieu of honoraria) → ``source``/``activity``/``date``/
+    ``amount`` + raw_text (columns ``Source | Activity | Date | Amount``).
 
     A row anchors on its ``Amount`` column (the one confident I has), so a charity
     name that wrapped onto following lines (Schiff's "Burbank / Temporary Aid /
-    Center") folds into its row rather than fabricating per-line items (#147)."""
+    Center") folds into its row rather than fabricating per-line items (#147). When
+    the ``Date`` column (``MM/DD/YYYY``) is present it is a second clean anchor
+    (GH-0166 / GH-0164): the ``Date`` and the ``Amount`` after it carve out their
+    columns, the single ``Activity`` word before the date splits off, and the
+    remainder is the ``Source`` — so neither the activity nor the date bleeds into
+    ``source`` any more. With no date the row keeps the trailing-dollar-only split
+    (source = the whole pre-amount head, activity/date ``None``)."""
     items: list[ScheduleIItem] = []
     for raw in _group_items(lines, starts_item=lambda s: bool(_FD_DOLLAR_RE.search(s))):
-        scrubbed, source, amount = _split_trailing_dollar(raw)
-        items.append(ScheduleIItem(source=source, amount=amount, raw_text=scrubbed))
+        scrubbed, head_source, amount = _split_trailing_dollar(raw)
+        source, activity, date_str = head_source, None, None
+        date_m = _FD_I_DATE_RE.search(scrubbed)
+        amt_m = _FD_DOLLAR_RE.search(scrubbed)
+        if date_m and amt_m and date_m.end() <= amt_m.start():
+            date_str = date_m.group(1)
+            # Source | Activity sit before the date; the Activity is the trailing
+            # word run before it (a single category word — ``Article``/``Speech``/
+            # ``Panel`` on the cited filings). Split the last token off as activity
+            # so the source is the clean organization name.
+            pre = scrubbed[: date_m.start()].strip()
+            parts = pre.rsplit(" ", 1)
+            if len(parts) == 2 and parts[1]:
+                source, activity = parts[0].strip() or None, parts[1].strip() or None
+            else:
+                source = pre or None
+        items.append(
+            ScheduleIItem(
+                source=source,
+                activity=activity,
+                date=date_str,
+                amount=amount,
+                raw_text=scrubbed,
+            )
+        )
     return items
 
 
