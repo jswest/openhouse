@@ -1791,7 +1791,10 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
 
     Columns are ``Source | Type | Amount [| Preceding-year amount]``. Each row is
     one physical line; the trailing money/``N/A`` token(s) are the amount, the
-    ``Type`` phrase before them the income type, the remainder the source.
+    ``Type`` phrase before them the income type, the remainder the source. The
+    member form has one Amount column → ``amount``; the Candidate/New-Filer form
+    has two (current-year-to-filing, then preceding-year) → ``amount`` +
+    ``amount_preceding`` (GH-0161), kept apart rather than space-joined.
 
     The Type column is *multi-word* on real forms (``Retirement Plan``, ``Annuity
     Plan``, ``Professional Services``) and may carry the owner column folded in
@@ -1805,12 +1808,21 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
     """
     items: list[ScheduleCItem] = []
     for raw in _group_items(lines, starts_item=lambda s: True):
-        # Trailing amount(s): one or two money / N/A tokens at the line's end.
+        # Trailing amount(s): one money / N/A token (member form, one Amount
+        # column) or two (Candidate/New-Filer form: "Amount Current Year to
+        # Filing" then "Amount Preceding Year" — GH-0161). Captured as two groups
+        # so the candidate form's columns are kept apart instead of space-joined
+        # into one unparseable string; ``amount`` is the current/only column,
+        # ``amount_preceding`` the candidate-only second column (None on the
+        # member form).
         amt_m = re.search(
-            r"((?:\$[\d,]+(?:\.\d+)?|N/A)(?:\s+(?:\$[\d,]+(?:\.\d+)?|N/A))?)\s*$",
+            r"(\$[\d,]+(?:\.\d+)?|N/A)(?:\s+(\$[\d,]+(?:\.\d+)?|N/A))?\s*$",
             raw,
         )
         amount = amt_m.group(1).strip() if amt_m else None
+        amount_preceding = (
+            amt_m.group(2).strip() if amt_m and amt_m.group(2) else None
+        )
         head = raw[: amt_m.start()].strip() if amt_m else raw.strip()
         # Prefer a known multi-word Type phrase (with any owner prefix) at the
         # tail; only when none is attested do we fall back to the last token.
@@ -1839,6 +1851,7 @@ def _parse_schedule_c(lines: list[str]) -> list[ScheduleCItem]:
                 source=_scrub_field(source) or _scrub_field(raw),
                 income_type=_scrub_field(income_type),
                 amount=amount,
+                amount_preceding=amount_preceding,
                 raw_text=_scrub_raw_text(raw),
             )
         )

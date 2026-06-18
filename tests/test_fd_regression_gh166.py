@@ -120,6 +120,42 @@ def test_moore_c_speech_fee_boundary():
     assert uky["income_type"] == "Speech fee"
 
 
+# --- #161 — Schedule C two amount columns (candidate/new-filer form) ----------
+
+
+def test_moore_c_candidate_two_amount_columns():
+    # Moore's C is a Candidate/New-Filer form: two Amount columns ("Current Year
+    # to Filing" then "Preceding Year"). They must land in separate fields, never
+    # the pre-#161 space-joined string ("$258,468.14 $406,169.85").
+    c = _sched(MOORE, "C")
+    blackbaud = next(r for r in c if "Blackbaud" in (r["source"] or ""))
+    assert blackbaud["amount"] == "$258,468.14"
+    assert blackbaud["amount_preceding"] == "$406,169.85"
+    # current present / preceding N/A
+    micro = next(r for r in c if (r["source"] or "") == "Microsoft")
+    assert micro["amount"] == "$350.00"
+    assert micro["amount_preceding"] == "N/A"
+    # current N/A / preceding present
+    uky = next(r for r in c if "University of Kentucky" in (r["source"] or ""))
+    assert uky["amount"] == "N/A"
+    assert uky["amount_preceding"] == "$562.20"
+    # both N/A
+    ngps = next(r for r in c if "NineGPS" in (r["source"] or ""))
+    assert ngps["amount"] == "N/A"
+    assert ngps["amount_preceding"] == "N/A"
+
+
+def test_raskin_c_member_form_single_amount_unchanged():
+    # The member annual form has ONE Amount column: amount stays a single value
+    # and amount_preceding is None (no second column on this form) — #161 must
+    # not regress the standard form.
+    c = _sched(RASKIN, "C")
+    pension = next(r for r in c if "Pension Plan" in (r["source"] or ""))
+    assert pension["amount"] == "$23,082.00"
+    assert pension["amount_preceding"] is None
+    assert all(r["amount_preceding"] is None for r in c)
+
+
 # --- #163 — Schedule F parties/terms + no phantom row-split -------------------
 
 
