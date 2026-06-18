@@ -1036,6 +1036,9 @@ _FD_AMOUNT_OPENER_RE = re.compile(r"\$([\d,]+)\s*-")
 # be confused with a bare whole-dollar wrapped high (GH-0166 / GH-0160). Serialized
 # as an ``{exact, label}`` point, the same shape PTR exact amounts use (#49).
 _FD_EXACT_AMOUNT_RE = re.compile(r"\$[\d,]+\.\d{2}")
+# Real FD rows carry at most ~3 amount columns; cap the split search (below) so a
+# row-merge artifact can't drive a 2**N enumeration (GH-0166).
+_FD_MAX_SPLIT_OPENERS = 8
 
 
 def _fd_columns(raw: str) -> str:
@@ -1182,10 +1185,16 @@ def _fd_amount_entries(
         return entries, wrapped, consistent
 
     adj_idxs = [i for i, (s, e, _) in enumerate(openers) if adjacent_high(e)]
+    # The split search is 2**len(adj_idxs); a real FD row carries at most ~3 amount
+    # columns (value/income/preceding), so a row with many adjacent-highs is a
+    # row-merge artifact (the completeness guard catches it), not a real multi-wrap.
+    # Cap the search and degrade past it — keeps parse deterministic and bounded
+    # (no pathological-filing hang) with no effect on real data.
+    search_idxs = adj_idxs if len(adj_idxs) <= _FD_MAX_SPLIT_OPENERS else []
     best: tuple[list, list[tuple[int, int]]] | None = None
     degrade: tuple[list, list[tuple[int, int]]] | None = None
-    for k in range(len(adj_idxs) + 1):
-        for combo in itertools.combinations(adj_idxs, k):
+    for k in range(len(search_idxs) + 1):
+        for combo in itertools.combinations(search_idxs, k):
             entries, wrapped, consistent = build(frozenset(combo))
             if k == 0:
                 degrade = (entries, wrapped)  # the no-split reading — fallback
@@ -1403,7 +1412,10 @@ _FD_A_ROW_AFTER_ARROW_RE = re.compile(rf"⇒\s*(?i:SP|DC|JT)?\s*{_FD_VALUE_START
 # $hi`` value bucket — since either marks a wrapped row whose value column prints
 # above its [TYPE] tag. (``_fd_amount_entries`` reuses the same opener shape via
 # ``_FD_AMOUNT_OPENER_RE`` to enumerate amount columns — GH-0166.)
-_FD_A_VALUE_LOW_RE = re.compile(r"\$[\d,]+\s*-")
+# Same ``$lo -`` opener shape as ``_FD_AMOUNT_OPENER_RE`` — aliased to keep one
+# source of truth (the capture group is harmless in the ``.search()`` truthiness
+# checks below). GH-0166 dedupe.
+_FD_A_VALUE_LOW_RE = _FD_AMOUNT_OPENER_RE
 
 # A value column that *opens* with the literal ``None``/``Undetermined`` —
 # immediately after the ``[TYPE]`` tag or the subholding arrow (plus the

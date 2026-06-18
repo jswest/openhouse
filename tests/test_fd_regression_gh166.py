@@ -231,3 +231,21 @@ def test_schiff_d_wrapped_date_and_comment_bleed():
     # D[1]: a "C :" COMMENTS line must not bleed into liability_type.
     assert d[1]["liability_type"] == "Mortgage on private residence in Potomac, MD"
     assert "C :" not in (d[1]["liability_type"] or "")
+
+
+# --- Resolver bound — pathological many-column row must degrade, not hang ------
+
+
+def test_fd_amount_entries_caps_split_search():
+    """A row-merge artifact (many ``$lo - $hi`` buckets + a count-breaking stray
+    bare ``$N``) must not drive a 2**N split enumeration. The cap routes it to the
+    degrade reading instead. Synthetic by necessity — the point is a shape real
+    filings don't (and mustn't be able to) produce a hang from (GH-0166)."""
+    from openhouse.pdf import _FD_MAX_SPLIT_OPENERS, _fd_amount_entries
+
+    n = _FD_MAX_SPLIT_OPENERS + 12  # far past the cap; 2**n would peg the CPU
+    cols = " ".join(["$1,001 - $15,000"] * n) + " $9,999"  # stray bare ⇒ inconsistent
+    entries, _ = _fd_amount_entries(cols)
+    # Degrade keeps every opener as its inline bucket — slot held, nothing dropped.
+    ranges = [r for _, _, r in entries if r is not None]
+    assert len(ranges) == n
