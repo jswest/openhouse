@@ -32,6 +32,7 @@ from . import parse as parse_mod
 from . import pull as pull_mod
 from . import read as read_mod
 from . import ready as ready_mod
+from . import reference as reference_mod
 
 # SPEC §2.1: the bulk index covers 2008 → present; PTRs (STOCK Act) appear only
 # from 2012 onward.
@@ -722,6 +723,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="report up-to-date / stale / hand-edited instead of installing",
     )
 
+    # `reference` is a TOOL-LEVEL verb (#184): it searches the shared CC0
+    # congress-legislators set — a cross-source identity lookup, not a data
+    # source's pipeline — so it stays at the top level, not under clerk/fec.
+    sources.add_parser(
+        "reference",
+        help="look up legislators by name or bioguide-id substring (offline)",
+        add_help=False,
+    )
+
     return parser
 
 
@@ -840,6 +850,13 @@ def main(argv: list[str] | None = None) -> int:
         # read.py resolves the data dir itself; nudge on legacy layout there too so
         # a pre-namespace user gets the migration note whichever verb they run.
         return read_mod.run(raw_argv[2:], current_year=current_year)
+
+    # `reference` is a top-level tool-level verb (#184): a shared cross-source
+    # identity lookup over the CC0 congress-legislators cache. It owns its own
+    # sub-parser (reference.py) carrying its own positional + flags, so intercept
+    # before argparse — same pattern as `clerk read` and `fec read`.
+    if raw_argv[:1] == ["reference"]:
+        return reference_mod.run(raw_argv[1:])
 
     parser = build_parser()
     args = parser.parse_args(raw_argv)
