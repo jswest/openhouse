@@ -72,7 +72,7 @@ def _load_json(path: Path):
 
 
 def _year_dir(data_dir: Path, year: int) -> Path:
-    return data_dir / "parsed" / str(year)
+    return data_dir / "parsed" / "clerk" / str(year)
 
 
 def _load_year_filings(data_dir: Path, year: int) -> Optional[list[dict]]:
@@ -240,7 +240,7 @@ def _warn_schema_drift(data_dir: Path, years: list[int]) -> None:
             print(
                 f"warning: parsed tree was written by schema_version {version!r}, "
                 f"but this read expects {SCHEMA_VERSION}. Results may not match the "
-                f"current shape; re-run `openhouse parse` to refresh (re-parse, not "
+                f"current shape; re-run `openhouse clerk parse` to refresh (re-parse, not "
                 f"migrate).",
                 file=sys.stderr,
             )
@@ -251,8 +251,8 @@ def _print_skipped(skipped: list[int]) -> None:
     """Report not-yet-parsed years on stderr (graceful degradation, SPEC §5)."""
     if skipped:
         print(
-            f"note: years {skipped} are not parsed (no parsed/<year>/); "
-            f"answered from the parsed years only. Run `openhouse parse` for them.",
+            f"note: years {skipped} are not parsed (no parsed/clerk/<year>/); "
+            f"answered from the parsed years only. Run `openhouse clerk parse` for them.",
             file=sys.stderr,
         )
 
@@ -273,9 +273,9 @@ def _require_present(data_dir: Path, present: list[int], years: list[int]) -> No
         return
     raise ReadError(
         f"no parsed data for {years} under {data_dir} (looked in "
-        f"{data_dir / 'parsed'}/<year>/). This is NOT an empty match — there is "
+        f"{data_dir / 'parsed' / 'clerk'}/<year>/). This is NOT an empty match — there is "
         f"nothing parsed here to query. Check --data-dir / OPENHOUSE_DATA_DIR "
-        f"points at a parsed corpus, then run `openhouse parse` if needed."
+        f"points at a parsed corpus, then run `openhouse clerk parse` if needed."
     )
 
 
@@ -481,7 +481,7 @@ def _find_filing(data_dir: Path, doc_id: str) -> Optional[tuple[int, dict]]:
     Scans every ``parsed/<year>/`` present on disk (DocID is unique within the
     Clerk's corpus; the first match wins, lowest year first for determinism).
     """
-    base = data_dir / "parsed"
+    base = data_dir / "parsed" / "clerk"
     if not base.exists():
         return None
     for year_dir in sorted(base.iterdir()):
@@ -526,7 +526,7 @@ def cmd_filing(args, data_dir: Path) -> int:
     if found is None:
         print(
             f"error: no parsed filing with doc_id {args.doc_id!r} "
-            f"(is the year parsed? try `openhouse read filings`).",
+            f"(is the year parsed? try `openhouse clerk read filings`).",
             file=sys.stderr,
         )
         return 1
@@ -849,7 +849,7 @@ def build_read_parser() -> argparse.ArgumentParser:
         help="render a human-readable aligned table instead of JSON",
     )
     parser = argparse.ArgumentParser(
-        prog="openhouse read",
+        prog="openhouse clerk read",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Query the normalized JSON produced by `parse` (offline, read-only).\n"
@@ -861,11 +861,11 @@ def build_read_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "examples:\n"
-            "  openhouse read filings 2024 --type ptr --state NY\n"
-            "  openhouse read filing 20024001\n"
-            "  openhouse read trades 2024 --ticker AAPL\n"
-            "  openhouse read trades 2020-2024 --asset tesla --table\n"
-            "  openhouse read summary 2020-2024"
+            "  openhouse clerk read filings 2024 --type ptr --state NY\n"
+            "  openhouse clerk read filing 20024001\n"
+            "  openhouse clerk read trades 2024 --ticker AAPL\n"
+            "  openhouse clerk read trades 2020-2024 --asset tesla --table\n"
+            "  openhouse clerk read summary 2020-2024"
         ),
         parents=[common],
     )
@@ -984,6 +984,9 @@ def run(remainder: list[str], *, current_year: int) -> int:
     # → ./data), so a value passed before the subcommand is honored. args.table is
     # likewise normalized once so downstream code can read it unconditionally.
     data_dir = cli_mod.resolve_data_dir(getattr(args, "data_dir", None))
+    # Nudge if a pre-namespace layout is still on disk (#174), so `clerk read`
+    # surfaces the migration note like the other clerk verbs do.
+    cli_mod._warn_legacy_clerk_layout(data_dir)
     args.table = getattr(args, "table", False)
 
     try:

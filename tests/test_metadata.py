@@ -105,9 +105,9 @@ def test_build_records_maps_all_fields_in_order():
 
 def test_source_pdf_routes_p_to_ptr_else_fd():
     records = {r.doc_id: r for r in build_filing_records(TRIMMED_XML, 2024)}
-    assert records["20024277"].source_pdf == "raw/2024/ptr/20024277.pdf"  # P
-    assert records["10066961"].source_pdf == "raw/2024/fd/10066961.pdf"  # O
-    assert records["30022163"].source_pdf == "raw/2024/fd/30022163.pdf"  # X
+    assert records["20024277"].source_pdf == "raw/clerk/2024/ptr/20024277.pdf"  # P
+    assert records["10066961"].source_pdf == "raw/clerk/2024/fd/10066961.pdf"  # O
+    assert records["30022163"].source_pdf == "raw/clerk/2024/fd/30022163.pdf"  # X
 
 
 def test_empty_statedst_yields_null_state_district():

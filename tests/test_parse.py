@@ -72,7 +72,7 @@ _FIXTURE_FILES = {
 
 def _seed_classify_year(data_dir: Path, year: int = 2020) -> None:
     """Lay the constructed index + copy fixture PDFs to raw/<year>/<family>/."""
-    raw = data_dir / "raw" / str(year)
+    raw = data_dir / "raw" / "clerk" / str(year)
     raw.mkdir(parents=True, exist_ok=True)
     (raw / f"{year}FD.xml").write_text(CLASSIFY_XML)
     for (doc_id, family), fname in _FIXTURE_FILES.items():
@@ -83,7 +83,7 @@ def _seed_classify_year(data_dir: Path, year: int = 2020) -> None:
 
 def _seed_year(data_dir: Path, year: int, xml_src: Path) -> None:
     """Lay the index XML where ``parse`` expects it: raw/<year>/<year>FD.xml."""
-    raw = data_dir / "raw" / str(year)
+    raw = data_dir / "raw" / "clerk" / str(year)
     raw.mkdir(parents=True, exist_ok=True)
     shutil.copy(xml_src, raw / f"{year}FD.xml")
 
@@ -278,7 +278,7 @@ def test_identity_report_warns_only_on_suspicious(tmp_path, capsys):
         "<FilingType>O</FilingType><StateDst></StateDst><DocID>8002</DocID></Member>"
         "</FinancialDisclosure>"
     )
-    raw = tmp_path / "raw" / "2024"  # no PDFs → both filings classify missing
+    raw = tmp_path / "raw" / "clerk" / "2024"  # no PDFs → both filings classify missing
     raw.mkdir(parents=True, exist_ok=True)
     (raw / "2024FD.xml").write_text(xml)
     parse_year(2024, data_dir=tmp_path, fetched_at=FETCHED_AT)
@@ -300,8 +300,8 @@ def test_parse_year_writes_filings_and_manifest(tmp_path):
     _seed_year(tmp_path, 2024, PARSE_XML)
     summary = parse_year(2024, data_dir=tmp_path, fetched_at=FETCHED_AT)
 
-    filings_path = tmp_path / "parsed" / "2024" / "filings.json"
-    manifest_path = tmp_path / "parsed" / "2024" / "parse-manifest.json"
+    filings_path = tmp_path / "parsed" / "clerk" / "2024" / "filings.json"
+    manifest_path = tmp_path / "parsed" / "clerk" / "2024" / "parse-manifest.json"
     assert filings_path.exists()
     assert manifest_path.exists()
 
@@ -350,13 +350,13 @@ def test_parse_year_writes_filings_and_manifest(tmp_path):
 def test_parse_year_is_deterministic(tmp_path):
     _seed_year(tmp_path, 2024, PARSE_XML)
     parse_year(2024, data_dir=tmp_path, fetched_at=FETCHED_AT)
-    first = (tmp_path / "parsed" / "2024" / "filings.json").read_bytes()
-    first_manifest = (tmp_path / "parsed" / "2024" / "parse-manifest.json").read_bytes()
+    first = (tmp_path / "parsed" / "clerk" / "2024" / "filings.json").read_bytes()
+    first_manifest = (tmp_path / "parsed" / "clerk" / "2024" / "parse-manifest.json").read_bytes()
     # Re-run from the same raw → byte-identical output.
     parse_year(2024, data_dir=tmp_path, fetched_at=FETCHED_AT)
-    assert (tmp_path / "parsed" / "2024" / "filings.json").read_bytes() == first
+    assert (tmp_path / "parsed" / "clerk" / "2024" / "filings.json").read_bytes() == first
     assert (
-        tmp_path / "parsed" / "2024" / "parse-manifest.json"
+        tmp_path / "parsed" / "clerk" / "2024" / "parse-manifest.json"
     ).read_bytes() == first_manifest
 
 
@@ -364,7 +364,7 @@ def test_parse_missing_year_is_clean_skip(tmp_path, capsys):
     # No raw/2025 seeded → clean skip, not a crash.
     result = parse_year(2025, data_dir=tmp_path, fetched_at=FETCHED_AT)
     assert result is None
-    assert not (tmp_path / "parsed" / "2025").exists()
+    assert not (tmp_path / "parsed" / "clerk" / "2025").exists()
     err = capsys.readouterr().err
     assert "missing" in err
 
@@ -392,7 +392,7 @@ def test_parse_command_returns_zero_and_emits_stdout_summary(tmp_path, capsys):
 
 def _filings_by_doc(data_dir: Path, year: int = 2020) -> dict:
     filings = json.loads(
-        (data_dir / "parsed" / str(year) / "filings.json").read_text()
+        (data_dir / "parsed" / "clerk" / str(year) / "filings.json").read_text()
     )
     return {f["doc_id"]: f for f in filings}
 
@@ -413,7 +413,7 @@ def test_parse_classifies_pdfs_and_writes_unparsed_manifest(tmp_path):
 
     # unparsed-manifest has the scanned + missing entries with reasons, NOT efiled.
     unparsed = json.loads(
-        (tmp_path / "parsed" / "2020" / "unparsed-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / "2020" / "unparsed-manifest.json").read_text()
     )["unparsed"]
     reasons = {u["doc_id"]: u["reason"] for u in unparsed}
     assert reasons == {
@@ -426,7 +426,7 @@ def test_parse_classifies_pdfs_and_writes_unparsed_manifest(tmp_path):
 
     # parse-manifest counts reconcile to the total.
     manifest = json.loads(
-        (tmp_path / "parsed" / "2020" / "parse-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / "2020" / "parse-manifest.json").read_text()
     )
     counts = manifest["counts"]
     assert counts["total"] == 5
@@ -442,7 +442,7 @@ def test_parse_classifies_pdfs_and_writes_unparsed_manifest(tmp_path):
 def test_parse_classification_is_deterministic(tmp_path):
     _seed_classify_year(tmp_path)
     parse_year(2020, data_dir=tmp_path, fetched_at=FETCHED_AT)
-    parsed = tmp_path / "parsed" / "2020"
+    parsed = tmp_path / "parsed" / "clerk" / "2020"
     first_f = (parsed / "filings.json").read_bytes()
     first_m = (parsed / "parse-manifest.json").read_bytes()
     first_u = (parsed / "unparsed-manifest.json").read_bytes()
@@ -466,7 +466,7 @@ def test_parse_types_partial_run_reconciles(tmp_path):
     assert by_doc["30099999"]["pdf_class"] is None
 
     counts = json.loads(
-        (tmp_path / "parsed" / "2020" / "parse-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / "2020" / "parse-manifest.json").read_text()
     )["counts"]
     assert counts["by_pdf_class"] == {"efiled": 1, "scanned": 1, "missing": 0}
     assert counts["not_classified"] == 3
@@ -474,7 +474,7 @@ def test_parse_types_partial_run_reconciles(tmp_path):
 
     # Out-of-scope fd rows are not deemed "unparsed".
     unparsed = json.loads(
-        (tmp_path / "parsed" / "2020" / "unparsed-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / "2020" / "unparsed-manifest.json").read_text()
     )["unparsed"]
     reasons = {u["doc_id"]: u["reason"] for u in unparsed}
     assert reasons == {"8217326": "scanned"}
@@ -484,7 +484,7 @@ def test_parse_extract_failed_marks_error(tmp_path):
     # A present-but-corrupt PDF → parse_status error + unparsed reason extract_failed.
     _seed_classify_year(tmp_path)
     # Clobber one efiled fixture with non-PDF bytes (built at test time).
-    (tmp_path / "raw" / "2020" / "fd" / "10042852.pdf").write_text("not a pdf\n")
+    (tmp_path / "raw" / "clerk" / "2020" / "fd" / "10042852.pdf").write_text("not a pdf\n")
 
     summary = parse_year(2020, data_dir=tmp_path, fetched_at=FETCHED_AT)
     by_doc = _filings_by_doc(tmp_path)
@@ -492,13 +492,13 @@ def test_parse_extract_failed_marks_error(tmp_path):
     assert by_doc["10042852"]["pdf_class"] is None
 
     unparsed = json.loads(
-        (tmp_path / "parsed" / "2020" / "unparsed-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / "2020" / "unparsed-manifest.json").read_text()
     )["unparsed"]
     reasons = {u["doc_id"]: u["reason"] for u in unparsed}
     assert reasons["10042852"] == "extract_failed"
 
     counts = json.loads(
-        (tmp_path / "parsed" / "2020" / "parse-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / "2020" / "parse-manifest.json").read_text()
     )["counts"]
     assert counts["by_parse_status"]["error"] == 1
     # error filing isn't double-counted as a pdf_class; reconciles via not_classified.
@@ -508,7 +508,7 @@ def test_parse_extract_failed_marks_error(tmp_path):
 
 def test_strict_returns_nonzero_on_error(tmp_path, capsys):
     _seed_classify_year(tmp_path)
-    (tmp_path / "raw" / "2020" / "fd" / "10042852.pdf").write_text("not a pdf\n")
+    (tmp_path / "raw" / "clerk" / "2020" / "fd" / "10042852.pdf").write_text("not a pdf\n")
     rc = parse(
         [2020], data_dir=tmp_path, types=["ptr", "fd"], strict=True, fetched_at=FETCHED_AT
     )
@@ -525,7 +525,7 @@ def test_strict_returns_zero_without_error(tmp_path, capsys):
 
 def test_no_strict_returns_zero_even_with_error(tmp_path, capsys):
     _seed_classify_year(tmp_path)
-    (tmp_path / "raw" / "2020" / "fd" / "10042852.pdf").write_text("not a pdf\n")
+    (tmp_path / "raw" / "clerk" / "2020" / "fd" / "10042852.pdf").write_text("not a pdf\n")
     rc = parse(
         [2020], data_dir=tmp_path, types=["ptr", "fd"], strict=False, fetched_at=FETCHED_AT
     )
@@ -553,7 +553,7 @@ def test_unparsed_entries_carry_filer_id(tmp_path):
     _seed_classify_year(tmp_path)
     parse_year(2020, data_dir=tmp_path, fetched_at=FETCHED_AT)
     unparsed = json.loads(
-        (tmp_path / "parsed" / "2020" / "unparsed-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / "2020" / "unparsed-manifest.json").read_text()
     )["unparsed"]
     assert unparsed  # scanned + missing entries exist
     for entry in unparsed:
@@ -580,12 +580,12 @@ def test_stale_body_removed_when_filing_degrades(tmp_path):
         filer=Filer(first="Pat", last="Example"),
         filer_id="name:example.pat",
         filing_type=FilingTypeInfo.from_code("O"),
-        source_pdf="raw/2020/fd/10009999.pdf",
+        source_pdf="raw/clerk/2020/fd/10009999.pdf",
     )
     data_dir = tmp_path
-    (data_dir / "raw/2020/fd").mkdir(parents=True)
-    (data_dir / "raw/2020/fd/10009999.pdf").write_bytes(b"%PDF-1.4 truncated")
-    parsed_dir = data_dir / "parsed/2020"
+    (data_dir / "raw/clerk/2020/fd").mkdir(parents=True)
+    (data_dir / "raw/clerk/2020/fd/10009999.pdf").write_bytes(b"%PDF-1.4 truncated")
+    parsed_dir = data_dir / "parsed/clerk/2020"
     stale = parsed_dir / "fd/10009999.json"
     stale.parent.mkdir(parents=True)
     stale.write_text('{"schedules": {"A": []}}\n')

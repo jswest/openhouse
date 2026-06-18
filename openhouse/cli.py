@@ -1,10 +1,16 @@
 """Command-line interface: arg parsing, the shared year-range parser, dispatch.
 
-``pull`` implements the full acquisition path — the index ZIP (issue #3) and the
-PDF bodies routed by FilingType (issue #4). ``parse`` implements the offline
-normalization + PDF-classification pass (issues #6/#7); ``read`` (issue #10) is
-the offline, read-only query surface — its REMAINDER args are dispatched into
-``openhouse/read.py``, which owns its own sub-parser.
+The grammar is **source × verb** (#174): a source noun (``clerk`` / ``fec``)
+above the pipeline verbs, e.g. ``openhouse clerk pull 2024``. Today only the
+``clerk`` source is implemented; ``fec`` is scaffolded as stubs (#167). The
+tool-level verbs ``ready`` (and the repo-local ``release`` skill) stay
+**top-level** — they are not source-scoped.
+
+Under ``clerk``: ``pull`` implements the full acquisition path — the index ZIP
+(issue #3) and the PDF bodies routed by FilingType (issue #4). ``parse``
+implements the offline normalization + PDF-classification pass (issues #6/#7);
+``read`` (issue #10) is the offline, read-only query surface — its REMAINDER args
+are dispatched into ``openhouse/read.py``, which owns its own sub-parser.
 
 The year-range parser is shared infrastructure (SPEC §9). It is kept pure and
 wall-clock-free by taking ``current_year`` as a parameter, so it is testable
@@ -141,6 +147,47 @@ def _warn_shadowed_local_data() -> None:
     )
 
 
+_legacy_layout_warning_emitted = False
+
+
+def _warn_legacy_clerk_layout(data_dir: Path) -> None:
+    """One-time stderr nudge when a pre-namespace ``raw/<year>/`` is detected (#174).
+
+    The on-disk layout moved to ``raw/clerk/<year>/`` + ``parsed/clerk/<year>/``.
+    A user from before the source namespace has bare year dirs directly under
+    ``raw/`` (a 4-digit-year directory). We do NOT relocate their data — that would
+    be silently moving bytes — but we point at the one-time offline ``mv`` that
+    migrates it, mirroring the ``./data`` shadow note (SPEC §6.4). Detection keys on
+    ``raw/<YYYY>`` because the clerk pull is what created those dirs; the symmetric
+    ``parsed/`` move is in the same printed nudge.
+    """
+    global _legacy_layout_warning_emitted
+    if _legacy_layout_warning_emitted:
+        return
+    raw = data_dir / "raw"
+    try:
+        legacy_years = sorted(
+            child.name
+            for child in raw.iterdir()
+            if child.is_dir() and len(child.name) == 4 and child.name.isdigit()
+        )
+    except OSError:
+        legacy_years = []
+    if not legacy_years:
+        return
+    _legacy_layout_warning_emitted = True
+    print(
+        f"note: found pre-namespace clerk data ({', '.join(legacy_years)}) directly "
+        f"under {raw}; the layout is now raw/clerk/<year>/ + parsed/clerk/<year>/. "
+        f"openhouse does NOT move it for you — run this one-time offline migration:\n"
+        f"  mv {data_dir}/raw/<year>    {data_dir}/raw/clerk/<year>\n"
+        f"  mv {data_dir}/parsed/<year> {data_dir}/parsed/clerk/<year>\n"
+        f"(then re-run `openhouse clerk parse <year>` to refresh each record's "
+        f"source_pdf path).",
+        file=sys.stderr,
+    )
+
+
 def resolve_data_dir(flag_value: str | None) -> Path:
     """Resolve the data root, precedence: ``--data-dir`` flag → ``OPENHOUSE_DATA_DIR``
     env → ``~/.openhouse`` default.
@@ -186,42 +233,45 @@ def parse_types(arg: str) -> list[str]:
 
 _TOP_EPILOG = """\
 typical workflow:
-  openhouse pull 2024 --contact "Jane Doe <jane@example.com>"   # network: fetch
-  openhouse parse 2024                                          # offline: normalize
-  openhouse read trades --ticker AAPL 2024                      # offline: query
+  openhouse clerk pull 2024 --contact "Jane Doe <jane@example.com>"   # network: fetch
+  openhouse clerk parse 2024                                          # offline: normalize
+  openhouse clerk read trades --ticker AAPL 2024                      # offline: query
 
-stages:
-  pull     network — download the index + PDFs into <data>/raw/
-  parse    offline — normalize raw artifacts into <data>/parsed/ JSON
+sources:
+  clerk    U.S. House financial disclosures (annual FDs + PTRs) — implemented
+  fec      Federal Election Commission data — scaffolded, not yet implemented (#167)
+
+clerk stages:
+  pull     network — download the index + PDFs into <data>/raw/clerk/
+  parse    offline — normalize raw artifacts into <data>/parsed/clerk/ JSON
   read     offline — query the parsed JSON (JSON to stdout; --table for humans)
   inspect  offline — sample parsed filings for human accuracy review in a browser
+
+tool-level:
   ready    offline — install the agent skill into ~/.claude/skills/openhouse
 
 data directory (precedence): --data-dir, then $OPENHOUSE_DATA_DIR, then ~/.openhouse
 environment: $OPENHOUSE_CONTACT (pull's User-Agent), $OPENHOUSE_DATA_DIR
 coverage: annual FDs from 2008; PTRs (STOCK Act) from 2012.
 
-Run `openhouse <command> --help` for a command's own options."""
+Run `openhouse <source> <verb> --help` for a command's own options."""
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="openhouse",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=(
-            "Pull, parse, and query U.S. House financial disclosures from the "
-            "Office of the Clerk. " + _LEGAL_NOTICE
-        ),
-        epilog=_TOP_EPILOG,
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"openhouse {__version__}",
-        help="print the installed openhouse version and exit",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+# The FEC source verbs scaffolded here (#174). They exist so `openhouse fec …`
+# parses and `openhouse fec --help` lists them, but each is a stub: real behavior
+# lands in later sub-issues (#167). pull/parse are year/range-scoped like clerk's;
+# read carries the FEC nouns (donors/pac).
+_FEC_STUB_VERBS = ("pull", "parse", "read", "donors", "pac")
 
+
+def _add_clerk_verbs(subparsers) -> None:
+    """Attach the clerk pipeline verbs (pull/parse/inspect/read) to ``subparsers``.
+
+    These are today's verbs, moved verbatim under the ``clerk`` source (#174):
+    behavior and flags are 100% intact, only the grammar gained a source noun.
+    ``read`` is a placeholder entry here (its REMAINDER args are intercepted in
+    :func:`main` before argparse, exactly as before) so ``clerk --help`` lists it.
+    """
     pull_p = subparsers.add_parser(
         "pull",
         help="acquire raw artifacts from the Clerk (network)",
@@ -237,12 +287,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "examples:\n"
-            '  openhouse pull 2024 --contact "Jane Doe <jane@example.com>"\n'
-            "  openhouse pull 2020-2024 --types ptr     # only PTRs, five years\n"
-            "  openhouse pull 2024 --index-only         # index metadata, no PDFs\n"
-            "  openhouse pull 2024 --member Pelosi      # only that filer's PDFs\n"
-            "  openhouse pull 2024 --doc-id 20024277    # one filing's PDF\n"
-            "  openhouse pull 2020-2024 --newest-first  # 2024 first, 2020 last"
+            '  openhouse clerk pull 2024 --contact "Jane Doe <jane@example.com>"\n'
+            "  openhouse clerk pull 2020-2024 --types ptr     # only PTRs, five years\n"
+            "  openhouse clerk pull 2024 --index-only         # index metadata, no PDFs\n"
+            "  openhouse clerk pull 2024 --member Pelosi      # only that filer's PDFs\n"
+            "  openhouse clerk pull 2024 --doc-id 20024277    # one filing's PDF\n"
+            "  openhouse clerk pull 2020-2024 --newest-first  # 2024 first, 2020 last"
         ),
     )
     pull_p.add_argument("years", help="YYYY or YYYY-YYYY")
@@ -353,9 +403,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "examples:\n"
-            "  openhouse parse 2024\n"
-            "  openhouse parse 2020-2024 --types ptr\n"
-            "  openhouse parse 2024 --strict     # non-zero exit if any filing errors"
+            "  openhouse clerk parse 2024\n"
+            "  openhouse clerk parse 2020-2024 --types ptr\n"
+            "  openhouse clerk parse 2024 --strict     # non-zero exit if any filing errors"
         ),
     )
     parse_p.add_argument("years", help="YYYY or YYYY-YYYY")
@@ -391,8 +441,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "examples:\n"
-            "  openhouse inspect 2024 --sample 0.1\n"
-            "  openhouse inspect 2024 --sample 0.25 --seed 7"
+            "  openhouse clerk inspect 2024 --sample 0.1\n"
+            "  openhouse clerk inspect 2024 --sample 0.25 --seed 7"
         ),
     )
     inspect_p.add_argument("year", help="a single coverage year, YYYY")
@@ -420,17 +470,77 @@ def build_parser() -> argparse.ArgumentParser:
         help=_DATA_DIR_HELP,
     )
 
-    # `read` is intercepted in main() before argparse runs (its REMAINDER-style
-    # args, including a leading global flag, defeat argparse subparsing), so this
-    # entry exists only so `openhouse --help` lists the command; its args are
-    # never parsed here. See read.py for the real sub-parser.
+    # `clerk read` is intercepted in main() before argparse runs (its
+    # REMAINDER-style args, including a leading global flag, defeat argparse
+    # subparsing), so this entry exists only so `openhouse clerk --help` lists the
+    # verb; its args are never parsed here. See read.py for the real sub-parser.
     subparsers.add_parser(
         "read",
         help="query the normalized JSON (offline, read-only)",
         add_help=False,
     )
 
-    ready_p = subparsers.add_parser(
+
+def _add_fec_verbs(subparsers) -> None:
+    """Scaffold the FEC source verbs as stubs (#174). Real behavior is #167.
+
+    Each verb parses (so `openhouse fec <verb> --help` works and the grammar is
+    symmetric with clerk) but :func:`main` short-circuits the FEC source to a
+    clear "not yet implemented" error before any of this is dispatched.
+    """
+    for verb in _FEC_STUB_VERBS:
+        subparsers.add_parser(
+            verb,
+            help=f"{verb} (FEC) — not yet implemented (#167)",
+            add_help=False,
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="openhouse",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Pull, parse, and query U.S. campaign-finance and disclosure data by "
+            "source (clerk = U.S. House financial disclosures; fec = scaffolded). "
+            + _LEGAL_NOTICE
+        ),
+        epilog=_TOP_EPILOG,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"openhouse {__version__}",
+        help="print the installed openhouse version and exit",
+    )
+    sources = parser.add_subparsers(dest="source", required=True)
+
+    clerk_p = sources.add_parser(
+        "clerk",
+        help="U.S. House financial disclosures (annual FDs + PTRs)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Pull, parse, and query U.S. House financial disclosures from the "
+            "Office of the Clerk. " + _LEGAL_NOTICE
+        ),
+    )
+    _add_clerk_verbs(clerk_p.add_subparsers(dest="command", required=True))
+
+    fec_p = sources.add_parser(
+        "fec",
+        help="Federal Election Commission data — scaffolded, not yet implemented (#167)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Federal Election Commission data. Scaffolded as part of the source "
+            "namespace (#174); the verbs are stubs — real FEC behavior lands in "
+            "later sub-issues (#167)."
+        ),
+    )
+    _add_fec_verbs(fec_p.add_subparsers(dest="command", required=True))
+
+    # `ready` is a TOOL-LEVEL verb (#174): it installs the agent skill and is not
+    # scoped to a data source, so it stays at the top level, not under clerk/fec.
+    ready_p = sources.add_parser(
         "ready",
         help="install the agent skill into ~/.claude/skills/openhouse (offline)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -455,6 +565,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# The bare pre-namespace verbs (#174): removed, but recognized one level up so a
+# user typing the old form gets a clear pointer to the new grammar instead of a
+# bewildering argparse "invalid choice: 'pull'".
+_LEGACY_BARE_VERBS = ("pull", "parse", "read", "inspect")
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
 
@@ -464,19 +580,54 @@ def main(argv: list[str] | None = None) -> int:
     current_year = now.year
     fetched_at = now.isoformat()
 
-    # `read` owns its own sub-parser (read.py), so hand it everything after the
-    # `read` token verbatim. read.py accepts `--data-dir`/`--table` before OR
-    # after its subcommand (shared parent parser), which a top-level REMAINDER
-    # arg could not express.
-    if raw_argv and raw_argv[0] == "read":
-        return read_mod.run(raw_argv[1:], current_year=current_year)
+    # The bare pre-namespace form (`openhouse pull …`) is removed (#174). Catch it
+    # one level up and point at the new `openhouse <source> <verb>` grammar — a
+    # clear migration message instead of argparse's opaque "invalid choice".
+    if raw_argv and raw_argv[0] in _LEGACY_BARE_VERBS:
+        verb = raw_argv[0]
+        print(
+            f"error: bare `openhouse {verb} …` is removed. The CLI is now "
+            f"source-scoped: run `openhouse clerk {verb} …` (the House-Clerk "
+            f"pipeline lives under the `clerk` source).",
+            file=sys.stderr,
+        )
+        return 2
+
+    # The FEC source is scaffolded only (#174): real behavior is a later sub-issue
+    # (#167). Intercept it before argparse so a stub verb can carry args (e.g.
+    # `fec pull 2024`) without the stub sub-parser having to model each one, while
+    # `openhouse fec --help` still routes through argparse below. Fail clearly,
+    # non-zero. A bare `openhouse fec` (no verb) falls through to argparse, which
+    # reports the required-verb error.
+    if raw_argv[:1] == ["fec"] and len(raw_argv) >= 2 and raw_argv[1] in _FEC_STUB_VERBS:
+        print(
+            f"error: `openhouse fec {raw_argv[1]}` is not yet implemented "
+            f"(the FEC source is scaffolded; see #167).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # `clerk read` owns its own sub-parser (read.py), so hand it everything after
+    # the `clerk read` tokens verbatim. read.py accepts `--data-dir`/`--table`
+    # before OR after its subcommand (shared parent parser), which a top-level
+    # REMAINDER arg could not express.
+    if raw_argv[:2] == ["clerk", "read"]:
+        # read.py resolves the data dir itself; nudge on legacy layout there too so
+        # a pre-namespace user gets the migration note whichever verb they run.
+        return read_mod.run(raw_argv[2:], current_year=current_year)
 
     parser = build_parser()
     args = parser.parse_args(raw_argv)
 
-    if args.command == "ready":
-        # Offline, no year range: stamp the packaged skill into ~/.claude/skills.
+    if args.source == "ready":
+        # Tool-level, offline, no year range: stamp the packaged skill into
+        # ~/.claude/skills.
         return ready_mod.run(["--check"] if args.check else [])
+
+    # Past this point the source is `clerk`. Resolve the data root once and nudge
+    # if a pre-namespace layout is still on disk (#174) before dispatching a verb.
+    data_dir = resolve_data_dir(args.data_dir)
+    _warn_legacy_clerk_layout(data_dir)
 
     if args.command in ("pull", "parse"):
         # Validate the range now so a bad argument fails fast and uniformly.
@@ -495,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 return parse_mod.parse(
                     years,
-                    data_dir=resolve_data_dir(args.data_dir),
+                    data_dir=data_dir,
                     types=types,
                     strict=args.strict,
                     fetched_at=fetched_at,
@@ -514,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return pull_mod.pull(
                 years,
-                data_dir=resolve_data_dir(args.data_dir),
+                data_dir=data_dir,
                 index_only=args.index_only,
                 delay=args.delay,
                 concurrency=args.concurrency,
@@ -551,14 +702,14 @@ def main(argv: list[str] | None = None) -> int:
 
         return inspect_run(
             years[0],
-            data_dir=resolve_data_dir(args.data_dir),
+            data_dir=data_dir,
             sample=args.sample,
             seed=args.seed,
             started_at=fetched_at,
         )
 
-    # `read` is dispatched at the top of main() (before argparse); reaching here
-    # means an unknown command.
+    # `clerk read` is dispatched at the top of main() (before argparse); reaching
+    # here means an unknown clerk command.
     parser.error(f"unknown command {args.command!r}")
     return 2  # unreachable; parser.error exits
 

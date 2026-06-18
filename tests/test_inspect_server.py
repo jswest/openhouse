@@ -32,14 +32,14 @@ def _filing(doc_id, *, code="P", status="ok", pdf_class="efiled", sub="ptr"):
         "filing_type": {"code": code, "label": "x"},
         "pdf_class": pdf_class,
         "parse_status": status,
-        "source_pdf": f"raw/2022/{sub}/{doc_id}.pdf",
+        "source_pdf": f"raw/clerk/2022/{sub}/{doc_id}.pdf",
     }
 
 
 def _build_tree(tmp_path: Path, filings, bodies=None) -> Path:
     """Lay down a minimal ``data_dir``: filings.json + bodies + dummy PDFs."""
     data = tmp_path / "data"
-    ydir = data / "parsed" / "2022"
+    ydir = data / "parsed" / "clerk" / "2022"
     (ydir).mkdir(parents=True)
     (ydir / "filings.json").write_text(json.dumps(filings))
     for f in filings:
@@ -145,7 +145,7 @@ def test_stale_flag_when_parse_changes(tmp_path):
     )
     assert s.filing("a")["stale"] is False
     # Simulate a re-parse that changed the body, then reload.
-    (s.data_dir / "parsed/2022/ptr/a.json").write_text(json.dumps({"transactions": [{"x": 1}]}))
+    (s.data_dir / "parsed/clerk/2022/ptr/a.json").write_text(json.dumps({"transactions": [{"x": 1}]}))
     s2 = ReviewSession(s.data_dir, 2022, 1.0, 0, STARTED_AT)
     assert s2.filing("a")["stale"] is True
 

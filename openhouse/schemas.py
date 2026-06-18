@@ -82,7 +82,13 @@ from pydantic import BaseModel, Field, model_serializer, model_validator
 # the preceding-year range correctly (#149, confirming #132); Schedule E splits
 # identical-position blocks and folds ``C :`` comment lines (#150). All change
 # parsed output, so re-parse from ``raw/`` is required — which the bump forces.
-SCHEMA_VERSION = 9
+# Generation 10 (#174): the source namespace. The on-disk layout moved to
+# ``raw/clerk/<year>/`` + ``parsed/clerk/<year>/``, so each record's stored
+# ``source_pdf`` now reads ``raw/clerk/<year>/<family>/<DocID>.pdf``. That changes
+# ``filings.json`` bytes, so a tree migrated by a bare ``mv`` (which relocates the
+# JSON but not its embedded paths) must be re-parsed for ``source_pdf`` to point at
+# the moved bytes — the bump makes ``read``'s schema-drift warning surface that.
+SCHEMA_VERSION = 10
 
 # ---------------------------------------------------------------------------
 # FilingType code table — single source of truth.

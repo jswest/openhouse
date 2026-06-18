@@ -356,7 +356,7 @@ _ONE_PTR_XML = """<?xml version="1.0" encoding="utf-8"?>
 
 
 def _seed_one_ptr(data_dir: Path, pdf_src: Path, *, year: int = 2021) -> None:
-    raw = data_dir / "raw" / str(year)
+    raw = data_dir / "raw" / "clerk" / str(year)
     (raw / "ptr").mkdir(parents=True, exist_ok=True)
     (raw / f"{year}FD.xml").write_text(_ONE_PTR_XML)
     (raw / "ptr" / "20017980.pdf").write_bytes(pdf_src.read_bytes())
@@ -366,8 +366,8 @@ def test_parse_writes_ptr_body_file(tmp_path):
     import json
 
     _seed_one_ptr(tmp_path, LEE)
-    records = build_filing_records(tmp_path / "raw" / "2021" / "2021FD.xml", 2021)
-    parsed_dir = tmp_path / "parsed" / "2021"
+    records = build_filing_records(tmp_path / "raw" / "clerk" / "2021" / "2021FD.xml", 2021)
+    parsed_dir = tmp_path / "parsed" / "clerk" / "2021"
     parsed_dir.mkdir(parents=True, exist_ok=True)
     unparsed = _classify_records(
         records,
@@ -393,12 +393,12 @@ def test_parse_extract_failure_sets_error_and_unparsed(tmp_path):
     # the pdf.py contract directly: the record routes to extract_failed when
     # extraction raises. Here we corrupt by replacing the file with garbage,
     # which classify() turns into extract_failed before body extraction runs.
-    raw = tmp_path / "raw" / "2021"
+    raw = tmp_path / "raw" / "clerk" / "2021"
     (raw / "ptr").mkdir(parents=True, exist_ok=True)
     (raw / "2021FD.xml").write_text(_ONE_PTR_XML)
     (raw / "ptr" / "20017980.pdf").write_text("not a pdf\n")
     records = build_filing_records(raw / "2021FD.xml", 2021)
-    parsed_dir = tmp_path / "parsed" / "2021"
+    parsed_dir = tmp_path / "parsed" / "clerk" / "2021"
     parsed_dir.mkdir(parents=True, exist_ok=True)
     unparsed = _classify_records(
         records,
@@ -444,8 +444,8 @@ def test_out_of_range_date_records_residual_without_dropping_filing(tmp_path, mo
     monkeypatch.setattr(
         "openhouse.parse.extract_ptr_transactions", lambda _p, **_kw: [flagged]
     )
-    records = build_filing_records(tmp_path / "raw" / "2021" / "2021FD.xml", 2021)
-    parsed_dir = tmp_path / "parsed" / "2021"
+    records = build_filing_records(tmp_path / "raw" / "clerk" / "2021" / "2021FD.xml", 2021)
+    parsed_dir = tmp_path / "parsed" / "clerk" / "2021"
     parsed_dir.mkdir(parents=True, exist_ok=True)
     unparsed = _classify_records(
         records,

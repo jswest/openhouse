@@ -514,12 +514,12 @@ def parse_year(
     """
     if types is None:
         types = ["ptr", "fd"]
-    raw_dir = data_dir / "raw" / str(year)
+    raw_dir = data_dir / "raw" / "clerk" / str(year)
     xml_path = raw_dir / f"{year}FD.xml"
     if not xml_path.exists():
         print(
             f"{year}: index {xml_path} is missing; skipping "
-            f"(run `openhouse pull {year}` first).",
+            f"(run `openhouse clerk pull {year}` first).",
             file=sys.stderr,
         )
         return None
@@ -540,7 +540,7 @@ def parse_year(
         by_filing_type[rec.filing_type.code] += 1
     filing_type_counts = dict(sorted(by_filing_type.items()))
 
-    parsed_dir = data_dir / "parsed" / str(year)
+    parsed_dir = data_dir / "parsed" / "clerk" / str(year)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
     # Authoritative per-PDF classification (SPEC §2.2), mutating each record's
@@ -715,7 +715,7 @@ def parse(
         # Nothing was parsed at all — every requested year's index was missing.
         print(
             f"error: no years parsed; indices absent for {skipped} "
-            f"(run `openhouse pull` first).",
+            f"(run `openhouse clerk pull` first).",
             file=sys.stderr,
         )
         return NOTHING_PARSED_EXIT
