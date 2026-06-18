@@ -26,9 +26,7 @@ pipeline is source-scoped under `clerk`; today's verbs moved beneath it with
 behavior and flags 100% intact (`openhouse clerk pull 2024` behaves exactly as the
 old `openhouse pull 2024` did). The tool-level **`ready`** (and the repo-local
 `release` skill) stay **top-level** — they install/release the tool, not a source's
-data, so scoping them under a source would be a category error. **`reference`**
-(#184) is also top-level: it is a shared cross-source identity lookup over the CC0
-congress-legislators cache, not a data source's pipeline verb.
+data, so scoping them under a source would be a category error.
 
 - **Bare verbs are removed**, not aliased. `openhouse pull …` prints a clear
   stderr error pointing at `openhouse clerk pull …` and exits 2 — a migration

@@ -23,7 +23,8 @@ no schema change, no re-parse.
 `clerk` or `fec`. Rationale: it is a **shared cross-source identity lookup**, not
 a data source's pipeline verb. Scoping it under `clerk` would be a category
 error (the same bioguide identity is equally relevant to the FEC lane). This
-follows the existing `ready`/`release` precedent documented in #174.
+**extends** the top-level exemption established for `ready`/`release` in
+GH-0174 — kept additive, GH-0174 itself is unchanged.
 
 ### Matching: substring + diacritic folding
 
@@ -60,13 +61,12 @@ file present → non-zero exit with a pointer to `clerk pull`.
 
 New module `openhouse/reference.py`; pre-argparse intercept in `cli.main()` on
 `raw_argv[:1] == ["reference"]`, mirroring the `clerk read` and `fec read`
-pattern. Reuses `_norm_name()` from `legislators.py`, `_emit()` and
-`resolve_data_dir()` from `cli.py`. No new abstraction layers.
+pattern. Reuses `_norm_name()` and the shared `load_legislator_records()` loader
+from `legislators.py`, and `_emit()` / `resolve_data_dir()` from `cli.py`.
 
 ## Scope
 
 New: `openhouse/reference.py`, `tests/test_reference.py`. Amended:
 `openhouse/cli.py` (import + `build_parser` stub + dispatch intercept),
-`docs/decisions/GH-0174-source-namespace-0001.md` (top-level exemption note),
+`openhouse/legislators.py` (shared `load_legislator_records()` loader),
 `README.md` (usage docs). No schema change; no network call; no re-parse.
-509 tests pass.
