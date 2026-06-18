@@ -216,6 +216,34 @@ unverified* claim — a starting point for a human to confirm, never a settled
 fact. `openhouse` never synthesizes a bioguide id and never folds a name-only
 guess into one.
 
+**The FEC lane is Path-1 only — a deliberately narrow, sound slice.** `fec
+read` answers exactly one question: which **connected-PAC organizations** gave
+*itemized* money to a member's principal campaign committee, by two-year cycle.
+That is the *disclosed candidate-side slice, not total influence*. The
+[non-goals](https://github.com/jswest/openhouse/issues/167) are explicit:
+
+- **No Path 2.** Individual-donor itemization, leadership-PAC and joint-fundraising
+  flows, and the rest of the contribution graph are out of scope.
+- **No industry classification.** Organizations are tagged by their FEC
+  `organization_type` (corporation / trade / labor / membership / cooperative /
+  corp-without-stock), not mapped to sectors or industries.
+- **No super-PAC independent expenditures, no dark money, no soft money.** Only
+  hard-money line-11C receipts to the candidate's own committee.
+
+Two further limitations are *declared, not hidden* — every `fec read` answer
+restates them on stderr:
+
+- **The disclosed-slice caveat.** The roll-up is complete over the *itemized*
+  receipts the FEC discloses for the cycle; it cannot see money that was never
+  itemized or never disclosed. The stderr residual states the count and reason
+  for anything filtered (`not_connected_ssf`, `unresolved_committee`).
+- **Labor is included and tagged.** Labor (`L`) PAC money is institutional PAC
+  money like any other connected SSF — it is kept and tagged `labor`, never
+  silently dropped, so `--org-type labor` slices exactly it.
+- **Affiliation is not collapsed.** FEC bulk `cm` carries no affiliation column,
+  so a parent organization and its subsidiary PACs are reported as separate
+  organizations — `openhouse` never merges them from data it does not have.
+
 ## Use restriction
 
 Clerk financial-disclosure data may **not** be used for commercial purposes
@@ -225,13 +253,14 @@ ratings — this is statutory ([5 U.S.C. §
 Act as amended), not a request. `openhouse` is a research and transparency
 tool; don't build a commercial product on its output.
 
-FEC data (the scaffolded `fec` source — [SPEC §13](./SPEC.md), not yet
-implemented, [#167](https://github.com/jswest/openhouse/issues/167)) sits on a
-*different* legal footing: it is **public domain**, with one statutory bar — [52
-U.S.C. § 30111](https://www.law.cornell.edu/uscode/text/52/30111): contributor
-information may **not** be sold or used to solicit contributions or for any
-commercial purpose. Records carry a `provenance` tag (`"fec"` vs `"clerk"`) so
-the two footings stay distinguishable. (Full wording lands in #173.)
+FEC data (the `fec` source — [SPEC §13](./SPEC.md),
+[#167](https://github.com/jswest/openhouse/issues/167)) sits on a *different*
+legal footing: it is **public domain** (a federal-government work), with one
+statutory bar — [52 U.S.C. §
+30111(a)](https://www.law.cornell.edu/uscode/text/52/30111), the **"sale or use"
+restriction**: contributor information may **not** be sold or used to solicit
+contributions or for any commercial purpose. Records carry a `provenance` tag
+(`"fec"` vs `"clerk"`) so the two footings stay distinguishable downstream.
 
 ## Development
 
