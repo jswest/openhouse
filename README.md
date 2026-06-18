@@ -10,7 +10,8 @@ can actually ask questions of.
 > **Status: pre-v1.** The pipeline (`clerk pull` / `clerk parse` / `clerk read`)
 > works end to end; the parsed schema is not yet frozen, so a version bump can
 > mean a re-parse rather than a migration. The CLI is source-scoped — verbs live
-> under a source noun (`clerk`; `fec` is scaffolded, not yet implemented). Design
+> under a source noun: `clerk` for House disclosures, `fec` for the FEC "Path 1"
+> lane (corporate/trade/labor-PAC money to a member, bulk-data-only). Design
 > contract: [SPEC.md](./SPEC.md).
 
 ## What it does
