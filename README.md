@@ -177,8 +177,7 @@ Look up legislators by name or ID. Searches the union of current and historical
 legislators cached in `raw/reference/` (populated by `clerk pull`). Matching is
 case- and diacritic-insensitive for names (so `gonzalez` matches
 `González-Colón`) and case-insensitive for IDs.
-A top-level verb — not scoped to `clerk` or `fec` — because it is a shared
-cross-source identity lookup.
+A top-level command, not scoped to `clerk` or `fec`.
 
 ```sh
 openhouse reference Adams --table           # all legislators named Adams
@@ -198,7 +197,7 @@ data on disk → non-zero exit with a pointer to `clerk pull`.
 The `clerk` pipeline ships end to end for any year range since 2008; stable
 filer identity (via the public-domain `congress-legislators` registry) and a
 Claude Code [agent skill](./openhouse/skill/SKILL.md) are in place. The `fec`
-lane pulls, parses, and queries connected-PAC contribution data. Still pending:
+lane is in place for connected-PAC contributions. Still pending:
 
 - **OCR for the scanned/handwritten backlog** ([#15](https://github.com/jswest/openhouse/issues/15)),
   already detected and catalogued by `parse` so nothing is lost in the meantime.
@@ -237,8 +236,8 @@ settled fact. `openhouse` never synthesizes a verified ID from a name guess.
 **The FEC lane covers connected-PAC contributions — not total campaign money.**
 `fec read` answers exactly one question: which corporate, trade, or labor PAC
 organizations gave to a member's principal campaign committee, by two-year
-cycle. This is a disclosed, itemized slice of campaign finance — useful and
-concrete, but not a measure of total influence. Out of scope:
+cycle. This is a disclosed, itemized slice of campaign finance, not a measure
+of total influence. Out of scope:
 
 - Individual-donor itemization, leadership-PAC flows, and joint-fundraising
   transfers are not included.
@@ -246,15 +245,16 @@ concrete, but not a measure of total influence. Out of scope:
   membership / cooperative / corp-without-stock), not mapped to sectors or
   industries.
 - Super-PAC independent expenditures, dark money, and soft money are not
-  included — only direct hard-money contributions to the candidate's own
-  committee.
+  included — only direct, itemized contributions to the candidate's principal
+  campaign committee.
 
 Two further limitations are declared on every `fec read` response (on stderr):
 
 - **Disclosed-slice caveat.** The roll-up is complete over the *itemized*
   receipts the FEC discloses for the cycle; it cannot see money that was never
   itemized or never disclosed. The stderr residual states the count and reason
-  for anything filtered (non-connected PACs, unresolved committees).
+  for anything filtered (PACs without a connected organization, unresolved
+committees).
 - **Labor is included and tagged.** Labor PAC money is institutional PAC money
   like any other — it is kept and tagged `labor`, never silently dropped, so
   `--org-type labor` slices exactly it.
@@ -281,7 +281,7 @@ the two footings stay distinguishable downstream.
 
 ## Development
 
-Python 3.12+, managed with [`uv`](https://docs.astral.sh/uv/):
+Python 3.11+, managed with [`uv`](https://docs.astral.sh/uv/):
 
 ```sh
 uv run pytest        # tests
