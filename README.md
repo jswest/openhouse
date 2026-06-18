@@ -171,6 +171,28 @@ asset text, no false negatives). `read` errors with a non-zero exit when the
 target years aren't parsed under the data dir, so an empty result is never
 mistaken for "no matches" (run `parse` first).
 
+### reference (offline)
+
+Look up legislators by name or bioguide-id substring. Searches the union of
+current and historical legislators cached in `raw/reference/` (populated by
+`clerk pull`). Matching is case- and diacritic-insensitive for names (so
+`gonzalez` matches `González-Colón`) and case-insensitive for bioguide IDs.
+A top-level verb — not scoped to `clerk` or `fec` — because it is a shared
+cross-source identity lookup.
+
+```sh
+openhouse reference Adams --table           # all legislators named Adams
+openhouse reference A000370                 # look up by bioguide id
+openhouse reference gonzalez               # diacritic-insensitive name search
+```
+
+**Guarantee:** complete over the cached congress-legislators set (current ∪
+historical) — every matching record is returned, none dropped. The residual is
+members absent from the on-disk cache (e.g. sworn in after the last `clerk
+pull`); re-pull to refresh. JSON to stdout; `--table` for human-aligned columns
+(name, bioguide_id, chamber, state). No matches → empty result, exit 0. No
+reference data on disk → non-zero exit with a pointer to `clerk pull`.
+
 ## What's coming
 
 The three verbs ship end to end for any year range since 2008; stable filer

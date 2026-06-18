@@ -223,30 +223,28 @@ def _index_records(
                 holders.append((last, bioguide))
 
 
-def load_legislator_index(data_dir: Path) -> LegislatorIndex:
-    """Build the offline seat→bioguide index from cached CC0 bulk files.
+def load_legislator_records(data_dir: Path) -> tuple[list[dict], bool]:
+    """Load the union of cached current + historical legislator records.
 
     Reads ``<data_dir>/raw/reference/legislators-{current,historical}.json``
-    (written by ``pull``). A missing file is skipped silently — an empty index
-    simply matches nothing, so ``parse`` still runs and every filer falls back to
-    the ``name:`` key (the reference fetch is optional enrichment, never a gate).
-    Pure + offline + deterministic.
+    (written by ``pull``). Returns ``(records, found_any)`` where ``found_any`` is
+    True iff at least one reference file was present on disk. A missing file is
+    skipped silently; a present-but-unreadable one warns loudly and is skipped (it
+    must not silently disable the join — the operator gets a signal, and the join
+    still degrades gracefully via the ``name:`` fallback). Pure + offline +
+    deterministic — the one place the reference cache is read off disk.
     """
-    by_seat: dict[tuple[str, str, int], Optional[str]] = {}
-    by_district: dict[tuple[str, int], list[tuple[str, str]]] = {}
-    by_fec: dict[str, list[str]] = {}
     ref_dir = data_dir / REFERENCE_SUBDIR
+    records: list[dict] = []
+    found_any = False
     for name in LEGISLATORS_FILES:
         path = ref_dir / name
         if not path.exists():
             continue
+        found_any = True
         try:
-            records = json.loads(path.read_text())
+            data = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError) as exc:
-            # A present-but-unreadable reference file (e.g. a download truncated by
-            # Ctrl-C) must not silently disable the join — warn loudly and name the
-            # remedy. The join still degrades gracefully (every filer falls back to
-            # name:), but the operator gets a signal instead of mystery name-keys.
             print(
                 f"warning: reference file {path} is present but unreadable "
                 f"({exc}); skipping it — bioguide identity will be incomplete. "
@@ -255,8 +253,24 @@ def load_legislator_index(data_dir: Path) -> LegislatorIndex:
                 file=sys.stderr,
             )
             continue
-        if isinstance(records, list):
-            _index_records(records, by_seat, by_district, by_fec)
+        if isinstance(data, list):
+            records.extend(data)
+    return records, found_any
+
+
+def load_legislator_index(data_dir: Path) -> LegislatorIndex:
+    """Build the offline seat→bioguide index from cached CC0 bulk files.
+
+    A missing reference file is skipped silently — an empty index simply matches
+    nothing, so ``parse`` still runs and every filer falls back to the ``name:``
+    key (the reference fetch is optional enrichment, never a gate).
+    Pure + offline + deterministic.
+    """
+    by_seat: dict[tuple[str, str, int], Optional[str]] = {}
+    by_district: dict[tuple[str, int], list[tuple[str, str]]] = {}
+    by_fec: dict[str, list[str]] = {}
+    records, _ = load_legislator_records(data_dir)
+    _index_records(records, by_seat, by_district, by_fec)
     # Freeze the per-bioguide list values to tuples so the index is hashable-shaped
     # and deterministic (it never mutates after load).
     frozen_district = {k: tuple(v) for k, v in by_district.items()}
