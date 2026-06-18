@@ -10,7 +10,9 @@ SPEC §9 / CLAUDE.md).
 The four bulk files (pipe-delimited, no header row, latin-1, LF-terminated; column
 orders are the verified facts of SPEC §13.5a):
 
-- ``cn.txt`` — candidate master (15 cols): ``CAND_ID`` col 0, ``CAND_PCC`` col 9.
+(``cn.txt`` — candidate master — is downloaded by ``fec pull`` but not read here:
+``ccl`` already supplies the candidate→principal-committee map Path 1 needs.)
+
 - ``ccl.txt`` — candidate-committee linkage (7 cols): ``CAND_ID`` col 0,
   ``CMTE_ID`` col 3, ``CMTE_DSGN`` col 5 (``P`` = principal). The
   candidate→principal-committee map filled into the #169 link seam.
@@ -283,6 +285,8 @@ def parse_contributions(
         if len(row) < 18:
             continue
         contributor = row[0].strip()
+        recipient = row[15].strip()
+        amount = _parse_amount(row[14])
         transaction_id = row[17].strip()
         if transaction_id and transaction_id in seen_tran:
             continue
@@ -291,9 +295,9 @@ def parse_contributions(
 
         base = {
             "contributor_committee_id": contributor,
-            "recipient_committee_id": row[15].strip(),
+            "recipient_committee_id": recipient,
             "transaction_id": transaction_id or None,
-            "amount": _parse_amount(row[14]),
+            "amount": amount,
         }
         committee = committees.get(contributor)
         if committee is None:
@@ -312,9 +316,9 @@ def parse_contributions(
 
         kept.append(
             FecPacContribution(
-                recipient_committee_id=row[15].strip(),
+                recipient_committee_id=recipient,
                 contributor_committee_id=contributor,
-                amount=_parse_amount(row[14]),
+                amount=amount,
                 date=_parse_date(row[13]),
                 image_number=row[4].strip() or None,
                 transaction_id=transaction_id or None,
@@ -430,7 +434,7 @@ def parse_cycle(
 ) -> dict | None:
     """Parse one FEC cycle's bulk files into ``parsed/fec/<cycle>/`` (SPEC §13). Offline.
 
-    Reads ``raw/fec/<cycle>/{cn,ccl,cm,itpas2}.txt`` (written by ``fec pull``). If
+    Reads ``raw/fec/<cycle>/{ccl,cm,itpas2}.txt`` (written by ``fec pull``). If
     the bulk files are absent this is a clean skip (clear stderr message, returns
     ``None``) — not a crash, so a multi-cycle range survives an un-pulled cycle.
     Otherwise builds the committee + principal-committee indexes, resolves the #169
