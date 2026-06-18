@@ -345,12 +345,6 @@ def _run_fec_pull(flag_argv, cycles, *, fec_pull_mod, fetched_at) -> int:
         ),
     )
     p.add_argument(
-        "--concurrency",
-        type=int,
-        default=pull_mod.DEFAULT_CONCURRENCY,
-        help="concurrent requests (sequential-only; values >1 are not implemented)",
-    )
-    p.add_argument(
         "--force",
         action="store_true",
         help="re-download even if a cycle's files are already present",
@@ -364,7 +358,6 @@ def _run_fec_pull(flag_argv, cycles, *, fec_pull_mod, fetched_at) -> int:
             cycles,
             data_dir=data_dir,
             delay=args.delay,
-            concurrency=args.concurrency,
             contact=contact,
             user_agent=args.user_agent,
             force=args.force,

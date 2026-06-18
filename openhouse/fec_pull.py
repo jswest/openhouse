@@ -55,7 +55,7 @@ import httpx
 from tqdm import tqdm
 
 from .cli import fec_raw_dir
-from .pull import DEFAULT_CONCURRENCY, PullError, build_user_agent, polite_get
+from .pull import PullError, build_user_agent, polite_get
 
 # SPEC §13 / #170: FEC bulk downloads, one directory per 2-year cycle. The bulk
 # host 302s to a storage backend; the client follows redirects and records the
@@ -319,7 +319,6 @@ def fec_pull(
     *,
     data_dir: Path,
     delay: float = FEC_DEFAULT_DELAY_SECONDS,
-    concurrency: int = DEFAULT_CONCURRENCY,
     contact: Optional[str] = None,
     user_agent: Optional[str] = None,
     force: bool = False,
@@ -350,13 +349,6 @@ def fec_pull(
             f"fec.gov/robots.txt Crawl-delay: 10).",
             file=sys.stderr,
         )
-    if concurrency != DEFAULT_CONCURRENCY:
-        print(
-            f"fec pull: --concurrency {concurrency} is not implemented; running "
-            f"sequentially (concurrency {DEFAULT_CONCURRENCY}).",
-            file=sys.stderr,
-        )
-
     owns_client = client is None
     if client is None:
         # follow_redirects=True: the bulk URLs 302 to a storage host (#170).
