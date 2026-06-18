@@ -146,3 +146,127 @@ openhouse clerk read trades 2024 --ticker AAPL
 - Every range query prints a residual to stderr — the count of in-range filings
   that did not parse. A count is only meaningful read together with its residual:
   "complete over K parsed; M did not parse."
+
+## FEC lane (`fec` source)
+
+The FEC lane normalizes FEC **bulk** files into PAC→member contribution records,
+queryable per **two-year cycle**. It is Path-1-only: itemized line-11C receipts
+from **connected separate-segregated-fund (SSF) committees** to a member's
+principal campaign committee. (See README *Caveats* for the named non-goals.)
+
+### year → cycle
+
+A year argument resolves to the enclosing even-ending **cycle**: an even year is
+its own cycle (`2024` → `2024`); an odd year rolls up to the next even year
+(`2023` → `2024`). A range expands to every cycle it touches. The resolution is
+always echoed on stderr.
+
+### FEC record shapes
+
+**Committee** — `parsed/fec/<cycle>/committees.json`, one per committee seen:
+
+```json
+{
+  "committee_id": "C00002469",
+  "name": "INTERNATIONAL ASSOCIATION OF MACHINISTS ... POLITICAL LEAGUE",
+  "connected_organization_name": "INTERNATIONAL ASSOCIATION OF MACHINISTS AND AEROSPACE WORKERS",
+  "organization_type": "labor",
+  "organization_type_raw": "L",
+  "committee_type": "Q",
+  "affiliation": null,
+  "provenance": "fec"
+}
+```
+
+`organization_type` is the **normalized** sponsor class; `organization_type_raw`
+keeps the verbatim single-letter code beside it. `affiliation` is **always
+`null`** — bulk `cm` carries no affiliation column, so parent/subsidiary PACs are
+never collapsed (a declared limitation, surfaced in the residual).
+
+**Contribution** — `parsed/fec/<cycle>/contributions.json`, one per kept receipt
+(an FEC Schedule A line-11C, committee→committee):
+
+```json
+{
+  "recipient_committee_id": "C00546358",
+  "contributor_committee_id": "C00002469",
+  "amount": 5000.0,
+  "date": "2024-06-01",
+  "line": "F3-11C",
+  "image_number": "...",
+  "transaction_id": "...",
+  "provenance": "fec"
+}
+```
+
+`amount` is an **exact dollar figure** (FEC itemizes the real amount, not a
+bucket — unlike Clerk PTR ranges). `image_number` + `transaction_id` are the
+double-entry key. A literally repeated `transaction_id` is deduped.
+
+**Member link** — `parsed/fec/<cycle>/member-links.json`, the offline
+member→candidate→committee anchor (CC0 `id.fec[]` join, never fuzzy):
+
+```json
+{ "bioguide_id": "A000370", "candidate_id": "H4NC12100", "committee_id": "C00546358" }
+```
+
+### `organization_type` code table (§13.3)
+
+| raw | normalized label | `--org-type` value |
+|---|---|---|
+| `C` | corporation | `corporation` |
+| `T` | trade association | `trade` |
+| `L` | labor organization | `labor` |
+| `M` | membership organization | `membership` |
+| `V` | cooperative | `cooperative` |
+| `W` | corporation without capital stock | `corp_without_stock` |
+
+Labor (`L`) **is included** as institutional PAC money and tagged so `read
+--org-type labor` can slice it. A contributing committee with no SSF type, or
+absent from `cm`, is **not** in the kept set — it lands in
+`fec-unparsed-manifest.json` (`not_connected_ssf` / `unresolved_committee`),
+never a silent gap.
+
+### FEC manifests
+
+- `fec-pull-manifest.json` (`raw/fec/<cycle>/`) — per bulk file: requested URL,
+  final redirected URL, status, byte size, sha256, fetched-at.
+- `fec-parse-manifest.json` (`parsed/fec/<cycle>/`) — `counts` (kept,
+  filtered-by-reason, by-org-type, member-links resolved/unresolved,
+  `pac_limit_breaches`), the `$10k`-per-cycle invariant breaches (flagged, never
+  dropped), the `affiliation_limitation` note, and the integer schema version.
+- `fec-unparsed-manifest.json` — every filtered contribution + unresolved member
+  link, each with a reason — the residual the `read` line is computed from.
+
+### FEC query recipes
+
+**Who funded a member's campaign committee, by organization (sound — complete
+over kept Path-1 receipts):**
+```
+openhouse fec read donors A000370 2024
+```
+
+**Just the labor PACs:**
+```
+openhouse fec read donors A000370 2024 --org-type labor --table
+```
+
+**The inverse — which members an org's PAC gave to:**
+```
+openhouse fec read pac MACHINISTS 2024
+```
+
+**Pull then parse then query, end to end:**
+```
+openhouse fec pull 2024 --contact "Jane Doe <jane@example.com>"
+openhouse fec parse 2024
+openhouse fec read donors A000370 2024
+```
+
+### FEC trust guarantee, restated
+
+Every `fec read` answer is **complete over the N kept Path-1 itemized receipts**
+for the cycle, with the stderr residual naming the filtered count by reason. It
+is the **disclosed candidate-side slice, not total influence** — no dark money,
+no super-PAC independent expenditures, no soft money — and parent/subsidiary PACs
+are **not** affiliation-collapsed. Read the residual before trusting a roll-up.
