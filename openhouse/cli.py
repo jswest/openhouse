@@ -302,10 +302,12 @@ coverage: annual FDs from 2008; PTRs (STOCK Act) from 2012.
 Run `openhouse <source> <verb> --help` for a command's own options."""
 
 
-# The FEC source verbs scaffolded here (#174). They exist so `openhouse fec …`
-# parses and `openhouse fec --help` lists them, but each is a stub: real behavior
-# lands in later sub-issues (#167). pull/parse are year/range-scoped like clerk's;
-# read carries the FEC nouns (donors/pac).
+# The FEC source verbs (#174). They exist so `openhouse fec …` parses and
+# `openhouse fec --help` lists them; `pull` (#170) and `parse` (#171) are now
+# real (year/range-scoped like clerk's, expanded to a cycle), while `read` and the
+# FEC nouns (donors/pac) remain stubs until later #167 sub-issues. The name is kept
+# for the single intercept point below — a verb is dispatched if real, else the
+# "not yet implemented" stub message fires.
 _FEC_STUB_VERBS = ("pull", "parse", "read", "donors", "pac")
 
 
@@ -366,6 +368,26 @@ def _run_fec_pull(flag_argv, cycles, *, fec_pull_mod, fetched_at) -> int:
     except pull_mod.PullError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+
+def _run_fec_parse(flag_argv, cycles, *, fec_parse_mod, fetched_at) -> int:
+    """Parse the ``fec parse`` flags and run the offline normalization (#171).
+
+    ``flag_argv`` is everything after ``fec parse <year>`` (the year was already
+    consumed + expanded into ``cycles`` by the caller). ``fec parse`` is fully
+    offline — it reads only ``raw/fec/<cycle>/`` (the bulk files ``fec pull``
+    extracted) and writes ``parsed/fec/<cycle>/``, so the only flag is
+    ``--data-dir`` (no network knobs, no ``--types`` — the FEC lane normalizes a
+    fixed set of bulk files).
+    """
+    p = argparse.ArgumentParser(prog="openhouse fec parse", add_help=True)
+    p.add_argument("--data-dir", default=None, help=_DATA_DIR_HELP)
+    args = p.parse_args(flag_argv)
+
+    data_dir = resolve_data_dir(args.data_dir)
+    return fec_parse_mod.fec_parse(
+        cycles, data_dir=data_dir, fetched_at=fetched_at
+    )
 
 
 def _add_clerk_verbs(subparsers) -> None:
@@ -745,6 +767,19 @@ def main(argv: list[str] | None = None) -> int:
                     raw_argv[3:],
                     cycles,
                     fec_pull_mod=fec_pull_mod,
+                    fetched_at=fetched_at,
+                )
+            if verb == "parse":
+                # Offline normalization (#171): bulk cn/ccl/cm/itpas2 → normalized
+                # Path-1 records + residual manifest. No network — reads only
+                # raw/fec/<cycle>/ (what `fec pull` extracted). Lazy import keeps
+                # the clerk verbs free of the FEC module's cost.
+                from . import fec_parse as fec_parse_mod
+
+                return _run_fec_parse(
+                    raw_argv[3:],
+                    cycles,
+                    fec_parse_mod=fec_parse_mod,
                     fetched_at=fetched_at,
                 )
         print(

@@ -400,12 +400,34 @@ def test_fec_pull_even_year_no_cycle_note(capsys, monkeypatch):
     assert rc == 1
 
 
-def test_fec_parse_range_collapses_to_one_cycle_note(capsys):
-    rc = cli_mod.main(["fec", "parse", "2023-2024"])
+def test_fec_parse_range_collapses_to_one_cycle_note(tmp_path, capsys):
+    # `fec parse 2023-2024` collapses to the 2024 cycle (the stderr note) and runs
+    # the real offline parse (#171). With no bulk files on disk it skips cleanly
+    # and exits non-zero (nothing parsed) — proof the stub is gone.
+    rc = cli_mod.main(["fec", "parse", "2023-2024", "--data-dir", str(tmp_path)])
     err = capsys.readouterr().err
     assert "2-year cycles" in err
-    assert "not yet implemented" in err
+    assert "not yet implemented" not in err
     assert rc == 1
+
+
+def test_fec_parse_dispatches_to_module_with_expanded_cycle(monkeypatch, tmp_path):
+    # `fec parse 2023` reaches the real module with the expanded cycle (2024) and
+    # the resolved data dir — the offline normalization seam (#171).
+    import openhouse.fec_parse as fec_parse_mod
+
+    captured = {}
+
+    def fake(cycles, **kwargs):
+        captured["cycles"] = cycles
+        captured["kwargs"] = kwargs
+        return 0
+
+    monkeypatch.setattr(fec_parse_mod, "fec_parse", fake)
+    rc = cli_mod.main(["fec", "parse", "2023", "--data-dir", str(tmp_path)])
+    assert rc == 0
+    assert captured["cycles"] == [2024]
+    assert captured["kwargs"]["data_dir"] == tmp_path
 
 
 def test_fec_pull_bad_year_fails_arg_validation(capsys):

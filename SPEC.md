@@ -976,3 +976,56 @@ we roll up to **organization**, never industry); **super PACs / IEs /
 501(c)(4)** (treasury money that can't legally reach the member, or isn't
 disclosed). `read` output will state plainly that it shows the *disclosed,
 candidate-side* slice, not total influence.
+
+### 13.8 `fec parse` — normalization contract (#171)
+
+Offline, deterministic normalization of the bulk files (§13.5a) into
+`parsed/fec/<cycle>/`. Reads only `raw/fec/<cycle>/` (what `fec pull` extracted);
+no network, no wall clock (the single entry-time `generated_at` is threaded in,
+§9). A re-run from the same `raw/` is byte-identical (re-parse, not migrate).
+
+**Outputs** (`parsed/fec/<cycle>/`):
+
+- `committees.json` — the **contributing** connected-SSF committees behind the
+  kept contributions (`FecCommittee`), in first-seen order. The full `cm` master
+  is not emitted (it is tens of thousands of rows; we keep the tiny Path-1 slice).
+- `contributions.json` — the kept Path-1 contributions (`FecPacContribution`),
+  in first-appearance `itpas2` row order.
+- `member-links.json` — the resolved `FecMemberCandidateLink`s, with
+  `committee_id` filled from `ccl` (candidate→principal committee, designation
+  `P`). An unresolved link is **not** written here (no sentinel committee leaks
+  downstream); it lands in the residual instead.
+- `fec-parse-manifest.json` — `FEC_SCHEMA_VERSION`, counts (committees total /
+  contributing, contributions kept / filtered, `by_org_type`, filtered-by-reason,
+  member links resolved / unresolved, members without an FEC id, `pac_limit`
+  breaches), the `pac_limit_breaches` detail, and the affiliation limitation note.
+- `fec-unparsed-manifest.json` — every excluded contribution, every unresolved
+  member link, every member with no FEC id, each with a `reason` — never a silent
+  gap.
+
+**Path-1 filter:** keep a contribution iff its **contributing** committee (joined
+via `cm`) has `organization_type ∈ {C, T, L, M, V, W}` (§13.3); retain the
+normalized `organization_type` per kept record so `read` can slice corporate vs
+labor. Residual reasons: `unresolved_committee` (contributor absent from `cm` — no
+org type to test) and `not_connected_ssf` (in `cm` but not a connected SSF —
+leadership/non-connected/ideological/super PAC).
+
+**Org rollup key:** `connected_organization_name` if populated (it **is** in bulk
+`cm` — the API-side "it's null" note was an artifact, #170), else the committee
+`name`.
+
+**Canonical source / dedup:** `itpas2` is the single committee→candidate file —
+there is no recipient-side file to cross-check, so the API-era double-entry
+cross-check does **not** apply. Rows are deduped by `transaction_id` (a literal
+repeated `TRAN_ID`; first wins). The **$10k/PAC/cycle invariant** is a *sanity
+flag*: a contributor→recipient cycle total over $10k is flagged in the manifest,
+**never dropped** — it may legitimately trip across an un-collapsed affiliated
+pair (below).
+
+**Affiliation — DECLARED LIMITATION, not a gap.** Bulk `cm` has **no
+affiliated-committee column** (§13.5a), so `FecCommittee.affiliation` has no bulk
+source and is left `None`; the affiliated-PAC collapse **cannot** be done from
+bulk data and is **not faked**. Consequence (stated in both manifests): a member's
+org-level totals may count a parent and its subsidiary PAC as two separate orgs,
+and the $10k invariant may legitimately trip across that un-collapsed pair.
+Sourcing affiliation is a future enhancement.
