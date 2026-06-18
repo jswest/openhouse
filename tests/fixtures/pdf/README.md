@@ -117,3 +117,23 @@ values are the vision-verified PDF truth in
 | `efiled_fd_schedh_10059679.pdf` | 10059679 | 2023 | Brownley — H header-as-row + H[1] field loss (#133) |
 | `efiled_fd_schedj_10061936.pdf` | 10061936 | 2024 | Lopez — J header-as-row + J[1] unsplit (#133) |
 | `efiled_fd_incomecols_10062886.pdf` | 10062886 | 2023 | Moore — two-income Schedule A column corruption (#132) |
+
+## GH-0166 column/row-reconstruction regression fixtures (schema-11)
+
+Real annual-FD PDFs for the #166 omnibus core wave — the generalized fix to the
+shared two-layer column/row reconstruction in `openhouse/pdf.py`. Asserted by
+`tests/test_fd_regression_gh166.py`; values are the PDF truth read directly from
+the cited filings. Four are new here; the rest are reused from the GH-0143 set
+above (one PDF exercises several sub-issues).
+
+| File | DocID | Yr | Pins (bug) |
+|---|---|---|---|
+| `efiled_fd_awrap_10068928.pdf` | 10068928 | 2024 | Pou — Schedule A value/income token-interleave: value+preceding both wrap, an earlier high glues into a false bucket (#160.2) |
+| `efiled_fd_atype_10063197.pdf` | 10063197 | 2023 | Lieu — Schedule A wrapped income-type 2nd line `Capital Gains,`/`Dividends` (#160.1) |
+| `efiled_fd_aexact_10066320.pdf` | 10066320 | 2024 | Smith — Schedule A exact (non-range) income `$4,425.09` + value-literal whose `[TYPE]` wrapped past it (#160.3) |
+| `efiled_fd_cf_10068086.pdf` | 10068086 | 2024 | Raskin — Schedule C `Pension Distribution` source\|type boundary (#162); Schedule F parties/terms populated (#163) |
+| `efiled_fd_colcontent_10054507.pdf` | 10054507 | 2022 | Schiff — A income-type wrap (#160.1); D wrapped `Various dates in`+comment bleed (#165); H multi-line source+itinerary (#164); I activity/date split (#164 sibling) |
+| `efiled_fd_schede_10059583.pdf` | 10059583 | 2023 | Williams — open-ended `Over $50,000,000` value → null (#76 extension to FD Schedule A) |
+| `efiled_fd_incomecols_10062886.pdf` | 10062886 | 2023 | Moore — C `Speech fee`/`Speech/panel fee` boundary (#162); F phantom row-split on inline date (#163) |
+| `efiled_fd_schedeh_10054295.pdf` | 10054295 | 2022 | Harris — H multi-line source `Conservative Partnership Institute, Inc` + itinerary (#164) |
+| `efiled_fd_schedcdh_10057260.pdf` | 10057260 | 2023 | Waltz — H multi-line source `Government of India (MECEA)` + full itinerary (#164) |

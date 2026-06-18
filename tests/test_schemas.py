@@ -174,7 +174,7 @@ from openhouse.schemas import (  # noqa: E402
 def test_fec_schema_version_independent_of_clerk():
     """FEC_SCHEMA_VERSION is its own int, not coupled to SCHEMA_VERSION."""
     assert FEC_SCHEMA_VERSION == 1
-    assert SCHEMA_VERSION == 10  # untouched by this change
+    assert SCHEMA_VERSION == 11  # clerk-lane bump (GH-0166) must not touch FEC's
 
 
 def test_fec_org_type_table_is_the_six_path1_codes():
