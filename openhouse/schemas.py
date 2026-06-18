@@ -384,11 +384,23 @@ class ScheduleBItem(BaseModel):
 
 
 class ScheduleCItem(BaseModel):
-    """Schedule C line item — earned income (SPEC §6.3)."""
+    """Schedule C line item — earned income (SPEC §6.3).
+
+    The member annual form has ONE amount column → ``amount``. The
+    Candidate/New-Filer form variant splits it into TWO: "Amount Current Year to
+    Filing" and "Amount Preceding Year" (GH-0161). ``amount`` carries the current
+    column (the single column on the member form, the first column on the
+    candidate form); ``amount_preceding`` carries the candidate form's second
+    column and is ``None`` on the member form, which has no such column — the same
+    primary-plus-``_preceding`` shape Schedule A uses for its current/preceding
+    income pair. Each is a verbatim ``$N`` / ``N/A`` string (not an AmountRange);
+    ``raw_text`` carries the whole row regardless.
+    """
 
     source: str
     income_type: Optional[str] = None
     amount: Optional[str] = None
+    amount_preceding: Optional[str] = None
     raw_text: str
 
 
