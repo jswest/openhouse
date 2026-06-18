@@ -167,6 +167,42 @@ def test_unresolved_committee_filtered_to_residual(tmp_path):
     assert filtered[0]["reason"] == "unresolved_committee"
 
 
+def test_short_itpas2_row_is_residual_not_dropped(tmp_path):
+    """An itpas2 row with too few columns (< 18) lands in the residual with reason
+    ``malformed_short_row`` and is counted — never silently dropped (CLAUDE.md).
+    The raw itpas2 row total is recorded so kept + filtered reconciles."""
+    short = "|".join(["C00000001", "TREASURER", "X"])  # only 3 columns
+    pas2 = "\n".join(
+        [
+            _pas2_row("C00000001", "C00000099", 5000, "T1"),  # labor → kept
+            short,  # malformed → residual
+        ]
+    ) + "\n"
+    data = _seed_cycle(tmp_path, **{"cm.txt": _CM, "ccl.txt": "", "itpas2.txt": pas2})
+    summary = parse_cycle(2024, data_dir=data, fetched_at=ENTRY_TS)
+    parsed = data / "parsed" / "fec" / "2024"
+
+    assert summary["contributions_kept"] == 1
+    assert summary["contributions_filtered"] == 1
+
+    unparsed = _read(parsed, "fec-unparsed-manifest.json")
+    short_entries = [
+        e
+        for e in unparsed["filtered_contributions"]
+        if e["reason"] == "malformed_short_row"
+    ]
+    assert len(short_entries) == 1
+    assert short_entries[0]["contributor_committee_id"] == "C00000001"
+    assert short_entries[0]["columns"] == 3
+
+    manifest = _read(parsed, "fec-parse-manifest.json")
+    counts = manifest["counts"]
+    assert counts["filtered_by_reason"]["malformed_short_row"] == 1
+    # The raw itpas2 row total is recorded so kept + filtered reconciles (2 rows).
+    assert counts["source_rows"]["itpas2_total"] == 2
+    assert counts["contributions_kept"] + counts["contributions_filtered"] == 2
+
+
 def test_pac_cycle_limit_breach_is_flagged_not_dropped(tmp_path):
     """A PAC→candidate total over $10k/cycle is flagged in the manifest but every
     contribution is still kept (a sanity flag, not a drop — §13.5a)."""

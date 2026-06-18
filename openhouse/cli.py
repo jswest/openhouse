@@ -21,6 +21,7 @@ clock, injecting ``datetime.now().year`` once.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
@@ -252,6 +253,39 @@ def fec_raw_dir(data_dir: Path, cycle: int) -> Path:
 def fec_parsed_dir(data_dir: Path, cycle: int) -> Path:
     """The FEC lane's cycle-keyed parsed directory: ``<data>/parsed/fec/<cycle>/`` (§13)."""
     return data_dir / "parsed" / "fec" / str(cycle)
+
+
+# ---------------------------------------------------------------------------
+# Table rendering (human garnish — stdout, aligned columns). Shared by both
+# read surfaces (clerk + fec), which call these as ``cli.<fn>``.
+# ---------------------------------------------------------------------------
+
+
+def _render_table(rows: list[list[str]], headers: list[str]) -> str:
+    """Render aligned columns. Empty ``rows`` → just the header line."""
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    lines = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip()]
+    for row in rows:
+        lines.append(
+            "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
+        )
+    return "\n".join(lines)
+
+
+def _emit(payload, *, table: bool, table_fn) -> None:
+    """Emit ``payload`` to stdout: JSON by default, or a rendered table.
+
+    ``table_fn`` builds ``(headers, rows)`` from the payload only when ``--table``
+    is set, so the JSON path never pays for table formatting.
+    """
+    if table:
+        headers, rows = table_fn(payload)
+        print(_render_table(rows, headers))
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 VALID_PDF_TYPES = ("ptr", "fd")

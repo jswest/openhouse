@@ -90,7 +90,14 @@ PAC_CYCLE_LIMIT = 10_000.0
 #     (no org type to test the Path-1 filter against; can't classify it).
 #   * not_connected_ssf    — the committee IS in ``cm`` but its org type is not a
 #     connected SSF (leadership/non-connected/ideological/super PAC — out of scope).
-FEC_UNPARSED_REASONS = ("unresolved_committee", "not_connected_ssf")
+#   * malformed_short_row  — the itpas2 row carried fewer columns than the fixed
+#     positional layout needs (< 18), so it can't be positionally trusted; kept as
+#     a residual (with what's available) and counted, never silently dropped.
+FEC_UNPARSED_REASONS = (
+    "unresolved_committee",
+    "not_connected_ssf",
+    "malformed_short_row",
+)
 
 
 class FecParseError(Exception):
@@ -259,6 +266,10 @@ def parse_contributions(
     4, ``TRANSACTION_DT`` 13, ``TRANSACTION_AMT`` 14, recipient ``OTHER_ID`` 15,
     ``CAND_ID`` 16, ``TRAN_ID`` 17):
 
+    0. **Short rows** — a row with fewer than 18 columns can't be positionally
+       trusted, so it is not parsed; but it is NOT silently dropped (CLAUDE.md): it
+       lands in the residual with reason ``malformed_short_row`` (carrying the
+       contributor field if present + the observed column count) and is counted.
     1. **Dedupe by transaction id** — ``itpas2`` is the single canonical file
        (§13.5a), so the only double-counting risk is a literal repeated ``TRAN_ID``;
        the first occurrence wins, later duplicates are dropped silently (a true
@@ -283,6 +294,17 @@ def parse_contributions(
 
     for row in itpas2_rows:
         if len(row) < 18:
+            # A short row can't be positionally trusted (the layout is fixed by
+            # column position, §13.5a), but it is NEVER silently dropped (CLAUDE.md):
+            # emit a residual with what's available — the contributor field if the
+            # row has one, plus the observed column count — and count it.
+            residual.append(
+                {
+                    "contributor_committee_id": row[0].strip() if row else None,
+                    "columns": len(row),
+                    "reason": "malformed_short_row",
+                }
+            )
             continue
         contributor = row[0].strip()
         recipient = row[15].strip()
@@ -492,12 +514,17 @@ def parse_cycle(
         [link.model_dump(mode="json") for link in resolved_links],
     )
 
-    # Counts reconcile: kept + len(contribution_residual) == itpas2 rows that
-    # carried >=18 columns and were not transaction-id duplicates.
+    # Counts reconcile against the source: for itpas2, kept + filtered (which now
+    # includes every malformed_short_row) + transaction-id duplicates == the total
+    # raw itpas2 rows. The reference-file (cm/ccl) short-row drops are counted too,
+    # so a positional drop in an index file is visible, not a silent gap (CLAUDE.md).
     by_org_type_sorted = {k: by_org_type[k] for k in sorted(by_org_type)}
     residual_reason_counts: dict[str, int] = defaultdict(int)
     for entry in contribution_residual:
         residual_reason_counts[entry["reason"]] += 1
+
+    cm_short_rows = sum(1 for row in cm_rows if len(row) < 14)
+    ccl_short_rows = sum(1 for row in ccl_rows if len(row) < 6)
 
     manifest = {
         "schema_version": FEC_SCHEMA_VERSION,
@@ -516,6 +543,15 @@ def parse_cycle(
             "member_links_unresolved": len(unresolved_links),
             "members_without_fec_id": len(no_fec_warnings),
             "pac_limit_breaches": len(limit_breaches),
+            # Raw source row totals + reference-file short-row drops, so kept +
+            # filtered (+ tran-id dupes) reconciles against the bulk file itself.
+            "source_rows": {
+                "itpas2_total": len(itpas2_rows),
+                "cm_total": len(cm_rows),
+                "cm_short_rows": cm_short_rows,
+                "ccl_total": len(ccl_rows),
+                "ccl_short_rows": ccl_short_rows,
+            },
         },
         "pac_limit_breaches": limit_breaches,
         "affiliation_limitation": AFFILIATION_LIMITATION,
