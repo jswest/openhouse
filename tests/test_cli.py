@@ -379,20 +379,24 @@ def test_expand_multiple_cycles_sorted_unique():
     assert expand_years_to_cycles([2021, 2022, 2023, 2024]) == [2022, 2024]
 
 
-def test_fec_pull_odd_year_emits_cycle_note_then_stub(capsys):
+def test_fec_pull_odd_year_emits_cycle_note(capsys, monkeypatch):
+    # `fec pull` is now implemented (#170); with no contact it stops at the
+    # User-Agent gate (rc 1), but the year→cycle note still prints first.
+    monkeypatch.delenv("OPENHOUSE_CONTACT", raising=False)
     rc = cli_mod.main(["fec", "pull", "2023"])
     err = capsys.readouterr().err
     assert "2-year cycles" in err
     assert "2024" in err  # expanded cycle
-    assert "not yet implemented" in err
+    assert "contact" in err.lower()  # the User-Agent gate, not a stub
     assert rc == 1
 
 
-def test_fec_pull_even_year_no_cycle_note(capsys):
+def test_fec_pull_even_year_no_cycle_note(capsys, monkeypatch):
+    monkeypatch.delenv("OPENHOUSE_CONTACT", raising=False)
     rc = cli_mod.main(["fec", "pull", "2024"])
     err = capsys.readouterr().err
     assert "2-year cycles" not in err  # no expansion happened
-    assert "not yet implemented" in err
+    assert "contact" in err.lower()
     assert rc == 1
 
 
@@ -414,6 +418,29 @@ def test_fec_pull_requires_a_year(capsys):
     rc = cli_mod.main(["fec", "pull"])
     assert rc == 2
     assert "requires a year" in capsys.readouterr().err
+
+
+def test_fec_pull_dispatches_to_module_with_expanded_cycle(monkeypatch, tmp_path):
+    # `fec pull 2023` reaches the real module with the expanded cycle (2024), the
+    # resolved data dir, and the parsed flags — proof the stub is gone (#170).
+    import openhouse.fec_pull as fec_pull_mod
+
+    captured = {}
+
+    def fake(cycles, **kwargs):
+        captured["cycles"] = cycles
+        captured["kwargs"] = kwargs
+        return 0
+
+    monkeypatch.setattr(fec_pull_mod, "fec_pull", fake)
+    monkeypatch.setenv("OPENHOUSE_CONTACT", "Jane Doe <jane@example.com>")
+    rc = cli_mod.main(
+        ["fec", "pull", "2023", "--data-dir", str(tmp_path)]
+    )
+    assert rc == 0
+    assert captured["cycles"] == [2024]
+    assert captured["kwargs"]["data_dir"] == tmp_path
+    assert captured["kwargs"]["contact"] == "Jane Doe <jane@example.com>"
 
 
 def test_fec_cycle_keyed_path_helpers():

@@ -309,6 +309,65 @@ Run `openhouse <source> <verb> --help` for a command's own options."""
 _FEC_STUB_VERBS = ("pull", "parse", "read", "donors", "pac")
 
 
+def _run_fec_pull(flag_argv, cycles, *, fec_pull_mod, fetched_at) -> int:
+    """Parse the ``fec pull`` flags and run the bulk-data acquisition (#170).
+
+    ``flag_argv`` is everything after ``fec pull <year>`` (the year was already
+    consumed + expanded into ``cycles`` by the caller). A small dedicated parser
+    handles the flags here because the FEC source is intercepted before the main
+    argparse dispatch (so the stub sub-parser carries no flags). The flag surface
+    mirrors the clerk lane's network knobs: ``--contact`` / ``--user-agent`` /
+    ``--data-dir`` / ``--delay`` / ``--force`` (no ``--types``/``--member`` — the
+    FEC lane fetches a fixed four files per cycle).
+    """
+    p = argparse.ArgumentParser(prog="openhouse fec pull", add_help=True)
+    p.add_argument("--data-dir", default=None, help=_DATA_DIR_HELP)
+    p.add_argument(
+        "--contact",
+        default=None,
+        help=(
+            'REQUIRED: your name and email for the User-Agent (or set '
+            "OPENHOUSE_CONTACT). FEC bulk downloads, like the Clerk, want an "
+            "identifiable operator."
+        ),
+    )
+    p.add_argument(
+        "--user-agent", default=None, help="override the User-Agent string entirely"
+    )
+    p.add_argument(
+        "--delay",
+        type=float,
+        default=fec_pull_mod.FEC_DEFAULT_DELAY_SECONDS,
+        help=(
+            f"seconds between file fetches (default: "
+            f"{fec_pull_mod.FEC_DEFAULT_DELAY_SECONDS}; the polite floor, grounded "
+            f"in fec.gov/robots.txt Crawl-delay: 10)"
+        ),
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="re-download even if a cycle's files are already present",
+    )
+    args = p.parse_args(flag_argv)
+
+    data_dir = resolve_data_dir(args.data_dir)
+    contact = args.contact or os.environ.get("OPENHOUSE_CONTACT")
+    try:
+        return fec_pull_mod.fec_pull(
+            cycles,
+            data_dir=data_dir,
+            delay=args.delay,
+            contact=contact,
+            user_agent=args.user_agent,
+            force=args.force,
+            fetched_at=fetched_at,
+        )
+    except pull_mod.PullError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
 def _add_clerk_verbs(subparsers) -> None:
     """Attach the clerk pipeline verbs (pull/parse/inspect/read) to ``subparsers``.
 
@@ -674,6 +733,19 @@ def main(argv: list[str] | None = None) -> int:
                     f"note: FEC reports on 2-year cycles (even-year-ending); "
                     f"year(s) {named} resolve to cycle(s) {resolved}.",
                     file=sys.stderr,
+                )
+            if verb == "pull":
+                # The FEC lane's only network step (#170): bulk-data acquisition of
+                # the four Path-1 files per cycle. Reuses the Clerk lane's polite
+                # client/User-Agent/backoff (see openhouse/fec_pull.py). Lazy import
+                # so the FEC module's httpx/tqdm cost isn't paid by clerk verbs.
+                from . import fec_pull as fec_pull_mod
+
+                return _run_fec_pull(
+                    raw_argv[3:],
+                    cycles,
+                    fec_pull_mod=fec_pull_mod,
+                    fetched_at=fetched_at,
                 )
         print(
             f"error: `openhouse fec {verb}` is not yet implemented "
