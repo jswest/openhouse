@@ -93,7 +93,7 @@ stub; full wording lands in #173.
 
 Code: `openhouse/schemas.py` (3 FEC models, `FEC_SCHEMA_VERSION`,
 `FEC_ORG_TYPE_LABELS`, `PROVENANCE_FEC`/`PROVENANCE_CLERK`, `Date` alias),
-`openhouse/cli.py` (`year_to_cycle` / `expand_years_to_cycles` / `_fmt_years`,
+`openhouse/cli.py` (`year_to_cycle` / `expand_years_to_cycles`,
 `fec_raw_dir` / `fec_parsed_dir`, `_FEC_LEGAL_NOTICE`, the year→cycle routing in
 the FEC interception, fec source description). Data: regenerated
 `openhouse/schemas.fingerprint`. Docs: SPEC §13 (new), README use-restriction
