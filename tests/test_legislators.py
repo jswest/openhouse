@@ -12,7 +12,11 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from openhouse.legislators import load_legislator_index
+from openhouse.legislators import (
+    UNRESOLVED_COMMITTEE,
+    build_fec_member_links,
+    load_legislator_index,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REFERENCE_DIR = FIXTURES / "reference"
@@ -85,3 +89,64 @@ def test_classify_seat_distinguishes_suspicious_from_expected(tmp_path):
     assert idx.classify_seat(last="Nobody", state="WY", district=1) == "unknown_seat"
     # No seat key possible.
     assert idx.classify_seat(last="Doe", state=None, district=None) == "no_district"
+
+
+# --- #169: the FEC identity bridge (id.fec ladder + offline link join) ------
+
+
+def test_fec_candidate_ids_multi_and_dedup(tmp_path):
+    idx = load_legislator_index(_seed(tmp_path))
+    # A member spans cycles → multiple FEC candidate ids, in file order.
+    assert idx.fec_candidate_ids("A000372") == ("H4GA12121", "H4GA12055")
+    # Single id is returned as a one-tuple.
+    assert idx.fec_candidate_ids("A000370") == ("H4NC12100",)
+    # A duplicate id within one record's array is deduped to one.
+    assert idx.fec_candidate_ids("S000001") == ("H0TX05001",)
+
+
+def test_fec_candidate_ids_absent_is_empty(tmp_path):
+    idx = load_legislator_index(_seed(tmp_path))
+    # González-Colón carries no id.fec → unresolved, never a guessed id.
+    assert idx.fec_candidate_ids("G000582") == ()
+    # An unknown bioguide is likewise empty (no synthesis).
+    assert idx.fec_candidate_ids("Z999999") == ()
+
+
+def test_build_fec_member_links_multi_id_member(tmp_path):
+    idx = load_legislator_index(_seed(tmp_path))
+    links, warnings = build_fec_member_links(["A000372"], idx)
+    assert warnings == []
+    # One link per FEC candidate id, committee left as the #170 seam.
+    assert [(l.bioguide_id, l.candidate_id, l.committee_id) for l in links] == [
+        ("A000372", "H4GA12121", UNRESOLVED_COMMITTEE),
+        ("A000372", "H4GA12055", UNRESOLVED_COMMITTEE),
+    ]
+    assert all(l.committee_id == "" for l in links)
+
+
+def test_build_fec_member_links_no_fec_id_is_residual(tmp_path):
+    idx = load_legislator_index(_seed(tmp_path))
+    # A bioguide-pinned member with no id.fec → residual warning, no link.
+    links, warnings = build_fec_member_links(["G000582"], idx)
+    assert links == []
+    assert warnings == [{"bioguide_id": "G000582", "reason": "no_fec_id"}]
+
+
+def test_build_fec_member_links_dedups_and_orders(tmp_path):
+    idx = load_legislator_index(_seed(tmp_path))
+    # Repeated bioguides (a member filed many times) collapse to one; order is
+    # first-appearance then id.fec order; the no-id member lands in the residual.
+    links, warnings = build_fec_member_links(
+        ["A000370", "A000370", "G000582", "A000372"], idx
+    )
+    assert [(l.bioguide_id, l.candidate_id) for l in links] == [
+        ("A000370", "H4NC12100"),
+        ("A000372", "H4GA12121"),
+        ("A000372", "H4GA12055"),
+    ]
+    assert warnings == [{"bioguide_id": "G000582", "reason": "no_fec_id"}]
+
+
+def test_build_fec_member_links_empty_input(tmp_path):
+    idx = load_legislator_index(_seed(tmp_path))
+    assert build_fec_member_links([], idx) == ([], [])
