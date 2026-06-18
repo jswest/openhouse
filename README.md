@@ -7,12 +7,11 @@ filings** — annual Financial Disclosure statements and STOCK Act Periodic
 Transaction Reports — from the Office of the Clerk, into normalized JSON you
 can actually ask questions of.
 
-> **Status: pre-v1.** The pipeline (`clerk pull` / `clerk parse` / `clerk read`)
-> works end to end; the parsed schema is not yet frozen, so a version bump can
-> mean a re-parse rather than a migration. The CLI is source-scoped — verbs live
-> under a source noun: `clerk` for House disclosures, `fec` for the FEC "Path 1"
-> lane (corporate/trade/labor-PAC money to a member, bulk-data-only). Design
-> contract: [SPEC.md](./SPEC.md).
+> **Status: pre-v1.** The pipeline works end to end; the parsed schema is not
+> yet frozen, so a version bump can mean a re-parse rather than a migration.
+> The CLI is source-scoped: verbs live under a source noun — `clerk` for House
+> disclosures, `fec` for FEC campaign-contribution data (connected-PAC money to
+> a member's campaign committee). Design contract: [SPEC.md](./SPEC.md).
 
 ## What it does
 
@@ -30,8 +29,8 @@ openhouse clerk inspect 2024 --sample 0.05
 
 `pull` **requires** a `--contact "Name <email>"` (or the `OPENHOUSE_CONTACT`
 env var): it goes into the User-Agent so the Clerk can identify the operator.
-The Clerk 403s anonymous shared clients, so without it `pull` errors out before
-making a request. Full flag reference is in [Usage](#usage).
+The Clerk blocks anonymous shared clients, so without it `pull` errors out
+before making a request. Full flag reference is in [Usage](#usage).
 
 - **`pull`** is the only network step. Idempotent and Ctrl-C-safe — re-runs
   fetch only what's missing. Multi-year ranges (`openhouse clerk pull 2019-2024`)
@@ -42,15 +41,15 @@ making a request. Full flag reference is in [Usage](#usage).
   in a manifest with a reason.
 - **`read`** answers questions from the parsed JSON — filings by member or
   type, a single filing's full contents, stock transactions flattened across
-  years, per-year summaries. Every query tells you which way to trust it:
-  whether its results are exhaustive (an upper bound — "at most these") or a
-  floor (a lower bound — "at least these"), so a zero-result answer is never
-  ambiguous. It also fails loudly when the data dir is empty or unparsed —
-  "nothing here to query" is an error, never silently returned as "no matches."
+  years, per-year summaries. Every query states whether its results are
+  exhaustive (an upper bound — "at most these") or a floor (a lower bound —
+  "at least these"), so a zero-result answer is never ambiguous. It errors
+  loudly when the data directory is empty or unparsed — "nothing here to query"
+  is an error, never silently returned as "no matches."
   JSON to stdout for machines and `jq`; `--table` for humans.
 - **`inspect`** measures whether the parse is *right*, not just whether it ran.
-  It samples a reproducible, stratified slice of the `ok` filings, opens a small
-  local web app showing each one beside its source PDF, and records a
+  It samples a reproducible, stratified slice of the parsed filings, opens a
+  small local web app showing each one beside its source PDF, and records a
   precision/recall verdict per filing — surfacing silent recall failures (e.g.
   scanned PTRs that extract zero trades) and emitting an accuracy scorecard.
   Offline; the browser is the only socket. JSON scorecard to stdout.
@@ -73,17 +72,16 @@ program and documents the filing requirements.
 ## Usage
 
 The CLI is **source-scoped**: a source noun (`clerk` / `fec`) sits above the
-pipeline verbs, so the House-Clerk commands are `openhouse clerk <verb>`. (`fec`
-is scaffolded but not yet implemented — see
-[#167](https://github.com/jswest/openhouse/issues/167).) The tool-level `ready`
-stays top-level. `clerk pull` is the only command that touches the network;
-`clerk parse` and `clerk read` are offline and deterministic.
+pipeline verbs, so the House-Clerk commands are `openhouse clerk <verb>` and
+the FEC commands are `openhouse fec <verb>`. The `ready` and `reference`
+commands stay top-level. `clerk pull` is the only command that touches the
+network; all other commands are offline and deterministic.
 
 **Data directory** (precedence, highest first): the `--data-dir` flag, then the
 `$OPENHOUSE_DATA_DIR` env var, then the `~/.openhouse` default. All three verbs
 honour the same precedence; `raw/clerk/` lives under it after `clerk pull`,
-`parsed/clerk/` after `clerk parse`. (The store is source-scoped — `raw/fec/`
-and `parsed/fec/` are reserved for the FEC lane; see [Migrating](#migrating-from-the-pre-namespace-layout).)
+`parsed/clerk/` after `clerk parse`. FEC data lives under `raw/fec/` and
+`parsed/fec/`.
 
 **Environment variables:**
 
@@ -107,8 +105,8 @@ mv ~/.openhouse/parsed/<year> ~/.openhouse/parsed/clerk/<year>
 openhouse detects a legacy `raw/<year>/` and prints this `mv` once as a stderr
 nudge — it never moves your data for you. After the move, re-run
 `openhouse clerk parse <year>`: the `mv` relocates the parsed files but not the
-`source_pdf` path baked into each record, and the schema generation bumped
-(9→10), so `clerk read` warns until a re-parse refreshes the tree. (The shared
+`source_pdf` path baked into each record, and the schema version bumped (9→10),
+so `clerk read` warns until a re-parse refreshes the tree. (The shared
 CC0 `raw/reference/` set is *not* relocated.)
 
 ### clerk pull (network)
@@ -128,8 +126,9 @@ openhouse clerk pull 2020-2024 --newest-first     # process 2024 first, 2020 las
 
 `--member` and `--doc-id` are mutually exclusive. By default `pull` also makes a
 one-time CC0 `congress-legislators` fetch into `raw/reference/` so `parse` can
-pin verified bioguide identities; `--no-reference` skips it (every filer then
-falls back to a name-only key, and `read --bioguide` finds nothing).
+pin verified member IDs (bioguide IDs from a public-domain legislator registry);
+`--no-reference` skips it (every filer then falls back to a name-only key, and
+`read --bioguide` finds nothing).
 
 ### clerk parse (offline)
 
@@ -160,10 +159,11 @@ Identity filters on `filings` and `trades`:
 
 - `--member <substring>` — case-insensitive substring over the filer id and raw
   names. Fuzzy name matching, **not** verified identity (SPEC §6.2).
-- `--bioguide <id>` — exact, case-insensitive match on the verified
-  `bioguide_id`. A sound query (no false positives); the precise alternative to
-  `--member`. Needs reference-enriched data, so it only matches filings parsed
-  from a pull made *without* `--no-reference`.
+- `--bioguide <id>` — exact match on a member's verified congressional ID (the
+  same stable identifier used by congress.gov). A sound query (no false
+  positives); the precise alternative to `--member`. Needs reference-enriched
+  data, so it only matches filings parsed from a pull made *without*
+  `--no-reference`.
 
 On `trades`, `--ticker` is a sound query (no false positives — exact symbol
 match) while `--asset` leans toward completeness (substring over the verbatim
@@ -173,16 +173,15 @@ mistaken for "no matches" (run `parse` first).
 
 ### reference (offline)
 
-Look up legislators by name or bioguide-id substring. Searches the union of
-current and historical legislators cached in `raw/reference/` (populated by
-`clerk pull`). Matching is case- and diacritic-insensitive for names (so
-`gonzalez` matches `González-Colón`) and case-insensitive for bioguide IDs.
-A top-level verb — not scoped to `clerk` or `fec` — because it is a shared
-cross-source identity lookup.
+Look up legislators by name or ID. Searches the union of current and historical
+legislators cached in `raw/reference/` (populated by `clerk pull`). Matching is
+case- and diacritic-insensitive for names (so `gonzalez` matches
+`González-Colón`) and case-insensitive for IDs.
+A top-level command, not scoped to `clerk` or `fec`.
 
 ```sh
 openhouse reference Adams --table           # all legislators named Adams
-openhouse reference A000370                 # look up by bioguide id
+openhouse reference A000370                 # look up by id
 openhouse reference gonzalez               # diacritic-insensitive name search
 ```
 
@@ -190,82 +189,78 @@ openhouse reference gonzalez               # diacritic-insensitive name search
 historical) — every matching record is returned, none dropped. The residual is
 members absent from the on-disk cache (e.g. sworn in after the last `clerk
 pull`); re-pull to refresh. JSON to stdout; `--table` for human-aligned columns
-(name, bioguide_id, chamber, state). No matches → empty result, exit 0. No
-reference data on disk → non-zero exit with a pointer to `clerk pull`.
+(name, id, chamber, state). No matches → empty result, exit 0. No reference
+data on disk → non-zero exit with a pointer to `clerk pull`.
 
 ## What's coming
 
-The three verbs ship end to end for any year range since 2008; stable filer
-identity via the CC0 `congress-legislators` bioguide join (with the name-key
-fallback and warnings described in [Caveats](#caveats)) is in place, and a
-Claude Code [agent skill](./openhouse/skill/SKILL.md) lets an AI agent drive
-`clerk pull`/`clerk parse`/`clerk read` directly. Still pending:
+The `clerk` pipeline ships end to end for any year range since 2008; stable
+filer identity (via the public-domain `congress-legislators` registry) and a
+Claude Code [agent skill](./openhouse/skill/SKILL.md) are in place. The `fec`
+lane is in place for connected-PAC contributions. Still pending:
 
 - **OCR for the scanned/handwritten backlog** ([#15](https://github.com/jswest/openhouse/issues/15)),
   already detected and catalogued by `parse` so nothing is lost in the meantime.
 
 ## Caveats
 
-**Identity is a two-tier claim, and only one tier is verified.** The Clerk index
-carries no member ID — only name strings that vary across years ("Alma Shealey
-Adams" vs "Alma S. Adams"). `parse` resolves each filer through a two-rung ladder
-and records which rung it used:
+**Filer identity has two levels of confidence, and only one is verified.** The
+Clerk index carries no member ID — only name strings that vary across years
+("Alma Shealey Adams" vs "Alma S. Adams"). `parse` resolves each filer through
+two levels and records which it used:
 
-- `bioguide:<id>` — the filer's House seat (normalized last name + state +
-  district) matched a single record in the public-domain
+- **Verified ID** (`bioguide:<id>`) — the filer's House seat (normalized last
+  name + state + district) matched a single record in the public-domain
   [`@unitedstates/congress-legislators`](https://github.com/unitedstates/congress-legislators)
-  bulk files (CC0). This is a **stable identity**: the same `filer_id` across
-  years and name spellings is the same person. The match is conservative — a
-  seat that resolves to two legislators (same last name, same seat across time)
-  matches *nothing* rather than guess, so a `bioguide:` key is never a false
-  positive.
-- `name:<normalized-slug>` — the last resort, used when no House seat matched
-  (a candidate who never took a seat, a delegate edge case, a name the reference
-  set doesn't carry, an ambiguous seat). **This is a bounded, unverified
-  name-string claim, not an identity.** Two different people can share one
+  registry. This is a **stable identity**: the same ID across years and name
+  spellings is the same person. The match is conservative — a seat that resolves
+  to two legislators (same last name, same seat across time) matches *nothing*
+  rather than guess, so a verified ID is never a false positive.
+- **Name key** (`name:<normalized-slug>`) — the last resort, used when no House
+  seat matched (a candidate who never took a seat, a delegate edge case, a name
+  the registry doesn't carry, an ambiguous seat). **This is an unverified
+  name-string label, not a stable identity.** Two different people can share one
   `name:` key; `parse` emits an `identity_warnings` entry (and a stderr line) for
-  every `name:`-keyed filer precisely so a `read --member` user knows the match
-  is unverified.
+  every name-keyed filer precisely so a `read --member` user knows the match is
+  unverified.
 
-The CC0 reference set is fetched once by `pull` into `raw/reference/` and joined
-**offline** by `parse` — it is the single declared exception to "`pull` is the
-only network step," and being CC0 it carries none of the Clerk data's use
-restriction. `pull --no-reference` skips it, in which case every filer falls back
-to a `name:` key.
+The public-domain registry is fetched once by `pull` into `raw/reference/` and
+joined **offline** by `parse`. `pull --no-reference` skips it, in which case
+every filer falls back to a name key.
 
-**The staff↔member bridge, if any, is name-keyed and unverified.** Where a filing
-is bridged to a member by name alone (no bioguide), treat it as a *tagged,
-unverified* claim — a starting point for a human to confirm, never a settled
-fact. `openhouse` never synthesizes a bioguide id and never folds a name-only
-guess into one.
+**The staff↔member bridge, if any, is name-keyed and unverified.** Where a
+filing is bridged to a member by name alone (no verified ID), treat it as a
+tagged, unverified claim — a starting point for a human to confirm, never a
+settled fact. `openhouse` never synthesizes a verified ID from a name guess.
 
-**The FEC lane is Path-1 only — a deliberately narrow, sound slice.** `fec
-read` answers exactly one question: which **connected-PAC organizations** gave
-*itemized* money to a member's principal campaign committee, by two-year cycle.
-That is the *disclosed candidate-side slice, not total influence*. The
-[non-goals](https://github.com/jswest/openhouse/issues/167) are explicit:
+**The FEC lane covers connected-PAC contributions — not total campaign money.**
+`fec read` answers exactly one question: which corporate, trade, or labor PAC
+organizations gave to a member's principal campaign committee, by two-year
+cycle. This is a disclosed, itemized slice of campaign finance, not a measure
+of total influence. Out of scope:
 
-- **No Path 2.** Individual-donor itemization, leadership-PAC and joint-fundraising
-  flows, and the rest of the contribution graph are out of scope.
-- **No industry classification.** Organizations are tagged by their FEC
-  `organization_type` (corporation / trade / labor / membership / cooperative /
-  corp-without-stock), not mapped to sectors or industries.
-- **No super-PAC independent expenditures, no dark money, no soft money.** Only
-  hard-money line-11C receipts to the candidate's own committee.
+- Individual-donor itemization, leadership-PAC flows, and joint-fundraising
+  transfers are not included.
+- Organizations are tagged by their FEC type (corporation / trade / labor /
+  membership / cooperative / corp-without-stock), not mapped to sectors or
+  industries.
+- Super-PAC independent expenditures, dark money, and soft money are not
+  included — only direct, itemized contributions to the candidate's principal
+  campaign committee.
 
-Two further limitations are *declared, not hidden* — every `fec read` answer
-restates them on stderr:
+Two further limitations are declared on every `fec read` response (on stderr):
 
-- **The disclosed-slice caveat.** The roll-up is complete over the *itemized*
+- **Disclosed-slice caveat.** The roll-up is complete over the *itemized*
   receipts the FEC discloses for the cycle; it cannot see money that was never
   itemized or never disclosed. The stderr residual states the count and reason
-  for anything filtered (`not_connected_ssf`, `unresolved_committee`).
-- **Labor is included and tagged.** Labor (`L`) PAC money is institutional PAC
-  money like any other connected SSF — it is kept and tagged `labor`, never
-  silently dropped, so `--org-type labor` slices exactly it.
-- **Affiliation is not collapsed.** FEC bulk `cm` carries no affiliation column,
-  so a parent organization and its subsidiary PACs are reported as separate
-  organizations — `openhouse` never merges them from data it does not have.
+  for anything filtered (PACs without a connected organization, unresolved
+committees).
+- **Labor is included and tagged.** Labor PAC money is institutional PAC money
+  like any other — it is kept and tagged `labor`, never silently dropped, so
+  `--org-type labor` slices exactly it.
+- **Parent and subsidiary PACs are reported separately.** FEC data carries no
+  affiliation column, so a parent organization and its subsidiary PACs appear as
+  separate entries — `openhouse` never merges them from data it does not have.
 
 ## Use restriction
 
@@ -276,18 +271,17 @@ ratings — this is statutory ([5 U.S.C. §
 Act as amended), not a request. `openhouse` is a research and transparency
 tool; don't build a commercial product on its output.
 
-FEC data (the `fec` source — [SPEC §13](./SPEC.md),
-[#167](https://github.com/jswest/openhouse/issues/167)) sits on a *different*
+FEC data (the `fec` source — [SPEC §13](./SPEC.md)) sits on a *different*
 legal footing: it is **public domain** (a federal-government work), with one
 statutory bar — [52 U.S.C. §
-30111(a)](https://www.law.cornell.edu/uscode/text/52/30111), the **"sale or use"
-restriction**: contributor information may **not** be sold or used to solicit
-contributions or for any commercial purpose. Records carry a `provenance` tag
-(`"fec"` vs `"clerk"`) so the two footings stay distinguishable downstream.
+30111(a)](https://www.law.cornell.edu/uscode/text/52/30111): contributor
+information may **not** be sold or used to solicit contributions or for any
+commercial purpose. Records carry a `provenance` tag (`"fec"` vs `"clerk"`) so
+the two footings stay distinguishable downstream.
 
 ## Development
 
-Python 3.12+, managed with [`uv`](https://docs.astral.sh/uv/):
+Python 3.11+, managed with [`uv`](https://docs.astral.sh/uv/):
 
 ```sh
 uv run pytest        # tests
