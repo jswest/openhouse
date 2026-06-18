@@ -8,7 +8,7 @@
     ]
   },
   {
-    "id": { "bioguide": "S000001" },
+    "id": { "bioguide": "S000001", "fec": ["H0TX05001", "H0TX05001"] },
     "name": { "first": "John", "last": "Smith", "official_full": "John A. Smith" },
     "terms": [
       { "type": "rep", "state": "TX", "district": 5, "start": "2001-01-03" }

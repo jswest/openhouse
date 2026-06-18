@@ -81,16 +81,16 @@ from openhouse.cli import main  # noqa: E402
 
 
 def test_inspect_rejects_year_range():
-    assert main(["inspect", "2021-2022", "--sample", "0.5"]) == 2
+    assert main(["clerk", "inspect", "2021-2022", "--sample", "0.5"]) == 2
 
 
 def test_inspect_rejects_out_of_range_sample():
-    assert main(["inspect", "2022", "--sample", "1.5"]) == 2
-    assert main(["inspect", "2022", "--sample", "0"]) == 2
+    assert main(["clerk", "inspect", "2022", "--sample", "1.5"]) == 2
+    assert main(["clerk", "inspect", "2022", "--sample", "0"]) == 2
 
 
 def test_inspect_unparsed_year_exits_1(tmp_path, capsys):
-    rc = main(["inspect", "2022", "--sample", "0.5", "--data-dir", str(tmp_path)])
+    rc = main(["clerk", "inspect", "2022", "--sample", "0.5", "--data-dir", str(tmp_path)])
     assert rc == 1
     assert "not parsed" in capsys.readouterr().err
 
@@ -232,19 +232,19 @@ def test_data_dir_precedence_uniform_across_verbs(verb, monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     if verb == "pull":
         cap = _capture_pull_data_dir(monkeypatch)
-        argv_flag = ["pull", "2024", "--data-dir", "/flag/store"]
-        argv_env = ["pull", "2024"]
-        argv_default = ["pull", "2024"]
+        argv_flag = ["clerk", "pull", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["clerk", "pull", "2024"]
+        argv_default = ["clerk", "pull", "2024"]
     elif verb == "parse":
         cap = _capture_parse_data_dir(monkeypatch)
-        argv_flag = ["parse", "2024", "--data-dir", "/flag/store"]
-        argv_env = ["parse", "2024"]
-        argv_default = ["parse", "2024"]
+        argv_flag = ["clerk", "parse", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["clerk", "parse", "2024"]
+        argv_default = ["clerk", "parse", "2024"]
     else:
         cap = _capture_read_data_dir(monkeypatch)
-        argv_flag = ["read", "filings", "2024", "--data-dir", "/flag/store"]
-        argv_env = ["read", "filings", "2024"]
-        argv_default = ["read", "filings", "2024"]
+        argv_flag = ["clerk", "read", "filings", "2024", "--data-dir", "/flag/store"]
+        argv_env = ["clerk", "read", "filings", "2024"]
+        argv_default = ["clerk", "read", "filings", "2024"]
 
     # `read` against these absent dirs now fails loudly (#79); that is fine — this
     # test asserts the spy captured the RESOLVED path, not the exit code. pull/parse
@@ -295,7 +295,7 @@ def test_top_help_shows_pipeline_epilog(capsys):
 def test_subcommand_help_has_examples(capsys):
     for verb in ("pull", "parse", "read"):
         with pytest.raises(SystemExit) as exc:
-            cli_mod.main([verb, "--help"])
+            cli_mod.main(["clerk", verb, "--help"])
         assert exc.value.code == 0
         assert "examples:" in capsys.readouterr().out
 
@@ -314,7 +314,7 @@ def test_pull_targeted_flags_thread_into_pull(monkeypatch):
     monkeypatch.setattr(pull_mod, "pull", fake_pull)
     rc = cli_mod.main(
         [
-            "pull", "2020-2024",
+            "clerk", "pull", "2020-2024",
             "--contact", "Jane Doe <jane@example.com>",
             "--member", "Pelosi",
             "--newest-first",
@@ -335,7 +335,7 @@ def test_pull_doc_id_flag_threads_into_pull(monkeypatch):
 
     monkeypatch.setattr(pull_mod, "pull", fake_pull)
     rc = cli_mod.main(
-        ["pull", "2024", "--contact", "Jane Doe <jane@example.com>",
+        ["clerk", "pull", "2024", "--contact", "Jane Doe <jane@example.com>",
          "--doc-id", "20024277"]
     )
     assert rc == 0
@@ -345,7 +345,129 @@ def test_pull_doc_id_flag_threads_into_pull(monkeypatch):
 
 def test_pull_help_lists_targeted_examples(capsys):
     with pytest.raises(SystemExit) as exc:
-        cli_mod.main(["pull", "--help"])
+        cli_mod.main(["clerk", "pull", "--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "--member" in out and "--doc-id" in out and "--newest-first" in out
+
+
+# --- FEC lane: year→cycle expansion + stderr note (#168) --------------------
+
+from openhouse.cli import (  # noqa: E402
+    expand_years_to_cycles,
+    fec_parsed_dir,
+    fec_raw_dir,
+    year_to_cycle,
+)
+
+
+def test_year_to_cycle_odd_rolls_up():
+    """An odd year folds into the next even-ending cycle (2023 → 2024)."""
+    assert year_to_cycle(2023) == 2024
+
+
+def test_year_to_cycle_even_is_its_own_cycle():
+    assert year_to_cycle(2024) == 2024
+
+
+def test_expand_collapses_both_halves_of_a_cycle():
+    """Both years of a cycle de-dupe to one entry; a 2023-2024 range is one cycle."""
+    assert expand_years_to_cycles([2023, 2024]) == [2024]
+
+
+def test_expand_multiple_cycles_sorted_unique():
+    assert expand_years_to_cycles([2021, 2022, 2023, 2024]) == [2022, 2024]
+
+
+def test_fec_pull_odd_year_emits_cycle_note(capsys, monkeypatch):
+    # `fec pull` is now implemented (#170); with no contact it stops at the
+    # User-Agent gate (rc 1), but the year→cycle note still prints first.
+    monkeypatch.delenv("OPENHOUSE_CONTACT", raising=False)
+    rc = cli_mod.main(["fec", "pull", "2023"])
+    err = capsys.readouterr().err
+    assert "2-year cycles" in err
+    assert "2024" in err  # expanded cycle
+    assert "contact" in err.lower()  # the User-Agent gate, not a stub
+    assert rc == 1
+
+
+def test_fec_pull_even_year_no_cycle_note(capsys, monkeypatch):
+    monkeypatch.delenv("OPENHOUSE_CONTACT", raising=False)
+    rc = cli_mod.main(["fec", "pull", "2024"])
+    err = capsys.readouterr().err
+    assert "2-year cycles" not in err  # no expansion happened
+    assert "contact" in err.lower()
+    assert rc == 1
+
+
+def test_fec_parse_range_collapses_to_one_cycle_note(tmp_path, capsys):
+    # `fec parse 2023-2024` collapses to the 2024 cycle (the stderr note) and runs
+    # the real offline parse (#171). With no bulk files on disk it skips cleanly
+    # and exits non-zero (nothing parsed) — proof the stub is gone.
+    rc = cli_mod.main(["fec", "parse", "2023-2024", "--data-dir", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert "2-year cycles" in err
+    assert "not yet implemented" not in err
+    assert rc == 1
+
+
+def test_fec_parse_dispatches_to_module_with_expanded_cycle(monkeypatch, tmp_path):
+    # `fec parse 2023` reaches the real module with the expanded cycle (2024) and
+    # the resolved data dir — the offline normalization seam (#171).
+    import openhouse.fec_parse as fec_parse_mod
+
+    captured = {}
+
+    def fake(cycles, **kwargs):
+        captured["cycles"] = cycles
+        captured["kwargs"] = kwargs
+        return 0
+
+    monkeypatch.setattr(fec_parse_mod, "fec_parse", fake)
+    rc = cli_mod.main(["fec", "parse", "2023", "--data-dir", str(tmp_path)])
+    assert rc == 0
+    assert captured["cycles"] == [2024]
+    assert captured["kwargs"]["data_dir"] == tmp_path
+
+
+def test_fec_pull_bad_year_fails_arg_validation(capsys):
+    rc = cli_mod.main(["fec", "pull", "nope"])
+    assert rc == 2
+    assert "not yet implemented" not in capsys.readouterr().err
+
+
+def test_fec_pull_requires_a_year(capsys):
+    rc = cli_mod.main(["fec", "pull"])
+    assert rc == 2
+    assert "requires a year" in capsys.readouterr().err
+
+
+def test_fec_pull_dispatches_to_module_with_expanded_cycle(monkeypatch, tmp_path):
+    # `fec pull 2023` reaches the real module with the expanded cycle (2024), the
+    # resolved data dir, and the parsed flags — proof the stub is gone (#170).
+    import openhouse.fec_pull as fec_pull_mod
+
+    captured = {}
+
+    def fake(cycles, **kwargs):
+        captured["cycles"] = cycles
+        captured["kwargs"] = kwargs
+        return 0
+
+    monkeypatch.setattr(fec_pull_mod, "fec_pull", fake)
+    monkeypatch.setenv("OPENHOUSE_CONTACT", "Jane Doe <jane@example.com>")
+    rc = cli_mod.main(
+        ["fec", "pull", "2023", "--data-dir", str(tmp_path)]
+    )
+    assert rc == 0
+    assert captured["cycles"] == [2024]
+    assert captured["kwargs"]["data_dir"] == tmp_path
+    assert captured["kwargs"]["contact"] == "Jane Doe <jane@example.com>"
+
+
+def test_fec_cycle_keyed_path_helpers():
+    """fec pull 2023 and 2024 both resolve to .../fec/2024 (cycle-keyed)."""
+    root = Path("/data")
+    assert fec_raw_dir(root, year_to_cycle(2023)) == root / "raw" / "fec" / "2024"
+    assert fec_raw_dir(root, year_to_cycle(2024)) == root / "raw" / "fec" / "2024"
+    assert fec_parsed_dir(root, 2024) == root / "parsed" / "fec" / "2024"

@@ -7,21 +7,24 @@ filings** — annual Financial Disclosure statements and STOCK Act Periodic
 Transaction Reports — from the Office of the Clerk, into normalized JSON you
 can actually ask questions of.
 
-> **Status: pre-v1.** The three verbs (`pull` / `parse` / `read`) work end to
-> end; the parsed schema is not yet frozen, so a version bump can mean a
-> re-parse rather than a migration. Design contract: [SPEC.md](./SPEC.md).
+> **Status: pre-v1.** The pipeline (`clerk pull` / `clerk parse` / `clerk read`)
+> works end to end; the parsed schema is not yet frozen, so a version bump can
+> mean a re-parse rather than a migration. The CLI is source-scoped — verbs live
+> under a source noun: `clerk` for House disclosures, `fec` for the FEC "Path 1"
+> lane (corporate/trade/labor-PAC money to a member, bulk-data-only). Design
+> contract: [SPEC.md](./SPEC.md).
 
 ## What it does
 
 A three-command pipeline plus an accuracy-review tool, over one data directory:
 
 ```sh
-openhouse pull 2024 --contact "Jane Doe <jane@example.com>"
+openhouse clerk pull 2024 --contact "Jane Doe <jane@example.com>"
                              # network: fetch the year's index + every PDF (resumable, polite)
-openhouse parse 2024         # offline: PDFs + index → normalized JSON, nothing dropped
-openhouse read trades 2024 --ticker NVDA --table
+openhouse clerk parse 2024   # offline: PDFs + index → normalized JSON, nothing dropped
+openhouse clerk read trades 2024 --ticker NVDA --table
                              # offline: ask the parsed data a question
-openhouse inspect 2024 --sample 0.05
+openhouse clerk inspect 2024 --sample 0.05
                              # offline: review a sample beside the PDFs, score accuracy
 ```
 
@@ -31,7 +34,7 @@ The Clerk 403s anonymous shared clients, so without it `pull` errors out before
 making a request. Full flag reference is in [Usage](#usage).
 
 - **`pull`** is the only network step. Idempotent and Ctrl-C-safe — re-runs
-  fetch only what's missing. Multi-year ranges (`openhouse pull 2019-2024`)
+  fetch only what's missing. Multi-year ranges (`openhouse clerk pull 2019-2024`)
   throughout.
 - **`parse`** never touches the network and never silently drops a filing:
   machine-readable (e-filed) PDFs become structured records; scanned/paper
@@ -69,33 +72,58 @@ program and documents the filing requirements.
 
 ## Usage
 
-Three verbs over one data directory. `pull` is the only one that touches the
-network; `parse` and `read` are offline and deterministic.
+The CLI is **source-scoped**: a source noun (`clerk` / `fec`) sits above the
+pipeline verbs, so the House-Clerk commands are `openhouse clerk <verb>`. (`fec`
+is scaffolded but not yet implemented — see
+[#167](https://github.com/jswest/openhouse/issues/167).) The tool-level `ready`
+stays top-level. `clerk pull` is the only command that touches the network;
+`clerk parse` and `clerk read` are offline and deterministic.
 
 **Data directory** (precedence, highest first): the `--data-dir` flag, then the
 `$OPENHOUSE_DATA_DIR` env var, then the `~/.openhouse` default. All three verbs
-honour the same precedence; `raw/` lives under it after `pull`, `parsed/` after
-`parse`.
+honour the same precedence; `raw/clerk/` lives under it after `clerk pull`,
+`parsed/clerk/` after `clerk parse`. (The store is source-scoped — `raw/fec/`
+and `parsed/fec/` are reserved for the FEC lane; see [Migrating](#migrating-from-the-pre-namespace-layout).)
 
 **Environment variables:**
 
 - `OPENHOUSE_CONTACT` — your `Name <email>` for `pull`'s User-Agent; saves
-  repeating `--contact`. Required for `pull` one way or the other.
+  repeating `--contact`. Required for `clerk pull` one way or the other.
 - `OPENHOUSE_DATA_DIR` — the data directory, overridden only by `--data-dir`.
 
-### pull (network)
+### Migrating from the pre-namespace layout
 
-Fetches the annual index ZIP and per-filing PDFs into `<data>/raw/`. Polite by
+The CLI used to expose bare verbs (`openhouse pull 2024`) and stored data at
+`raw/<year>/` + `parsed/<year>/`. It is now source-scoped: run
+`openhouse clerk <verb>`, and the data lives under `raw/clerk/<year>/` +
+`parsed/clerk/<year>/`. If you have a store from before the change, relocate it
+once with an **offline `mv`** (this moves bytes — it does **not** re-download):
+
+```sh
+mv ~/.openhouse/raw/<year>    ~/.openhouse/raw/clerk/<year>
+mv ~/.openhouse/parsed/<year> ~/.openhouse/parsed/clerk/<year>
+```
+
+openhouse detects a legacy `raw/<year>/` and prints this `mv` once as a stderr
+nudge — it never moves your data for you. After the move, re-run
+`openhouse clerk parse <year>`: the `mv` relocates the parsed files but not the
+`source_pdf` path baked into each record, and the schema generation bumped
+(9→10), so `clerk read` warns until a re-parse refreshes the tree. (The shared
+CC0 `raw/reference/` set is *not* relocated.)
+
+### clerk pull (network)
+
+Fetches the annual index ZIP and per-filing PDFs into `<data>/raw/clerk/`. Polite by
 default (sequential, 2.5 s between requests, identifiable User-Agent); re-runs
 skip what's already on disk. Years are `YYYY` or `YYYY-YYYY`.
 
 ```sh
-openhouse pull 2024 --contact "Jane Doe <jane@example.com>"
-openhouse pull 2020-2024 --types ptr        # only PTRs, five years
-openhouse pull 2024 --index-only            # index metadata, no PDF bodies
-openhouse pull 2024 --member Pelosi         # only that filer's PDFs (substring match)
-openhouse pull 2024 --doc-id 20024277       # one filing's PDF (requires a single year)
-openhouse pull 2020-2024 --newest-first     # process 2024 first, 2020 last
+openhouse clerk pull 2024 --contact "Jane Doe <jane@example.com>"
+openhouse clerk pull 2020-2024 --types ptr        # only PTRs, five years
+openhouse clerk pull 2024 --index-only            # index metadata, no PDF bodies
+openhouse clerk pull 2024 --member Pelosi         # only that filer's PDFs (substring match)
+openhouse clerk pull 2024 --doc-id 20024277       # one filing's PDF (requires a single year)
+openhouse clerk pull 2020-2024 --newest-first     # process 2024 first, 2020 last
 ```
 
 `--member` and `--doc-id` are mutually exclusive. By default `pull` also makes a
@@ -103,29 +131,29 @@ one-time CC0 `congress-legislators` fetch into `raw/reference/` so `parse` can
 pin verified bioguide identities; `--no-reference` skips it (every filer then
 falls back to a name-only key, and `read --bioguide` finds nothing).
 
-### parse (offline)
+### clerk parse (offline)
 
-Turns the raw artifacts into normalized JSON under `<data>/parsed/`. Classifies
+Turns the raw artifacts into normalized JSON under `<data>/parsed/clerk/`. Classifies
 each PDF, extracts metadata and PTR transactions, joins filer identity, and
 writes a parse-manifest recording what did and didn't parse — never a silent
 gap. Re-parsing is cheap by design.
 
 ```sh
-openhouse parse 2024
-openhouse parse 2020-2024 --types ptr
-openhouse parse 2024 --strict               # non-zero exit if any filing errors
+openhouse clerk parse 2024
+openhouse clerk parse 2020-2024 --types ptr
+openhouse clerk parse 2024 --strict               # non-zero exit if any filing errors
 ```
 
-### read (offline)
+### clerk read (offline)
 
 Queries the parsed JSON. JSON to stdout (one object per line for lists,
 `jq`-composable); `--table` for a human-readable view. Four sub-verbs:
 
 ```sh
-openhouse read filings 2024 --type ptr --state NY     # matching filing-metadata records
-openhouse read filing 20024001                        # one filing: metadata + body
-openhouse read trades 2024 --ticker NVDA --table      # PTR transactions, filer attached
-openhouse read summary 2020-2024                       # per-year roll-up from the manifests
+openhouse clerk read filings 2024 --type ptr --state NY     # matching filing-metadata records
+openhouse clerk read filing 20024001                        # one filing: metadata + body
+openhouse clerk read trades 2024 --ticker NVDA --table      # PTR transactions, filer attached
+openhouse clerk read summary 2020-2024                       # per-year roll-up from the manifests
 ```
 
 Identity filters on `filings` and `trades`:
@@ -149,7 +177,7 @@ The three verbs ship end to end for any year range since 2008; stable filer
 identity via the CC0 `congress-legislators` bioguide join (with the name-key
 fallback and warnings described in [Caveats](#caveats)) is in place, and a
 Claude Code [agent skill](./openhouse/skill/SKILL.md) lets an AI agent drive
-`pull`/`parse`/`read` directly. Still pending:
+`clerk pull`/`clerk parse`/`clerk read` directly. Still pending:
 
 - **OCR for the scanned/handwritten backlog** ([#15](https://github.com/jswest/openhouse/issues/15)),
   already detected and catalogued by `parse` so nothing is lost in the meantime.
@@ -189,6 +217,34 @@ unverified* claim — a starting point for a human to confirm, never a settled
 fact. `openhouse` never synthesizes a bioguide id and never folds a name-only
 guess into one.
 
+**The FEC lane is Path-1 only — a deliberately narrow, sound slice.** `fec
+read` answers exactly one question: which **connected-PAC organizations** gave
+*itemized* money to a member's principal campaign committee, by two-year cycle.
+That is the *disclosed candidate-side slice, not total influence*. The
+[non-goals](https://github.com/jswest/openhouse/issues/167) are explicit:
+
+- **No Path 2.** Individual-donor itemization, leadership-PAC and joint-fundraising
+  flows, and the rest of the contribution graph are out of scope.
+- **No industry classification.** Organizations are tagged by their FEC
+  `organization_type` (corporation / trade / labor / membership / cooperative /
+  corp-without-stock), not mapped to sectors or industries.
+- **No super-PAC independent expenditures, no dark money, no soft money.** Only
+  hard-money line-11C receipts to the candidate's own committee.
+
+Two further limitations are *declared, not hidden* — every `fec read` answer
+restates them on stderr:
+
+- **The disclosed-slice caveat.** The roll-up is complete over the *itemized*
+  receipts the FEC discloses for the cycle; it cannot see money that was never
+  itemized or never disclosed. The stderr residual states the count and reason
+  for anything filtered (`not_connected_ssf`, `unresolved_committee`).
+- **Labor is included and tagged.** Labor (`L`) PAC money is institutional PAC
+  money like any other connected SSF — it is kept and tagged `labor`, never
+  silently dropped, so `--org-type labor` slices exactly it.
+- **Affiliation is not collapsed.** FEC bulk `cm` carries no affiliation column,
+  so a parent organization and its subsidiary PACs are reported as separate
+  organizations — `openhouse` never merges them from data it does not have.
+
 ## Use restriction
 
 Clerk financial-disclosure data may **not** be used for commercial purposes
@@ -197,6 +253,15 @@ ratings — this is statutory ([5 U.S.C. §
 13107](https://www.law.cornell.edu/uscode/text/5/13107), Ethics in Government
 Act as amended), not a request. `openhouse` is a research and transparency
 tool; don't build a commercial product on its output.
+
+FEC data (the `fec` source — [SPEC §13](./SPEC.md),
+[#167](https://github.com/jswest/openhouse/issues/167)) sits on a *different*
+legal footing: it is **public domain** (a federal-government work), with one
+statutory bar — [52 U.S.C. §
+30111(a)](https://www.law.cornell.edu/uscode/text/52/30111), the **"sale or use"
+restriction**: contributor information may **not** be sold or used to solicit
+contributions or for any commercial purpose. Records carry a `provenance` tag
+(`"fec"` vs `"clerk"`) so the two footings stay distinguishable downstream.
 
 ## Development
 
@@ -230,8 +295,8 @@ uv run python .claude/skills/release/release.py
 uv run python .claude/skills/release/release.py --tag --push
 ```
 
-A schema bump means existing `parsed/` data must be re-parsed — re-run
-`openhouse parse <years>`; the dry run says so when it applies.
+A schema bump means existing `parsed/clerk/` data must be re-parsed — re-run
+`openhouse clerk parse <years>`; the dry run says so when it applies.
 
 ## Refreshing a local install
 
@@ -245,8 +310,8 @@ uv tool install --force .
 uv tool install --force --no-cache --editable .
 
 openhouse --version          # confirm the version moved
-openhouse ready              # re-press the skill if SKILL.md changed
-openhouse parse <years>     # re-parse only if SCHEMA_VERSION moved
+openhouse ready                  # re-press the skill if SKILL.md changed
+openhouse clerk parse <years>    # re-parse only if SCHEMA_VERSION moved
 ```
 
 Install **after** tagging — the version comes from the git tag via `hatch-vcs`,

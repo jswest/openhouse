@@ -1,6 +1,6 @@
 [
   {
-    "id": { "bioguide": "A000372", "thomas": "02019" },
+    "id": { "bioguide": "A000372", "thomas": "02019", "fec": ["H4GA12121", "H4GA12055"] },
     "name": { "first": "Richard", "last": "Allen", "official_full": "Rick W. Allen" },
     "terms": [
       { "type": "rep", "state": "GA", "district": 12, "start": "2015-01-06" },
@@ -8,7 +8,7 @@
     ]
   },
   {
-    "id": { "bioguide": "A000370" },
+    "id": { "bioguide": "A000370", "fec": ["H4NC12100"] },
     "name": { "first": "Alma", "last": "Adams", "official_full": "Alma S. Adams" },
     "terms": [
       { "type": "rep", "state": "NC", "district": 12, "start": "2014-11-12" },

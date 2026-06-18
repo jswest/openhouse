@@ -3,12 +3,17 @@
 A standalone tool that pulls, parses, and queries **U.S. House of Representatives
 financial disclosure** filings from the Office of the Clerk.
 
-Three commands, one data directory:
+The CLI is **source-scoped** (#174): a source noun (`clerk` / `fec`) sits above
+the pipeline verbs, so today's House-Clerk pipeline lives under `clerk`. (`fec`
+is scaffolded — verbs are stubs until #167.) The tool-level `ready` (and the
+repo-local `release` skill) stay top-level, not under a source.
 
 ```
-openhouse pull  <year | year_start-year_end>   # acquire raw artifacts from the Clerk (network)
-openhouse parse <year | year_start-year_end>   # transform raw artifacts → normalized JSON (offline)
-openhouse read  <subcommand> [args]            # query the normalized JSON (offline, read-only)
+openhouse clerk pull  <year | year_start-year_end>   # acquire raw artifacts from the Clerk (network)
+openhouse clerk parse <year | year_start-year_end>   # transform raw artifacts → normalized JSON (offline)
+openhouse clerk read  <subcommand> [args]            # query the normalized JSON (offline, read-only)
+openhouse clerk inspect <year> --sample <f>          # human accuracy review in a local web app (offline)
+openhouse ready                                       # install the agent skill (offline, top-level)
 ```
 
 `pull` is the network step; `parse` is purely local; `read` is a pure function over
@@ -195,23 +200,28 @@ filing.
 
 ---
 
-## 3. Command: `openhouse pull`
+## 3. Command: `openhouse clerk pull`
+
+The CLI is **source-scoped** (#174): a source noun (`clerk` / `fec`) sits above
+the pipeline verbs, so the House-Clerk acquisition path is `openhouse clerk pull`.
+(`fec` is scaffolded but not implemented — see #167; the FEC raw lane reserves
+`raw/fec/<cycle>/`.) The bare pre-namespace form (`openhouse pull …`) is removed.
 
 ```
-openhouse pull 2024
-openhouse pull 2019-2024
-openhouse pull 2024 --types ptr
-openhouse pull 2024 --index-only
+openhouse clerk pull 2024
+openhouse clerk pull 2019-2024
+openhouse clerk pull 2024 --types ptr
+openhouse clerk pull 2024 --index-only
 ```
 
 **Behavior**, per year in range:
 
-1. Download `<YEAR>FD.zip`; extract `<YEAR>FD.xml` (+ `.txt`) into `raw/<year>/`.
+1. Download `<YEAR>FD.zip`; extract `<YEAR>FD.xml` (+ `.txt`) into `raw/clerk/<year>/`.
 2. Parse the index just enough to enumerate `(DocID, FilingType, year)` targets.
-3. Download each referenced PDF into `raw/<year>/<family>/<DocID>.pdf`
+3. Download each referenced PDF into `raw/clerk/<year>/<family>/<DocID>.pdf`
    (`family` = `ptr` if `FilingType == 'P'` else `fd` — the §2.2 routing rule),
    unless `--index-only`.
-4. Write/update `raw/<year>/pull-manifest.json` (see §6.3).
+4. Write/update `raw/clerk/<year>/pull-manifest.json` (see §6.3).
 
 **Requirements:**
 
@@ -255,15 +265,15 @@ openhouse pull 2024 --index-only
 
 ---
 
-## 4. Command: `openhouse parse`
+## 4. Command: `openhouse clerk parse`
 
 ```
-openhouse parse 2024
-openhouse parse 2019-2024
-openhouse parse 2024 --types fd
+openhouse clerk parse 2024
+openhouse clerk parse 2019-2024
+openhouse clerk parse 2024 --types fd
 ```
 
-**Behavior**, per year in range — entirely offline, reading only `raw/<year>/`:
+**Behavior**, per year in range — entirely offline, reading only `raw/clerk/<year>/`:
 
 1. Parse `<YEAR>FD.xml` → one **filing metadata** record per entry (§6.1),
    including the computed `filer_id` (§6.2).
@@ -274,10 +284,10 @@ openhouse parse 2024 --types fd
      `missing`. Extraction-yields-text is authoritative; the DocID prefix is a fast
      pre-filter only (§2.2).
    - `efiled` → extract structured fields per form family (§6.1 PTR / FD schedules).
-   - `scanned` → record in `parsed/<year>/unparsed-manifest.json`, emit the metadata
-     record with `pdf_class: "scanned"` and `body: null`. **No OCR in v1.**
-4. Write normalized JSON to `parsed/<year>/` (§6.4 layout).
-5. Write `parsed/<year>/parse-manifest.json` with counts, identity warnings, and a
+   - `scanned` → record in `parsed/clerk/<year>/unparsed-manifest.json`, emit the
+     metadata record with `pdf_class: "scanned"` and `body: null`. **No OCR in v1.**
+4. Write normalized JSON to `parsed/clerk/<year>/` (§6.4 layout).
+5. Write `parsed/clerk/<year>/parse-manifest.json` with counts, identity warnings, and a
    parse-quality summary.
 
 **Requirements:**
@@ -298,20 +308,20 @@ openhouse parse 2024 --types fd
 
 ---
 
-## 5. Command: `openhouse read`
+## 5. Command: `openhouse clerk read`
 
-The query surface. Offline, read-only, a pure function over `parsed/` — never
-touches `raw/` or the network, never writes anything. **No database**: at this
+The query surface. Offline, read-only, a pure function over `parsed/clerk/` —
+never touches `raw/` or the network, never writes anything. **No database**: at this
 scale (~2,250 filings and low-tens-of-thousands of transactions per year), scanning
 the JSON in place is milliseconds, and skipping a load step means `read` can never
 disagree with the last `parse`. (If cross-year analytics ever get heavy, DuckDB can
 query the JSON files where they sit — still no load step.)
 
 ```
-openhouse read filings 2024 --type ptr --member adams       # filtered filing index
-openhouse read filing 20024277                              # one filing: metadata + body
-openhouse read trades 2019-2024 --ticker ALB --owner SP     # flattened transactions across years
-openhouse read summary 2024                                 # counts: types, efiled/scanned, errors, warnings
+openhouse clerk read filings 2024 --type ptr --member adams       # filtered filing index
+openhouse clerk read filing 20024277                              # one filing: metadata + body
+openhouse clerk read trades 2019-2024 --ticker ALB --owner SP     # flattened transactions across years
+openhouse clerk read summary 2024                                 # counts: types, efiled/scanned, errors, warnings
 ```
 
 **Subcommands:**
@@ -340,7 +350,7 @@ openhouse read summary 2024                                 # counts: types, efi
 
 ---
 
-## 5.5 Command: `openhouse inspect`
+## 5.5 Command: `openhouse clerk inspect`
 
 The accuracy-review surface. `pull`/`parse`/`read` move filings *through* the
 pipeline; `inspect` asks whether the filings that came out are **right**. It
@@ -351,8 +361,8 @@ browser hitting `127.0.0.1`; no new Python deps (stdlib `http.server` +
 `pdfplumber`).
 
 ```
-openhouse inspect 2022 --sample 0.05                 # review a stratified ~5% of 2022
-openhouse inspect 2022 --sample 0.1 --seed 7         # a different reproducible draw
+openhouse clerk inspect 2022 --sample 0.05                 # review a stratified ~5% of 2022
+openhouse clerk inspect 2022 --sample 0.1 --seed 7         # a different reproducible draw
 ```
 
 **Why it exists:** a `parse_status: ok` filing can still be wrong — most visibly
@@ -432,7 +442,7 @@ bundle).
   "state_district": { "raw": "GA12", "state": "GA", "district": 12 },
   "filing_type": { "code": "P", "label": "periodic_transaction_report" },
   "filing_date": "2024-01-08",
-  "source_pdf": "raw/2024/ptr/20024277.pdf",
+  "source_pdf": "raw/clerk/2024/ptr/20024277.pdf",
   "pdf_class": "efiled",
   "parse_status": "ok"
 }
@@ -604,29 +614,42 @@ body with `parse_status: "ok"`.
 
 ### 6.4 Directory layout
 
+The layout is **source-scoped** (#174): each source owns a `<source>/` level
+under both `raw/` and `parsed/`. The clerk pipeline writes under `clerk/`;
+`fec pull` (#170) now creates `raw/fec/<cycle>/` (the four bulk files +
+`fec-pull-manifest.json`); `parsed/fec/<cycle>/` stays **reserved** for the FEC
+normalization sub-issue. The CC0 congress-legislators reference set stays at the
+un-scoped `raw/reference/` — it is shared bulk data, not a source's disclosures,
+so it is not relocated.
+
 ```
 <data-dir>/
   raw/
-    <year>/
-      <year>FD.xml
-      <year>FD.txt
-      pull-manifest.json
-      ptr/<DocID>.pdf
-      fd/<DocID>.pdf
+    clerk/
+      <year>/
+        <year>FD.xml
+        <year>FD.txt
+        pull-manifest.json
+        ptr/<DocID>.pdf
+        fd/<DocID>.pdf
+    fec/<cycle>/            # FEC bulk lane (#170): cn.txt ccl.txt cm.txt itpas2.txt + fec-pull-manifest.json
+    reference/              # CC0 congress-legislators bulk files (un-scoped, shared)
   parsed/
-    <year>/
-      filings.json            # array of filing-metadata records (the index, normalized)
-      ptr/<DocID>.json        # one file per PTR body
-      fd/<DocID>.json         # one file per annual-FD body
-      parse-manifest.json
-      unparsed-manifest.json  # scanned/skipped + error filings, with reasons
+    clerk/
+      <year>/
+        filings.json            # array of filing-metadata records (the index, normalized)
+        ptr/<DocID>.json        # one file per PTR body
+        fd/<DocID>.json         # one file per annual-FD body
+        parse-manifest.json
+        unparsed-manifest.json  # scanned/skipped + error filings, with reasons
+    fec/<cycle>/           # reserved for the FEC lane (#167) — not yet created
 ```
 
 > One file per filing body keeps `parse` incremental and diffs readable; `filings.json`
 > is the single roll-up index for the year. ✅ Sized: ~2,250 filings in 2024 —
 > thousands of small JSONs per year is fine.
 
-The data root (`<data-dir>`) resolves with a uniform precedence across all three
+The data root (`<data-dir>`) resolves with a uniform precedence across all
 commands (#50): the explicit `--data-dir` flag → the `OPENHOUSE_DATA_DIR`
 environment variable → the `~/.openhouse` default (#80, a single per-user
 dotfolder in `$HOME`, expanded via `Path.home()`). Because the default is
@@ -635,6 +658,23 @@ working directory lands in one stable store — no separate empty `./data` islan
 per cwd. When the default is in use and a non-empty `./data` exists in the cwd
 (a leftover from before #80), openhouse prints a one-time stderr note that it is
 being shadowed; it does not auto-migrate or read from `./data`.
+
+**Migrating from the pre-namespace layout (#174).** A store created before the
+source namespace has bare year dirs directly under `raw/` and `parsed/`. The
+migration is a one-time **offline `mv`** — relocating bytes, not re-crawling:
+
+```
+mv ~/.openhouse/raw/<year>    ~/.openhouse/raw/clerk/<year>
+mv ~/.openhouse/parsed/<year> ~/.openhouse/parsed/clerk/<year>
+```
+
+When openhouse detects a legacy `raw/<YYYY>/` it prints this `mv` once to stderr
+as a **nudge** — it never relocates data itself (same spirit as the `./data`
+shadow note above). After the `mv`, re-run `openhouse clerk parse <year>`: the
+move relocates `filings.json` but not the `source_pdf` path each record embeds
+(it still reads `raw/<year>/…`), and the schema-generation bump (9→10, §6.5)
+makes `read`'s schema-drift warning surface the stale tree until the re-parse
+refreshes those paths.
 
 ### 6.5 Manifests
 
@@ -764,12 +804,12 @@ e-filed FD, `8220122` paper FD, `30022163` extension, `7940` type-W):
 
 ## 11. v1 acceptance (definition of done)
 
-- `openhouse pull 2024` downloads the index + all e-filed PTR and FD PDFs, resumably,
-  with a complete `pull-manifest.json`.
-- `openhouse parse 2024` produces `filings.json` plus per-body JSON for every e-filed
-  filing, with scanned filings catalogued (not parsed) in `unparsed-manifest.json`,
-  and identity warnings surfaced per §6.2.
-- `openhouse read trades 2024 --ticker <X>` answers from parsed data alone — no
+- `openhouse clerk pull 2024` downloads the index + all e-filed PTR and FD PDFs,
+  resumably, with a complete `pull-manifest.json`.
+- `openhouse clerk parse 2024` produces `filings.json` plus per-body JSON for every
+  e-filed filing, with scanned filings catalogued (not parsed) in
+  `unparsed-manifest.json`, and identity warnings surfaced per §6.2.
+- `openhouse clerk read trades 2024 --ticker <X>` answers from parsed data alone — no
   network, no opening PDFs by hand — in both JSON and `--table` form.
 - A multi-year range (`2019-2024`) works for all three commands.
 - Re-running any command is idempotent; `parse` and `read` need no network.
@@ -799,3 +839,231 @@ e-filed FD, `8220122` paper FD, `30022163` extension, `7940` type-W):
 |---|---|
 | M8 | Skill prose + `openhouse ready` (§8) — ✅ delivered v0.5.0 (#14) |
 | M9+ | OCR backlog (§7, still deferred). ✅ delivered v0.5.0: bioguide identity join (#16), structured E–J schedules (#17), `OPENHOUSE_DATA_DIR` (#50), release drift guard (#43), PTR exact-dollar amounts (#49). Remaining: OCR, distribution (PyPI/plugin) if ever wanted. |
+
+---
+
+## 13. The FEC lane — Path 1: connected-SSF PAC money
+
+A **second data source** (#167), adjacent to the Clerk lane: the Clerk lane
+answers *what a member owns and trades*; the FEC lane answers *who funds them
+institutionally*, via the channel that is both legally real and cleanly
+traceable — **connected-SSF PAC money** ("Path 1"). The source-namespace work
+(§3/§4/§6.4, #174) and this scaffold (#168) lay the contract; acquisition,
+normalization, and query are later #167 sub-issues. This section is the contract,
+not the implementation.
+
+### 13.1 The mechanic
+
+Corporations and unions cannot give to federal candidates directly (Tillman Act
+1907; FECA). The traceable institutional money is the **separate segregated
+fund (SSF)**: a corporation, trade/membership group, cooperative, or labor
+organization sponsors a PAC, which gives **hard money** to the member. FEC
+discloses each such receipt on the **member's principal-committee Schedule A,
+line 11C** (receipts from other political committees); the **sponsor link** lives
+on the *contributing* committee's record (`connected_organization_name`,
+`organization_type`). Path 1 is exactly the **connected SSFs** —
+`organization_type ∈ {C, T, L, M, V, W}`. Labor (`L`) is included as
+institutional PAC money and tagged by type so `read` can slice it.
+
+### 13.2 Source & footing
+
+- **Source:** the **OpenFEC** API plus FEC **bulk** files (structured JSON/CSV —
+  normalization, not OCR; no extraction heroics).
+- **Public domain.** FEC bulk/API data carries **no** commercial-use restriction
+  (unlike Clerk FD, §1). The one statutory bar is **52 U.S.C. §30111(a)**:
+  contributor information may not be **sold or used** to solicit contributions or
+  for any commercial purpose. README and `--help` state this (full wording in
+  #173); records carry a `provenance` tag (`"fec"` vs the Clerk lane's `"clerk"`)
+  so the two legal footings stay distinguishable downstream.
+- **Near-complete, low residual.** The sub-$200 itemization cliff that wrecks
+  individual-donor completeness barely touches PACs (a PAC gift worth tracking is
+  well over $200, so it is itemized) — so `read` can make a real
+  soundness/completeness claim, as the repo demands.
+- **The join already exists.** `congress-legislators` (`id.fec[]`, CC0, already
+  fetched by `pull`/used for the bioguide ladder §6.2) anchors member → FEC
+  candidate → committee **offline**, no fuzzy matching.
+
+### 13.3 `organization_type` code table
+
+| code | sponsor class |
+|------|---------------|
+| `C` | corporation |
+| `T` | trade |
+| `L` | labor |
+| `M` | membership |
+| `V` | cooperative |
+| `W` | corporation without capital stock |
+
+The raw single-letter code is preserved on the record beside the normalized
+label (`organization_type_raw`), so an unmapped or blank type is never an error
+(the FilingType pattern, §2.3: raw alongside normalized, never a dropped record).
+
+### 13.4 Year → cycle convention
+
+FEC reports on **2-year cycles**, labelled by their **even ending year**.
+`openhouse fec <verb>` takes the **same `<year>` / `<year>-<year>`** argument as
+the clerk lane — **no `--cycle` vocabulary**. Internally each named year is
+**expanded to its enclosing cycle** (odd → next even: 2023 → 2024; even → itself:
+2024 → 2024), emitting a one-line **stderr** note when expansion happens (the §5
+`trades` filing-year-note pattern). So `fec pull 2023` and `fec pull 2024` both
+resolve to the **2024 cycle**, and `2023-2024` is a single cycle. The expansion
+lives in a small unit-testable helper (`cli.year_to_cycle` /
+`expand_years_to_cycles`).
+
+### 13.5 Data layout (cycle-keyed)
+
+The FEC lane is **cycle-keyed on disk** (vs the clerk lane's per-coverage-year):
+`raw/fec/<cycle>/` + `parsed/fec/<cycle>/` (§6.4), built by
+`cli.fec_raw_dir` / `cli.fec_parsed_dir` with the same
+`--data-dir` → `OPENHOUSE_DATA_DIR` → `~/.openhouse` precedence as everything
+else.
+
+### 13.5a Verified facts about the FEC bulk source (`fec pull`, #170)
+
+From the by-hand polite probe of the 2024 cycle (carried into the trimmed
+fixtures under `tests/fixtures/fec/`):
+
+- **URLs & redirect.** `https://www.fec.gov/files/bulk-downloads/<cycle>/<file>`
+  returns a **302** to an AWS GovCloud S3 host
+  (`cg-…s3-us-gov-west-1.amazonaws.com/bulk-downloads/<cycle>/<file>`). The
+  client follows redirects; the manifest records both the requested `www.fec.gov`
+  URL and the final storage URL.
+- **Zip name vs. inner member.** The *zip* carries the 2-digit cycle suffix
+  (`cn24.zip`); the *inner member* does **not** — it is the bare stem: `cn.txt`,
+  `ccl.txt`, `cm.txt`, and the irregular **`itpas2.txt`** for `pas2<yy>.zip`.
+- **Files are pipe-delimited (`|`), LF-terminated, latin-1**, with the column
+  orders from the FEC data-dictionary pages: `cn` 15 cols (CAND_ID … CAND_PCC at
+  col 10 = principal committee), `ccl` 7 cols (CAND_ID, CAND_ELECTION_YR,
+  FEC_ELECTION_YR, CMTE_ID, CMTE_TP, **CMTE_DSGN** = `P` for principal,
+  LINKAGE_ID), `cm` 15 cols (CMTE_ID, CMTE_NM, … CMTE_TP col 10, **ORG_TP** col
+  13, CONNECTED_ORG_NM col 14, CAND_ID col 15), `itpas2` 22 cols (CMTE_ID =
+  contributor, IMAGE_NUM col 5, TRANSACTION_DT col 14, TRANSACTION_AMT col 15,
+  **OTHER_ID col 16 = recipient committee**, CAND_ID col 17, TRAN_ID col 18).
+- **Real 2024 sizes:** `cn24.zip` 356 KB, `ccl24.zip` 94 KB, `cm24.zip` 883 KB,
+  `pas224.zip` ~24.7 MB (the largest — expected, well under the 150 MB park cap).
+- **`cm` has no affiliated-committee column** — the public committee master file
+  does not carry one, so `FecCommittee.affiliation` has no bulk source and is
+  left `None` for now.
+
+### 13.6 Records & schema version
+
+The contract (`openhouse/schemas.py`): `FecCommittee` (committee id, name,
+`connected_organization_name`, `organization_type` + `_raw`, `committee_type`,
+`affiliation`); `FecPacContribution` (recipient/contributor committee ids,
+`amount`, `date`, `line` `F3-11C`, and the `image_number` + `transaction_id`
+**double-entry key** — the same receipt is disclosed on both committees, and the
+pair lets a later pass de-duplicate the halves rather than double-count); and the
+member↔candidate link `FecMemberCandidateLink` (`bioguide_id`, `candidate_id`,
+`committee_id`).
+
+These are versioned by **`FEC_SCHEMA_VERSION`**, **independent of** the Clerk
+lane's `SCHEMA_VERSION` — the same independence as `inspect`'s
+`LABELS_SCHEMA_VERSION` (a reshape in one lane must not force a re-parse of the
+other). It starts at `1` and is stamped into the FEC lane's own parse-manifest
+(a later sub-issue), the way `SCHEMA_VERSION` is stamped into the clerk
+parse-manifest (§6.5). The release fingerprint guard (§GH-0043) auto-discovers
+**all** models in `schemas.py`, so adding the FEC models refreshed
+`schemas.fingerprint` (deliberately, in the same change) — that guard tracks
+module structure, not lane membership.
+
+### 13.7 Explicit non-goals (so the residual stays honest)
+
+Out of scope for Path 1 (cross-ref #167): **Path 2** (employee-bundling by
+free-text `employer` — lossy, and legally *not* institutional money); **industry
+classification** (needs OpenSecrets CRP codes, which are non-commercial /
+educational-only — importing them would re-import a license restriction we avoid;
+we roll up to **organization**, never industry); **super PACs / IEs /
+501(c)(4)** (treasury money that can't legally reach the member, or isn't
+disclosed). `read` output will state plainly that it shows the *disclosed,
+candidate-side* slice, not total influence.
+
+### 13.8 `fec parse` — normalization contract (#171)
+
+Offline, deterministic normalization of the bulk files (§13.5a) into
+`parsed/fec/<cycle>/`. Reads only `raw/fec/<cycle>/` (what `fec pull` extracted);
+no network, no wall clock (the single entry-time `generated_at` is threaded in,
+§9). A re-run from the same `raw/` is byte-identical (re-parse, not migrate).
+
+**Outputs** (`parsed/fec/<cycle>/`):
+
+- `committees.json` — the **contributing** connected-SSF committees behind the
+  kept contributions (`FecCommittee`), in first-seen order. The full `cm` master
+  is not emitted (it is tens of thousands of rows; we keep the tiny Path-1 slice).
+- `contributions.json` — the kept Path-1 contributions (`FecPacContribution`),
+  in first-appearance `itpas2` row order.
+- `member-links.json` — the resolved `FecMemberCandidateLink`s, with
+  `committee_id` filled from `ccl` (candidate→principal committee, designation
+  `P`). An unresolved link is **not** written here (no sentinel committee leaks
+  downstream); it lands in the residual instead.
+- `fec-parse-manifest.json` — `FEC_SCHEMA_VERSION`, counts (committees total /
+  contributing, contributions kept / filtered, `by_org_type`, filtered-by-reason,
+  member links resolved / unresolved, members without an FEC id, `pac_limit`
+  breaches), the `pac_limit_breaches` detail, and the affiliation limitation note.
+- `fec-unparsed-manifest.json` — every excluded contribution, every unresolved
+  member link, every member with no FEC id, each with a `reason` — never a silent
+  gap.
+
+**Path-1 filter:** keep a contribution iff its **contributing** committee (joined
+via `cm`) has `organization_type ∈ {C, T, L, M, V, W}` (§13.3); retain the
+normalized `organization_type` per kept record so `read` can slice corporate vs
+labor. Residual reasons: `unresolved_committee` (contributor absent from `cm` — no
+org type to test) and `not_connected_ssf` (in `cm` but not a connected SSF —
+leadership/non-connected/ideological/super PAC).
+
+**Org rollup key:** `connected_organization_name` if populated (it **is** in bulk
+`cm` — the API-side "it's null" note was an artifact, #170), else the committee
+`name`.
+
+**Canonical source / dedup:** `itpas2` is the single committee→candidate file —
+there is no recipient-side file to cross-check, so the API-era double-entry
+cross-check does **not** apply. Rows are deduped by `transaction_id` (a literal
+repeated `TRAN_ID`; first wins). The **$10k/PAC/cycle invariant** is a *sanity
+flag*: a contributor→recipient cycle total over $10k is flagged in the manifest,
+**never dropped** — it may legitimately trip across an un-collapsed affiliated
+pair (below).
+
+**Affiliation — DECLARED LIMITATION, not a gap.** Bulk `cm` has **no
+affiliated-committee column** (§13.5a), so `FecCommittee.affiliation` has no bulk
+source and is left `None`; the affiliated-PAC collapse **cannot** be done from
+bulk data and is **not faked**. Consequence (stated in both manifests): a member's
+org-level totals may count a parent and its subsidiary PAC as two separate orgs,
+and the $10k invariant may legitimately trip across that un-collapsed pair.
+Sourcing affiliation is a future enhancement.
+
+### 13.9 `fec read` — query contract (#172)
+
+Offline, read-only, deterministic query over `parsed/fec/<cycle>/` (what `fec
+parse` wrote) — the FEC analogue of the clerk lane's `read` (§5). A **pure
+function**: it never touches `raw/` or the network and never writes a byte. Two
+subcommands, inverses over the same kept Path-1 contribution set; both take the
+**same `<year>` / `<year>-<year>`** argument, expanded to the enclosing cycle(s)
+(§13.4) with the one-line stderr expansion note.
+
+- `openhouse fec read donors <member> <year|range>` — the connected-SSF PACs that
+  gave to the member, **rolled up to organization** (key = `org_rollup_key`:
+  `connected_organization_name` else committee `name`, §13.8), each
+  `{org, organization_type, total, n_contributions}`, sorted by total desc (org
+  name asc tie-break). `--member` matches case-insensitive substring over the
+  member-link `bioguide_id` — the only identity the link carries (name-string
+  matching, not true identity — §6.2). `--org-type` slices the tagged set to one
+  connected-SSF class (the §13.3 labels, e.g. `labor`); an unknown class fails
+  loudly (exit 2).
+- `openhouse fec read pac <org> <year|range>` — the inverse: the members an org's
+  PAC(s) supported, each `{bioguide_id, total, n_contributions}`, sorted by total
+  desc. `<org>` matches case-insensitive substring over the org rollup key (a
+  fuzzy name match, not verified identity). A receipt whose recipient committee
+  has no member link is reported as an `unattributed` count on stderr, never
+  dropped.
+
+**Sound-or-complete (every response declares its guarantee, §CLAUDE.md).** The
+answer is **complete over the Path-1 itemized connected-SSF receipts** `fec parse`
+kept; the **residual** (stderr, reflected in `--table` runs too) names the
+filtered contributions the parse counted (`not_connected_ssf` +
+`unresolved_committee`), the affiliation-not-collapsed caveat (§13.8), and the
+framing from §13.7: this is the **disclosed candidate-side** hard-money slice, not
+total influence — no dark money, no super-PAC IE, no soft money. The residual
+numbers are read straight from each cycle's `fec-parse-manifest.json` counts
+(never recomputed). JSON to stdout, prose/guarantee/residual to stderr, exit 0
+unless a query genuinely failed (an un-parsed cycle in a range is a clean skip
+reported on stderr; a data dir with **no** parsed cycles for the range fails
+loudly — exit 1 — rather than report a misleading empty match).

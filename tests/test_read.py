@@ -568,7 +568,7 @@ def test_trades_residual_reconciles_parsed_plus_unparsed_equals_total():
     from openhouse.read import _residual_counts
 
     manifest = json.loads(
-        (FIXTURES / "2021" / "parse-manifest.json").read_text()
+        (FIXTURES / "clerk" / "2021" / "parse-manifest.json").read_text()
     )
     total = manifest["counts"]["total"]
     r = _residual_counts(FIXTURES.parent, [2021])
@@ -617,7 +617,7 @@ def test_no_schema_warning_when_versions_match(tmp_path, capsys):
 
     dd = tmp_path / "data"
     shutil.copytree(FIXTURES, dd / "parsed")
-    mpath = dd / "parsed" / "2021" / "parse-manifest.json"
+    mpath = dd / "parsed" / "clerk" / "2021" / "parse-manifest.json"
     manifest = json.loads(mpath.read_text())
     manifest["schema_version"] = SCHEMA_VERSION
     mpath.write_text(json.dumps(manifest))

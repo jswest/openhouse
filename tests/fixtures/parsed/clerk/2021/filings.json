@@ -8,7 +8,7 @@
     "state_district": { "raw": "NY01", "state": "NY", "district": 1 },
     "filing_type": { "code": "P", "label": "periodic_transaction_report" },
     "filing_date": "2021-03-15",
-    "source_pdf": "raw/2021/ptr/20100001.pdf",
+    "source_pdf": "raw/clerk/2021/ptr/20100001.pdf",
     "pdf_class": "efiled",
     "parse_status": "ok"
   },
@@ -21,7 +21,7 @@
     "state_district": { "raw": "CA12", "state": "CA", "district": 12 },
     "filing_type": { "code": "P", "label": "periodic_transaction_report" },
     "filing_date": "2021-07-01",
-    "source_pdf": "raw/2021/ptr/20100002.pdf",
+    "source_pdf": "raw/clerk/2021/ptr/20100002.pdf",
     "pdf_class": "efiled",
     "parse_status": "ok"
   },
@@ -33,7 +33,7 @@
     "state_district": { "raw": "TX05", "state": "TX", "district": 5 },
     "filing_type": { "code": "O", "label": "annual_report" },
     "filing_date": "2021-05-15",
-    "source_pdf": "raw/2021/fd/10100003.pdf",
+    "source_pdf": "raw/clerk/2021/fd/10100003.pdf",
     "pdf_class": "efiled",
     "parse_status": "ok"
   },
@@ -45,7 +45,7 @@
     "state_district": { "raw": "NY07", "state": "NY", "district": 7 },
     "filing_type": { "code": "P", "label": "periodic_transaction_report" },
     "filing_date": "2021-09-20",
-    "source_pdf": "raw/2021/ptr/8100004.pdf",
+    "source_pdf": "raw/clerk/2021/ptr/8100004.pdf",
     "pdf_class": "scanned",
     "parse_status": "ok"
   }

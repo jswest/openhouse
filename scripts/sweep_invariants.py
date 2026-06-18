@@ -132,9 +132,9 @@ def fd_item_violations(letter, item):
 
 def iter_violations(data_dir: Path):
     """Yield an enriched violation dict for every invariant breach under data_dir."""
-    parsed = data_dir / "parsed"
+    parsed = data_dir / "parsed" / "clerk"
     if not parsed.is_dir():
-        raise FileNotFoundError(f"no parsed/ directory under {data_dir}")
+        raise FileNotFoundError(f"no parsed/clerk/ directory under {data_dir}")
     for year_dir in sorted(p for p in parsed.iterdir() if p.is_dir()):
         year = year_dir.name
         _warn_schema(year_dir)

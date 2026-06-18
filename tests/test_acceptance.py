@@ -52,7 +52,7 @@ FIXED_TS = "2026-06-12T00:00:00"
 
 
 def _seed(data_dir: Path) -> None:
-    raw = data_dir / "raw" / str(YEAR)
+    raw = data_dir / "raw" / "clerk" / str(YEAR)
     (raw / "fd").mkdir(parents=True, exist_ok=True)
     (raw / "ptr").mkdir(parents=True, exist_ok=True)
     (raw / f"{YEAR}FD.xml").write_text(_INDEX_XML)
@@ -71,7 +71,7 @@ def test_parse_reconciles_with_no_gaps(tmp_path):
     _parse(tmp_path)
 
     manifest = json.loads(
-        (tmp_path / "parsed" / str(YEAR) / "parse-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / str(YEAR) / "parse-manifest.json").read_text()
     )
     counts = manifest["counts"]
     assert counts["total"] == 2
@@ -80,7 +80,7 @@ def test_parse_reconciles_with_no_gaps(tmp_path):
     assert counts["by_pdf_class"].get("efiled") == 2
 
     unparsed = json.loads(
-        (tmp_path / "parsed" / str(YEAR) / "unparsed-manifest.json").read_text()
+        (tmp_path / "parsed" / "clerk" / str(YEAR) / "unparsed-manifest.json").read_text()
     )["unparsed"]
     assert unparsed == []
 
@@ -91,7 +91,7 @@ def test_fd_schedule_body_flows_into_read_filing(tmp_path, capsys):
     _parse(tmp_path)
 
     body = json.loads(
-        (tmp_path / "parsed" / str(YEAR) / "fd" / "10042852.json").read_text()
+        (tmp_path / "parsed" / "clerk" / str(YEAR) / "fd" / "10042852.json").read_text()
     )
     assert sorted(body["schedules"]) == ["A", "C", "E", "F"]
 

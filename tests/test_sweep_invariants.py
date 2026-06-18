@@ -120,7 +120,7 @@ def test_fd_schedule_b_date_exclusive_flagged():
 # --- iter_violations end-to-end ---------------------------------------------
 
 def test_iter_violations_walks_corpus(tmp_path):
-    ptr_dir = tmp_path / "parsed" / "2024" / "ptr"
+    ptr_dir = tmp_path / "parsed" / "clerk" / "2024" / "ptr"
     ptr_dir.mkdir(parents=True)
     bad = _clean_txn()
     bad["ticker"] = "WRONG"

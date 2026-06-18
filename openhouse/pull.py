@@ -267,7 +267,7 @@ def pull_index_year(
     a deliberate ``--force`` choice). Returns a small status dict for logging /
     manifests.
     """
-    year_dir = data_dir / "raw" / str(year)
+    year_dir = data_dir / "raw" / "clerk" / str(year)
     xml_path = year_dir / f"{year}FD.xml"
 
     if xml_path.exists() and not force:
@@ -403,7 +403,7 @@ def pull_pdfs_year(
     recorded gap, never a silent one) and the run continues. A 403 / exhausted
     backoff still raises :class:`PullError` via :func:`polite_get`.
     """
-    year_dir = data_dir / "raw" / str(year)
+    year_dir = data_dir / "raw" / "clerk" / str(year)
     xml_path = year_dir / f"{year}FD.xml"
     if not xml_path.exists():
         raise PullError(
@@ -758,7 +758,7 @@ def pull(
                     f"warning: could not fetch the CC0 congress-legislators "
                     f"reference set ({exc}); continuing WITHOUT bioguide identity "
                     f"enrichment (as with --no-reference). Filers will be "
-                    f"name-keyed only; re-run `openhouse pull` to retry the fetch.",
+                    f"name-keyed only; re-run `openhouse clerk pull` to retry the fetch.",
                     file=sys.stderr,
                 )
         for i, year in enumerate(years):
@@ -772,7 +772,7 @@ def pull(
                 # Targeted pull (#78): narrow to the requested DocID(s) for this
                 # year, computed AFTER the index is on disk (it is what we read).
                 # ``None`` = the whole year (the default, unchanged).
-                xml_path = data_dir / "raw" / str(year) / f"{year}FD.xml"
+                xml_path = data_dir / "raw" / "clerk" / str(year) / f"{year}FD.xml"
                 selected_doc_ids: Optional[set[str]] = None
                 if doc_id:
                     selected_doc_ids = {doc_id}
