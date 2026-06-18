@@ -838,3 +838,113 @@ e-filed FD, `8220122` paper FD, `30022163` extension, `7940` type-W):
 |---|---|
 | M8 | Skill prose + `openhouse ready` (§8) — ✅ delivered v0.5.0 (#14) |
 | M9+ | OCR backlog (§7, still deferred). ✅ delivered v0.5.0: bioguide identity join (#16), structured E–J schedules (#17), `OPENHOUSE_DATA_DIR` (#50), release drift guard (#43), PTR exact-dollar amounts (#49). Remaining: OCR, distribution (PyPI/plugin) if ever wanted. |
+
+---
+
+## 13. The FEC lane — Path 1: connected-SSF PAC money
+
+A **second data source** (#167), adjacent to the Clerk lane: the Clerk lane
+answers *what a member owns and trades*; the FEC lane answers *who funds them
+institutionally*, via the channel that is both legally real and cleanly
+traceable — **connected-SSF PAC money** ("Path 1"). The source-namespace work
+(§3/§4/§6.4, #174) and this scaffold (#168) lay the contract; acquisition,
+normalization, and query are later #167 sub-issues. This section is the contract,
+not the implementation.
+
+### 13.1 The mechanic
+
+Corporations and unions cannot give to federal candidates directly (Tillman Act
+1907; FECA). The traceable institutional money is the **separate segregated
+fund (SSF)**: a corporation, trade/membership group, cooperative, or labor
+organization sponsors a PAC, which gives **hard money** to the member. FEC
+discloses each such receipt on the **member's principal-committee Schedule A,
+line 11C** (receipts from other political committees); the **sponsor link** lives
+on the *contributing* committee's record (`connected_organization_name`,
+`organization_type`). Path 1 is exactly the **connected SSFs** —
+`organization_type ∈ {C, T, L, M, V, W}`. Labor (`L`) is included as
+institutional PAC money and tagged by type so `read` can slice it.
+
+### 13.2 Source & footing
+
+- **Source:** the **OpenFEC** API plus FEC **bulk** files (structured JSON/CSV —
+  normalization, not OCR; no extraction heroics).
+- **Public domain.** FEC bulk/API data carries **no** commercial-use restriction
+  (unlike Clerk FD, §1). The one statutory bar is **52 U.S.C. §30111(a)**:
+  contributor information may not be **sold or used** to solicit contributions or
+  for any commercial purpose. README and `--help` state this (full wording in
+  #173); records carry a `provenance` tag (`"fec"` vs the Clerk lane's `"clerk"`)
+  so the two legal footings stay distinguishable downstream.
+- **Near-complete, low residual.** The sub-$200 itemization cliff that wrecks
+  individual-donor completeness barely touches PACs (a PAC gift worth tracking is
+  well over $200, so it is itemized) — so `read` can make a real
+  soundness/completeness claim, as the repo demands.
+- **The join already exists.** `congress-legislators` (`id.fec[]`, CC0, already
+  fetched by `pull`/used for the bioguide ladder §6.2) anchors member → FEC
+  candidate → committee **offline**, no fuzzy matching.
+
+### 13.3 `organization_type` code table
+
+| code | sponsor class |
+|------|---------------|
+| `C` | corporation |
+| `T` | trade |
+| `L` | labor |
+| `M` | membership |
+| `V` | cooperative |
+| `W` | corporation without capital stock |
+
+The raw single-letter code is preserved on the record beside the normalized
+label (`organization_type_raw`), so an unmapped or blank type is never an error
+(the FilingType pattern, §2.3: raw alongside normalized, never a dropped record).
+
+### 13.4 Year → cycle convention
+
+FEC reports on **2-year cycles**, labelled by their **even ending year**.
+`openhouse fec <verb>` takes the **same `<year>` / `<year>-<year>`** argument as
+the clerk lane — **no `--cycle` vocabulary**. Internally each named year is
+**expanded to its enclosing cycle** (odd → next even: 2023 → 2024; even → itself:
+2024 → 2024), emitting a one-line **stderr** note when expansion happens (the §5
+`trades` filing-year-note pattern). So `fec pull 2023` and `fec pull 2024` both
+resolve to the **2024 cycle**, and `2023-2024` is a single cycle. The expansion
+lives in a small unit-testable helper (`cli.year_to_cycle` /
+`expand_years_to_cycles`).
+
+### 13.5 Data layout (cycle-keyed)
+
+The FEC lane is **cycle-keyed on disk** (vs the clerk lane's per-coverage-year):
+`raw/fec/<cycle>/` + `parsed/fec/<cycle>/` (§6.4), built by
+`cli.fec_raw_dir` / `cli.fec_parsed_dir` with the same
+`--data-dir` → `OPENHOUSE_DATA_DIR` → `~/.openhouse` precedence as everything
+else.
+
+### 13.6 Records & schema version
+
+The contract (`openhouse/schemas.py`): `FecCommittee` (committee id, name,
+`connected_organization_name`, `organization_type` + `_raw`, `committee_type`,
+`affiliation`); `FecPacContribution` (recipient/contributor committee ids,
+`amount`, `date`, `line` `F3-11C`, and the `image_number` + `transaction_id`
+**double-entry key** — the same receipt is disclosed on both committees, and the
+pair lets a later pass de-duplicate the halves rather than double-count); and the
+member↔candidate link `FecMemberCandidateLink` (`bioguide_id`, `candidate_id`,
+`committee_id`).
+
+These are versioned by **`FEC_SCHEMA_VERSION`**, **independent of** the Clerk
+lane's `SCHEMA_VERSION` — the same independence as `inspect`'s
+`LABELS_SCHEMA_VERSION` (a reshape in one lane must not force a re-parse of the
+other). It starts at `1` and is stamped into the FEC lane's own parse-manifest
+(a later sub-issue), the way `SCHEMA_VERSION` is stamped into the clerk
+parse-manifest (§6.5). The release fingerprint guard (§GH-0043) auto-discovers
+**all** models in `schemas.py`, so adding the FEC models refreshed
+`schemas.fingerprint` (deliberately, in the same change) — that guard tracks
+module structure, not lane membership.
+
+### 13.7 Explicit non-goals (so the residual stays honest)
+
+Out of scope for Path 1 (cross-ref #167): **Path 2** (employee-bundling by
+free-text `employer` — lossy, and legally *not* institutional money); **industry
+classification** (needs OpenSecrets CRP codes, which are non-commercial /
+educational-only — importing them would re-import a license restriction we avoid;
+we roll up to **organization**, never industry); **super PACs / IEs /
+501(c)(4)** (treasury money that can't legally reach the member, or isn't
+disclosed). `read` output will state plainly that it shows the *disclosed,
+candidate-side* slice, not total influence.

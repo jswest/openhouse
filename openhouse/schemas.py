@@ -1,8 +1,14 @@
 """Pydantic models for filing metadata + the FilingType code table.
 
-This module covers only the **filing-metadata** record (SPEC §6.1) — the record
-always derivable from the annual index XML. PTR/FD body schemas (§6.3) belong to
-later milestones.
+Two lanes share this module: the **Clerk** lane (filing metadata §6.1, PTR/FD
+bodies §6.3) versioned by :data:`SCHEMA_VERSION`, and the **FEC** lane (§13:
+``FecCommittee`` / ``FecPacContribution`` / ``FecMemberCandidateLink``)
+versioned **independently** by :data:`FEC_SCHEMA_VERSION`. The two version ints
+are deliberately decoupled — a reshape in one lane must not force a re-parse of
+the other (the same independence as ``inspect``'s ``LABELS_SCHEMA_VERSION``).
+
+The Clerk metadata record below covers only what is always derivable from the
+annual index XML.
 
 Every nullability and edge case here traces to a *verified* observation in real
 2024 index data (SPEC §2.1):
@@ -19,6 +25,7 @@ Every nullability and edge case here traces to a *verified* observation in real
 from __future__ import annotations
 
 from datetime import date
+from datetime import date as Date  # alias for fields named ``date`` (see FecPacContribution)
 from typing import Optional
 
 from pydantic import BaseModel, Field, model_serializer, model_validator
@@ -485,3 +492,141 @@ class FdBody(BaseModel):
     # (``_write_fd_body`` persists only ``schedules``), so the on-disk body
     # contract is unchanged.
     incomplete_schedules: list[str] = Field(default_factory=list)
+
+
+# ===========================================================================
+# FEC lane — Path 1: connected-SSF PAC money (SPEC §13, #167/#168).
+# ===========================================================================
+#
+# A *second* data source (#174), legally and structurally distinct from the
+# Clerk lane above: FEC bulk/API data is **public domain** (no commercial-use
+# restriction — only §30111's "sale or use" bar on soliciting), and it is
+# cycle-keyed (2-year, even-year-ending) rather than per-coverage-year. These
+# models are the contract the FEC acquisition/normalization/query sub-issues
+# build on; no acquisition or query logic lives here yet (that's later #167
+# sub-issues).
+#
+# FEC_SCHEMA_VERSION is INDEPENDENT of the Clerk lane's SCHEMA_VERSION, exactly
+# as ``inspect``'s LABELS_SCHEMA_VERSION is (see openhouse/inspect/verdict.py):
+# the FEC schema gates a re-parse/re-pull of the FEC tree, never the Clerk one,
+# so reshaping an FEC model must not force a Clerk re-parse and vice versa. It is
+# stamped into the FEC lane's own parse-manifest (a later sub-issue), the way
+# SCHEMA_VERSION is stamped into the Clerk parse-manifest (§6.5).
+FEC_SCHEMA_VERSION = 1
+
+# The ``connected_organization`` ``organization_type`` code table (SPEC §13).
+# Per FEC: a connected SSF's sponsoring organization is one of these classes.
+# "Path 1" is exactly the connected SSFs — these six codes (#167 scope note);
+# labor (``L``) is in-scope institutional PAC money, tagged so ``read`` can slice
+# it. The raw code is always preserved on the record beside this label, so an
+# unmapped/blank type is never an error (mirrors FilingType: raw alongside
+# normalized, never a silently dropped record — CLAUDE.md).
+FEC_ORG_TYPE_LABELS: dict[str, str] = {
+    "C": "corporation",
+    "T": "trade",
+    "L": "labor",
+    "M": "membership",
+    "V": "cooperative",
+    "W": "corporation_without_capital_stock",
+}
+
+# Provenance tag carried on every FEC record so a consumer can tell FEC-sourced
+# data from Clerk-sourced data in a mixed downstream (SPEC §13). The Clerk lane's
+# records are conceptually ``"clerk"``; FEC records carry ``"fec"``.
+PROVENANCE_FEC = "fec"
+PROVENANCE_CLERK = "clerk"
+
+
+class FecCommittee(BaseModel):
+    """An FEC committee record (SPEC §13) — a member's principal campaign
+    committee OR a contributing PAC, depending on context.
+
+    For a **connected SSF** (the contributor side of Path 1), the sponsor link
+    lives here: ``connected_organization_name`` names the sponsoring corporation/
+    union/group and ``organization_type`` is its class (the §13 code table). For a
+    member's own committee (the recipient side) those are typically ``None``.
+
+    - ``committee_id`` — the FEC committee id (``C########``), opaque string.
+    - ``name`` — the committee's name verbatim.
+    - ``connected_organization_name`` — the sponsoring organization for a
+      connected SSF, else ``None``.
+    - ``organization_type`` — the **normalized** sponsor class label (from
+      :data:`FEC_ORG_TYPE_LABELS`), or ``None`` when the FEC record carries no
+      type; ``organization_type_raw`` keeps the verbatim single-letter code
+      beside it (raw alongside normalized — CLAUDE.md). ``None`` exactly when
+      ``organization_type`` is.
+    - ``committee_type`` — the FEC committee-type code as-is (e.g. ``Q``/``N``),
+      opaque here; not interpreted in this scaffold.
+    - ``affiliation`` — the affiliated/connected committee id when FEC links this
+      committee to another, else ``None``.
+    """
+
+    committee_id: str
+    name: str
+    connected_organization_name: Optional[str] = None
+    organization_type: Optional[str] = None
+    organization_type_raw: Optional[str] = None
+    committee_type: Optional[str] = None
+    affiliation: Optional[str] = None
+    provenance: str = PROVENANCE_FEC
+
+
+class FecPacContribution(BaseModel):
+    """One PAC→member contribution: an FEC Schedule A **line 11C** receipt
+    (receipts from other political committees) on the member's committee (§13).
+
+    This is the atom of Path 1: a connected SSF (``contributor_committee_id``)
+    giving hard money to a member's principal committee
+    (``recipient_committee_id``). The ``image_number`` + ``transaction_id`` pair
+    is the **double-entry key** — the same transaction is disclosed on both
+    committees' filings, and these ids let a later sub-issue de-duplicate the two
+    halves rather than double-count.
+
+    - ``recipient_committee_id`` / ``contributor_committee_id`` — the member's
+      committee and the contributing PAC (both ``C########``).
+    - ``amount`` — the contribution amount in dollars (a single exact figure; FEC
+      itemizes the actual dollar amount, not a bucket — unlike Clerk PTR ranges).
+    - ``date`` — the contribution date, or ``None`` if absent/unparseable.
+    - ``line`` — the FEC form line, ``"F3-11C"`` for this path (carried so a later
+      multi-line extension stays explicit); defaults to that.
+    - ``image_number`` — the FEC image (filing page) number, opaque string.
+    - ``transaction_id`` — the FEC transaction id within the filing, opaque
+      string. Together with ``image_number`` it keys the double entry.
+    """
+
+    recipient_committee_id: str
+    contributor_committee_id: str
+    amount: float
+    # Aliased type (``Date``) because the field is *named* ``date``: under
+    # ``from __future__ import annotations`` the ``= None`` default would shadow
+    # the ``date`` type in the class namespace when pydantic resolves the string
+    # annotation, so the annotation must reference a name the field can't rebind.
+    date: Optional[Date] = None
+    line: str = "F3-11C"
+    image_number: Optional[str] = None
+    transaction_id: Optional[str] = None
+    provenance: str = PROVENANCE_FEC
+
+
+class FecMemberCandidateLink(BaseModel):
+    """The member ↔ FEC candidate ↔ committee link record (SPEC §13).
+
+    The offline join that anchors a House member (the Clerk lane's identity) to
+    their FEC candidate id and principal campaign committee, so PAC receipts can
+    be attributed to a member. The join is **not fuzzy**: it rides the CC0
+    ``congress-legislators`` ``id.fec[]`` list (already fetched by ``pull`` and
+    used for the bioguide ladder, §6.2), so it is a deterministic offline
+    extension of that ladder, never a name match.
+
+    - ``bioguide_id`` — the member's bioguide id (the Clerk lane's identity key
+      head; SPEC §6.2's ``bioguide:<id>`` ladder).
+    - ``candidate_id`` — the FEC candidate id (``H########``), from
+      ``congress-legislators`` ``id.fec[]``.
+    - ``committee_id`` — the candidate's principal campaign committee
+      (``C########``) — the recipient side of an 11C receipt.
+    """
+
+    bioguide_id: str
+    candidate_id: str
+    committee_id: str
+    provenance: str = PROVENANCE_FEC

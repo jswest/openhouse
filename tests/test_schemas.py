@@ -156,3 +156,94 @@ def test_amount_range_rejects_neither_shape():
     extract_failed path is upstream; the model itself never fabricates)."""
     with pytest.raises(ValidationError):
         AmountRange(label="???")
+
+
+# --- FEC lane schemas (SPEC §13, #168) --------------------------------------
+
+from openhouse.schemas import (  # noqa: E402
+    FEC_ORG_TYPE_LABELS,
+    FEC_SCHEMA_VERSION,
+    PROVENANCE_FEC,
+    SCHEMA_VERSION,
+    FecCommittee,
+    FecMemberCandidateLink,
+    FecPacContribution,
+)
+
+
+def test_fec_schema_version_independent_of_clerk():
+    """FEC_SCHEMA_VERSION is its own int, not coupled to SCHEMA_VERSION."""
+    assert FEC_SCHEMA_VERSION == 1
+    assert SCHEMA_VERSION == 10  # untouched by this change
+
+
+def test_fec_org_type_table_is_the_six_path1_codes():
+    assert set(FEC_ORG_TYPE_LABELS) == {"C", "T", "L", "M", "V", "W"}
+    assert FEC_ORG_TYPE_LABELS["L"] == "labor"
+
+
+def test_fec_connected_committee_round_trips():
+    c = FecCommittee(
+        committee_id="C00401224",
+        name="EXAMPLE CORP POLITICAL ACTION COMMITTEE",
+        connected_organization_name="Example Corp",
+        organization_type=FEC_ORG_TYPE_LABELS["C"],
+        organization_type_raw="C",
+        committee_type="Q",
+        affiliation=None,
+    )
+    assert c.committee_id == "C00401224"
+    assert c.organization_type == "corporation"
+    assert c.organization_type_raw == "C"
+    assert c.provenance == PROVENANCE_FEC  # defaults to "fec"
+
+
+def test_fec_committee_recipient_side_has_no_sponsor():
+    """A member's own committee carries no connected-org link — both None."""
+    c = FecCommittee(committee_id="C00000935", name="PELOSI FOR CONGRESS")
+    assert c.connected_organization_name is None
+    assert c.organization_type is None
+    assert c.organization_type_raw is None
+
+
+def test_fec_pac_contribution_double_entry_key():
+    rec = FecPacContribution(
+        recipient_committee_id="C00000935",
+        contributor_committee_id="C00401224",
+        amount=5000.0,
+        date=date(2023, 6, 14),
+        image_number="202307159123456789",
+        transaction_id="SA11C.4821",
+    )
+    assert rec.line == "F3-11C"  # the Path-1 default line
+    assert rec.amount == 5000.0
+    assert rec.image_number == "202307159123456789"
+    assert rec.transaction_id == "SA11C.4821"
+    assert rec.provenance == PROVENANCE_FEC
+
+
+def test_fec_member_candidate_link_round_trips():
+    link = FecMemberCandidateLink(
+        bioguide_id="P000197",
+        candidate_id="H8CA05035",
+        committee_id="C00000935",
+    )
+    assert link.bioguide_id == "P000197"
+    assert link.candidate_id == "H8CA05035"
+    assert link.provenance == PROVENANCE_FEC
+
+
+def test_fec_records_carry_fec_provenance_by_default():
+    """Provenance defaults to "fec" across all three FEC record types (§13)."""
+    assert (
+        FecCommittee(committee_id="C1", name="x").provenance
+        == FecPacContribution(
+            recipient_committee_id="C1",
+            contributor_committee_id="C2",
+            amount=1.0,
+        ).provenance
+        == FecMemberCandidateLink(
+            bioguide_id="b", candidate_id="H1", committee_id="C1"
+        ).provenance
+        == "fec"
+    )

@@ -43,6 +43,15 @@ _LEGAL_NOTICE = (
     "excepted)."
 )
 
+# FEC bulk/API data is PUBLIC DOMAIN — different legal footing from Clerk FD
+# (#167). The one statutory bar is 52 U.S.C. §30111(a): contributor information
+# may not be sold or used to solicit contributions or for any commercial purpose.
+# Full wording lands in #173; this is the scaffold stub (SPEC §13).
+_FEC_LEGAL_NOTICE = (
+    "FEC data is public domain, but 52 U.S.C. §30111 bars using contributor "
+    "information to solicit contributions or for any commercial purpose."
+)
+
 
 class YearRangeError(ValueError):
     """Raised when a year-range argument is malformed or out of bounds."""
@@ -97,6 +106,27 @@ def parse_year_range(arg: str, current_year: int) -> list[int]:
         )
 
     return list(range(start, end + 1))
+
+
+def year_to_cycle(year: int) -> int:
+    """Expand a named year to its enclosing FEC 2-year cycle (SPEC §13).
+
+    FEC reports on 2-year cycles labelled by their **even** ending year, so an
+    odd year folds up into the next even year (2023 → 2024) and an even year is
+    its own cycle (2024 → 2024). Pure and wall-clock-free — the caller passes
+    already-validated years.
+    """
+    return year if year % 2 == 0 else year + 1
+
+
+def expand_years_to_cycles(years: list[int]) -> list[int]:
+    """Map a validated year list to its sorted, de-duped enclosing cycles (§13).
+
+    Both years of a cycle collapse to one entry (so ``fec pull 2023`` and
+    ``fec pull 2024`` both resolve to the 2024 cycle, and a ``2023-2024`` range is
+    a single cycle), preserving ascending order.
+    """
+    return sorted({year_to_cycle(y) for y in years})
 
 
 def _parse_one(token: str, arg: str) -> int:
@@ -207,6 +237,21 @@ def resolve_data_dir(flag_value: str | None) -> Path:
         return Path(env_value)
     _warn_shadowed_local_data()
     return Path.home() / ".openhouse"
+
+
+def fec_raw_dir(data_dir: Path, cycle: int) -> Path:
+    """The FEC lane's cycle-keyed raw directory: ``<data>/raw/fec/<cycle>/`` (§13).
+
+    Cycle-keyed on disk (not per-year), mirroring how the clerk lane builds
+    ``<data>/raw/clerk/<year>/`` inline. Same ``--data-dir`` / ``OPENHOUSE_DATA_DIR``
+    precedence as everything else (the resolved ``data_dir`` is passed in).
+    """
+    return data_dir / "raw" / "fec" / str(cycle)
+
+
+def fec_parsed_dir(data_dir: Path, cycle: int) -> Path:
+    """The FEC lane's cycle-keyed parsed directory: ``<data>/parsed/fec/<cycle>/`` (§13)."""
+    return data_dir / "parsed" / "fec" / str(cycle)
 
 
 VALID_PDF_TYPES = ("ptr", "fd")
@@ -531,9 +576,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Federal Election Commission data — scaffolded, not yet implemented (#167)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Federal Election Commission data. Scaffolded as part of the source "
-            "namespace (#174); the verbs are stubs — real FEC behavior lands in "
-            "later sub-issues (#167)."
+            "Federal Election Commission data (Path 1: connected-SSF PAC money). "
+            "Scaffolded (#174/#168); the verbs are stubs — real FEC behavior lands "
+            "in later sub-issues (#167). " + _FEC_LEGAL_NOTICE
         ),
     )
     _add_fec_verbs(fec_p.add_subparsers(dest="command", required=True))
@@ -596,12 +641,42 @@ def main(argv: list[str] | None = None) -> int:
     # The FEC source is scaffolded only (#174): real behavior is a later sub-issue
     # (#167). Intercept it before argparse so a stub verb can carry args (e.g.
     # `fec pull 2024`) without the stub sub-parser having to model each one, while
-    # `openhouse fec --help` still routes through argparse below. Fail clearly,
-    # non-zero. A bare `openhouse fec` (no verb) falls through to argparse, which
-    # reports the required-verb error.
+    # `openhouse fec --help` still routes through argparse below. A bare
+    # `openhouse fec` (no verb) falls through to argparse, which reports the
+    # required-verb error.
+    #
+    # The year→cycle grammar is REAL even though the body is a stub (#168): the
+    # year-scoped verbs (pull/parse) parse + validate their <year>/<range> with the
+    # shared clerk parser, then expand each named year to its enclosing FEC cycle
+    # (§13), emitting the one-line stderr note when expansion happens — exactly the
+    # §5 `trades` filing-year-note pattern. Only AFTER parsing + expanding does the
+    # stub exit "not yet implemented", so the grammar is testable now.
     if raw_argv[:1] == ["fec"] and len(raw_argv) >= 2 and raw_argv[1] in _FEC_STUB_VERBS:
+        verb = raw_argv[1]
+        if verb in ("pull", "parse"):
+            if len(raw_argv) < 3:
+                print(
+                    f"error: `openhouse fec {verb}` requires a year (YYYY or "
+                    f"YYYY-YYYY).",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                years = parse_year_range(raw_argv[2], current_year)
+            except YearRangeError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            cycles = expand_years_to_cycles(years)
+            if cycles != years:
+                named = ", ".join(str(y) for y in years)
+                resolved = ", ".join(str(c) for c in cycles)
+                print(
+                    f"note: FEC reports on 2-year cycles (even-year-ending); "
+                    f"year(s) {named} resolve to cycle(s) {resolved}.",
+                    file=sys.stderr,
+                )
         print(
-            f"error: `openhouse fec {raw_argv[1]}` is not yet implemented "
+            f"error: `openhouse fec {verb}` is not yet implemented "
             f"(the FEC source is scaffolded; see #167).",
             file=sys.stderr,
         )

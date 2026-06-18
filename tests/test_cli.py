@@ -349,3 +349,76 @@ def test_pull_help_lists_targeted_examples(capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "--member" in out and "--doc-id" in out and "--newest-first" in out
+
+
+# --- FEC lane: year→cycle expansion + stderr note (#168) --------------------
+
+from openhouse.cli import (  # noqa: E402
+    expand_years_to_cycles,
+    fec_parsed_dir,
+    fec_raw_dir,
+    year_to_cycle,
+)
+
+
+def test_year_to_cycle_odd_rolls_up():
+    """An odd year folds into the next even-ending cycle (2023 → 2024)."""
+    assert year_to_cycle(2023) == 2024
+
+
+def test_year_to_cycle_even_is_its_own_cycle():
+    assert year_to_cycle(2024) == 2024
+
+
+def test_expand_collapses_both_halves_of_a_cycle():
+    """Both years of a cycle de-dupe to one entry; a 2023-2024 range is one cycle."""
+    assert expand_years_to_cycles([2023, 2024]) == [2024]
+
+
+def test_expand_multiple_cycles_sorted_unique():
+    assert expand_years_to_cycles([2021, 2022, 2023, 2024]) == [2022, 2024]
+
+
+def test_fec_pull_odd_year_emits_cycle_note_then_stub(capsys):
+    rc = cli_mod.main(["fec", "pull", "2023"])
+    err = capsys.readouterr().err
+    assert "2-year cycles" in err
+    assert "2024" in err  # expanded cycle
+    assert "not yet implemented" in err
+    assert rc == 1
+
+
+def test_fec_pull_even_year_no_cycle_note(capsys):
+    rc = cli_mod.main(["fec", "pull", "2024"])
+    err = capsys.readouterr().err
+    assert "2-year cycles" not in err  # no expansion happened
+    assert "not yet implemented" in err
+    assert rc == 1
+
+
+def test_fec_parse_range_collapses_to_one_cycle_note(capsys):
+    rc = cli_mod.main(["fec", "parse", "2023-2024"])
+    err = capsys.readouterr().err
+    assert "2-year cycles" in err
+    assert "not yet implemented" in err
+    assert rc == 1
+
+
+def test_fec_pull_bad_year_fails_arg_validation(capsys):
+    rc = cli_mod.main(["fec", "pull", "nope"])
+    assert rc == 2
+    assert "not yet implemented" not in capsys.readouterr().err
+
+
+def test_fec_pull_requires_a_year(capsys):
+    rc = cli_mod.main(["fec", "pull"])
+    assert rc == 2
+    assert "requires a year" in capsys.readouterr().err
+
+
+def test_fec_cycle_keyed_path_helpers():
+    """fec pull 2023 and 2024 both resolve to .../fec/2024 (cycle-keyed)."""
+    root = Path("/data")
+    assert fec_raw_dir(root, year_to_cycle(2023)) == root / "raw" / "fec" / "2024"
+    assert fec_raw_dir(root, year_to_cycle(2024)) == root / "raw" / "fec" / "2024"
+    assert fec_parsed_dir(root, 2024) == root / "parsed" / "fec" / "2024"

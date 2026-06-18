@@ -225,6 +225,14 @@ ratings — this is statutory ([5 U.S.C. §
 Act as amended), not a request. `openhouse` is a research and transparency
 tool; don't build a commercial product on its output.
 
+FEC data (the scaffolded `fec` source — [SPEC §13](./SPEC.md), not yet
+implemented, [#167](https://github.com/jswest/openhouse/issues/167)) sits on a
+*different* legal footing: it is **public domain**, with one statutory bar — [52
+U.S.C. § 30111](https://www.law.cornell.edu/uscode/text/52/30111): contributor
+information may **not** be sold or used to solicit contributions or for any
+commercial purpose. Records carry a `provenance` tag (`"fec"` vs `"clerk"`) so
+the two footings stay distinguishable. (Full wording lands in #173.)
+
 ## Development
 
 Python 3.12+, managed with [`uv`](https://docs.astral.sh/uv/):
