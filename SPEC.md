@@ -603,6 +603,19 @@ annual forms, which have no such column. A value column holding the literal
 `None`/`Undetermined` yields `value_of_asset: null` with the amount buckets
 shifted to the income columns — never a bucket misread as the asset value.
 
+Schedule C items carry `amount_preceding` (GH-0166): the Candidate/New-Filer
+form's second amount column ("amount preceding year"); `null` on member forms,
+which report a single `amount`. Mirrors Schedule A's `income_preceding` split, so
+a consumer reads two machine-parseable money values instead of one space-joined
+string (`"$36,750.00 $40,078.00"`).
+
+Schedule F's `parties`/`terms` and Schedule H's `source`/itinerary are a
+**best-effort** structured split (GH-0166): the verbatim `raw_text` stays
+authoritative where a column boundary is genuinely ambiguous — e.g. a Party that
+is an organization whose name contains a terms keyword ("Pension") may split
+imperfectly. The sound-or-complete guarantee rests on `raw_text`, never on these
+structured fields alone.
+
 Schedules A and B are **guarded for completeness** (GH-0070): each row carries
 one `[TYPE]` tag, so the segment's tag count approximates a row count
 independent of the row anchors. The invariant drifts by a row or two on ~30%
