@@ -1,0 +1,265 @@
+{
+ "HSAG": [
+  {
+   "name": "Glenn Thompson",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chair",
+   "bioguide": "T000467"
+  },
+  {
+   "name": "Angie Craig",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "C001119"
+  },
+  {
+   "name": "Alma S. Adams",
+   "party": "minority",
+   "rank": 5,
+   "bioguide": "A000370"
+  }
+ ],
+ "HSIF": [
+  {
+   "name": "Brett Guthrie",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chair",
+   "bioguide": "G000558"
+  },
+  {
+   "name": "Frank Pallone, Jr.",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "P000034"
+  },
+  {
+   "name": "Rick W. Allen",
+   "party": "majority",
+   "rank": 12,
+   "bioguide": "A000372"
+  }
+ ],
+ "HSED": [
+  {
+   "name": "Tim Walberg",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chair",
+   "bioguide": "W000798"
+  },
+  {
+   "name": "Robert C. \"Bobby\" Scott",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "S000185"
+  },
+  {
+   "name": "Alma S. Adams",
+   "party": "minority",
+   "rank": 6,
+   "bioguide": "A000370"
+  },
+  {
+   "name": "Rick W. Allen",
+   "party": "majority",
+   "rank": 7,
+   "bioguide": "A000372"
+  }
+ ],
+ "HSAG03": [
+  {
+   "name": "Brad Finstad",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chair",
+   "bioguide": "F000475"
+  },
+  {
+   "name": "Jahana Hayes",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "H001081"
+  },
+  {
+   "name": "Alma S. Adams",
+   "party": "minority",
+   "rank": 3,
+   "bioguide": "A000370"
+  }
+ ],
+ "HSAG14": [
+  {
+   "name": "Frank D. Lucas",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chair",
+   "bioguide": "L000491"
+  },
+  {
+   "name": "Jill N. Tokuda",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "T000487"
+  },
+  {
+   "name": "Alma S. Adams",
+   "party": "minority",
+   "rank": 2,
+   "bioguide": "A000370"
+  }
+ ],
+ "HSIF02": [
+  {
+   "name": "John Joyce",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chair",
+   "bioguide": "J000302"
+  },
+  {
+   "name": "Yvette D. Clarke",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "C001067"
+  },
+  {
+   "name": "Rick W. Allen",
+   "party": "majority",
+   "rank": 6,
+   "bioguide": "A000372"
+  }
+ ],
+ "HSIF03": [
+  {
+   "name": "Robert E. Latta",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chair",
+   "bioguide": "L000566"
+  },
+  {
+   "name": "Kathy Castor",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "C001066"
+  },
+  {
+   "name": "Rick W. Allen",
+   "party": "majority",
+   "rank": 4,
+   "bioguide": "A000372"
+  }
+ ],
+ "HSED13": [
+  {
+   "name": "Alma S. Adams",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "A000370"
+  },
+  {
+   "name": "Burgess Owens",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chairman",
+   "bioguide": "O000086"
+  },
+  {
+   "name": "Michael Baumgartner",
+   "party": "majority",
+   "rank": 2,
+   "bioguide": "B001322"
+  }
+ ],
+ "HSED14": [
+  {
+   "name": "Suzanne Bonamici",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "B001278"
+  },
+  {
+   "name": "Mary E. Miller",
+   "party": "majority",
+   "rank": 2,
+   "bioguide": "M001211"
+  },
+  {
+   "name": "Alma S. Adams",
+   "party": "minority",
+   "rank": 6,
+   "bioguide": "A000370"
+  }
+ ],
+ "HSIF16": [
+  {
+   "name": "Richard Hudson",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chair",
+   "bioguide": "H001067"
+  },
+  {
+   "name": "Doris O. Matsui",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "M001163"
+  },
+  {
+   "name": "Rick W. Allen",
+   "party": "majority",
+   "rank": 2,
+   "title": "Vice Chair",
+   "bioguide": "A000372"
+  }
+ ],
+ "HSED02": [
+  {
+   "name": "Rick W. Allen",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chairman",
+   "bioguide": "A000372"
+  },
+  {
+   "name": "Mark DeSaulnier",
+   "party": "minority",
+   "rank": 1,
+   "title": "Ranking Member",
+   "bioguide": "D000623"
+  },
+  {
+   "name": "Robert F. Onder, Jr.",
+   "party": "majority",
+   "rank": 2,
+   "bioguide": "O000177"
+  }
+ ],
+ "SSAF": [
+  {
+   "name": "John Boozman",
+   "party": "majority",
+   "rank": 1,
+   "title": "Chairman",
+   "bioguide": "B001236"
+  },
+  {
+   "name": "Mitch McConnell",
+   "party": "majority",
+   "rank": 2,
+   "bioguide": "M000355"
+  }
+ ]
+}

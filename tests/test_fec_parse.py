@@ -27,6 +27,7 @@ from openhouse.fec_parse import (
     fec_parse,
     org_rollup_key,
     parse_cycle,
+    parse_independent_expenditures,
 )
 from openhouse.schemas import FEC_SCHEMA_VERSION, FecPacContribution
 
@@ -51,12 +52,21 @@ def _seed_cycle(tmp_path: Path, *, cycle: int = 2024, **files: str) -> Path:
     return tmp_path
 
 
-def _seed_from_fixtures(tmp_path: Path, *, cycle: int = 2024) -> Path:
-    """Copy the trimmed real fec fixtures into ``raw/fec/<cycle>/``."""
+def _seed_from_fixtures(tmp_path: Path, *, cycle: int = 2024, ie: bool = False) -> Path:
+    """Copy the trimmed real fec fixtures into ``raw/fec/<cycle>/``.
+
+    ``ie`` also copies the super-PAC IE CSV (GH-0194); off by default so the
+    Path-1 tests keep their exact counts and the IE slice is exercised on its own.
+    """
     raw = tmp_path / "raw" / "fec" / str(cycle)
     raw.mkdir(parents=True, exist_ok=True)
     for name in ("cn.txt", "ccl.txt", "cm.txt", "itpas2.txt"):
         shutil.copy(FEC_FIXTURES / name, raw / name)
+    if ie:
+        shutil.copy(
+            FEC_FIXTURES / "independent_expenditure_2024.csv",
+            raw / f"independent_expenditure_{cycle}.csv",
+        )
     return tmp_path
 
 
@@ -341,3 +351,117 @@ def test_unit_builders(tmp_path):
         )
     ]
     assert check_pac_limit(at, committees) == []
+
+
+# ---------------------------------------------------------------------------
+# Super-PAC independent expenditures (GH-0194) — the separately-footed slice.
+# ---------------------------------------------------------------------------
+def test_ie_keeps_both_directions_filters_non_house(tmp_path):
+    """Both support and oppose House IEs are kept and tagged; a non-House (Senate)
+    IE is filtered ``not_house_candidate``; both kept directions reconcile."""
+    _seed_from_fixtures(tmp_path, ie=True)
+    _seed_reference(tmp_path)
+    summary = parse_cycle(2024, data_dir=tmp_path, fetched_at=ENTRY_TS)
+    parsed = tmp_path / "parsed" / "fec" / "2024"
+
+    ies = _read(parsed, "independent-expenditures.json")
+    directions = sorted(ie["support_oppose"] or "unspecified" for ie in ies)
+    # Fixture House rows: Adams(S), Evans(S), Avlon(O), unattributed(S), Tran(blank).
+    assert summary["ie_kept"] == 5
+    assert directions == ["oppose", "support", "support", "support", "unspecified"]
+    assert summary["ie_by_direction"] == {"oppose": 1, "support": 3, "unspecified": 1}
+
+    # Every kept IE is office H, tagged with both raw + normalized direction.
+    assert all(ie["office"] == "H" for ie in ies)
+    avlon = next(ie for ie in ies if ie["support_oppose"] == "oppose")
+    assert avlon["support_oppose_raw"] == "O"
+
+    # The Senate row is filtered, never kept.
+    unparsed = _read(parsed, "fec-unparsed-manifest.json")
+    reasons = [e["reason"] for e in unparsed["filtered_independent_expenditures"]]
+    assert "not_house_candidate" in reasons
+
+
+def test_ie_unattributed_house_row_is_kept_not_dropped(tmp_path):
+    """A House IE with a blank ``cand_id`` is reported ``unattributed`` in the
+    residual AND still kept (never dropped, §13.7)."""
+    _seed_from_fixtures(tmp_path, ie=True)
+    _seed_reference(tmp_path)
+    summary = parse_cycle(2024, data_dir=tmp_path, fetched_at=ENTRY_TS)
+    parsed = tmp_path / "parsed" / "fec" / "2024"
+
+    ies = _read(parsed, "independent-expenditures.json")
+    blank = [ie for ie in ies if ie["candidate_id"] is None]
+    assert len(blank) == 1  # the Jones (NY-17) row, blank cand_id — kept
+    assert blank[0]["bioguide_id"] is None
+
+    counts = _read(parsed, "fec-parse-manifest.json")["counts"]
+    assert counts["ie_filtered_by_reason"]["unresolved_candidate"] == 1
+    # The unattributed row is in BOTH kept and the residual (audit, not a drop).
+    unparsed = _read(parsed, "fec-unparsed-manifest.json")
+    assert any(
+        e["reason"] == "unresolved_candidate"
+        for e in unparsed["filtered_independent_expenditures"]
+    )
+
+
+def test_ie_joins_connected_org_and_bioguide(tmp_path):
+    """A House IE whose spender is in ``cm`` carries the raw
+    ``connected_organization_name``; one targeting a member in the CC0 bridge
+    carries the bioguide."""
+    _seed_from_fixtures(tmp_path, ie=True)
+    _seed_reference(tmp_path)
+    parse_cycle(2024, data_dir=tmp_path, fetched_at=ENTRY_TS)
+    parsed = tmp_path / "parsed" / "fec" / "2024"
+
+    ies = _read(parsed, "independent-expenditures.json")
+    # The Adams-targeted IE: spender C00002469 is the machinists labor PAC in cm,
+    # and H4NC12100 bridges to Adams (A000370) via id.fec[].
+    adams_ie = next(ie for ie in ies if ie["candidate_id"] == "H4NC12100")
+    assert adams_ie["bioguide_id"] == "A000370"
+    assert (
+        adams_ie["connected_organization_name"]
+        == "INTERNATIONAL ASSOCIATION OF MACHINISTS AND AEROSPACE WORKERS"
+    )
+    assert adams_ie["provenance"] == "fec_ie"
+    # A spender absent from cm (the C90… IE-only filer) leaves connected org None.
+    evans_ie = next(ie for ie in ies if ie["candidate_id"] == "H4CO08034")
+    assert evans_ie["connected_organization_name"] is None
+
+
+def test_ie_short_row_is_residual_not_dropped(tmp_path):
+    """A malformed short IE row lands in the residual ``malformed_short_row``,
+    counted, never silently dropped."""
+    _seed_from_fixtures(tmp_path, ie=True)
+    _seed_reference(tmp_path)
+    parse_cycle(2024, data_dir=tmp_path, fetched_at=ENTRY_TS)
+    parsed = tmp_path / "parsed" / "fec" / "2024"
+    counts = _read(parsed, "fec-parse-manifest.json")["counts"]
+    assert counts["ie_filtered_by_reason"]["malformed_short_row"] == 1
+
+
+def test_ie_absent_file_is_clean_skip(tmp_path):
+    """A cycle pulled before GH-0194 (no IE CSV) parses contributions normally and
+    emits an empty IE output — not a crash."""
+    _seed_from_fixtures(tmp_path, ie=False)
+    summary = parse_cycle(2024, data_dir=tmp_path, fetched_at=ENTRY_TS)
+    parsed = tmp_path / "parsed" / "fec" / "2024"
+    assert summary["ie_kept"] == 0
+    assert _read(parsed, "independent-expenditures.json") == []
+
+
+def test_ie_date_and_amount_parse(tmp_path):
+    """``DD-MON-YY`` dates and decimal amounts parse; a blank date is None, kept."""
+    header = (
+        "cand_id,spe_id,spe_nam,can_office,sup_opp,exp_amo,exp_date,pur,"
+        "image_num,tran_id"
+    ).split(",")
+    rows = [
+        ["H0XX00001", "C00000001", "PAC", "H", "S", "1234.50", "28-OCT-24", "ads", "I1", "T1"],
+        ["H0XX00001", "C00000001", "PAC", "H", "O", "", "", "", "I2", "T2"],
+    ]
+    kept, residual, by_dir = parse_independent_expenditures(header, rows, {}, {})
+    assert [str(ie.date) for ie in kept] == ["2024-10-28", "None"]
+    assert kept[0].amount == 1234.50 and kept[1].amount == 0.0
+    assert by_dir == {"support": 1, "oppose": 1}
+    assert residual == []

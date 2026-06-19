@@ -1,0 +1,60 @@
+[
+ {
+  "type": "house",
+  "name": "House Committee on Agriculture",
+  "thomas_id": "HSAG",
+  "house_committee_id": "AG",
+  "subcommittees": [
+   {
+    "name": "Conservation, Research, and Biotechnology",
+    "thomas_id": "14"
+   },
+   {
+    "name": "Nutrition and Foreign Agriculture",
+    "thomas_id": "03"
+   }
+  ]
+ },
+ {
+  "type": "house",
+  "name": "House Committee on Education and Workforce",
+  "thomas_id": "HSED",
+  "house_committee_id": "ED",
+  "subcommittees": [
+   {
+    "name": "Early Childhood, Elementary, and Secondary Education",
+    "thomas_id": "14"
+   },
+   {
+    "name": "Health, Employment, Labor, and Pensions",
+    "thomas_id": "02"
+   },
+   {
+    "name": "Higher Education and Workforce Development",
+    "thomas_id": "13"
+   }
+  ],
+  "jurisdiction_source": "https://edworkforce.house.gov/committee/subcommitteesjurisdictions.htm"
+ },
+ {
+  "type": "house",
+  "name": "House Committee on Energy and Commerce",
+  "thomas_id": "HSIF",
+  "house_committee_id": "IF",
+  "subcommittees": [
+   {
+    "name": "Communications and Technology",
+    "thomas_id": "16"
+   },
+   {
+    "name": "Energy",
+    "thomas_id": "03"
+   },
+   {
+    "name": "Oversight and Investigations",
+    "thomas_id": "02"
+   }
+  ],
+  "jurisdiction_source": "https://energycommerce.house.gov/committee-history/"
+ }
+]

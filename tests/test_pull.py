@@ -341,9 +341,14 @@ def test_pull_legislators_fetches_both_files(tmp_path):
     ref = tmp_path / "raw" / "reference"
     assert (ref / "legislators-current.json").exists()
     assert (ref / "legislators-historical.json").exists()
+    # Committee files ride the same lane / gate (#195).
+    assert (ref / "committees-current.json").exists()
+    assert (ref / "committee-membership-current.json").exists()
     assert result["fetched"] == [
         "legislators-current.json",
         "legislators-historical.json",
+        "committees-current.json",
+        "committee-membership-current.json",
     ]
 
 
@@ -352,8 +357,13 @@ def test_pull_legislators_idempotent_skip(tmp_path):
 
     ref = tmp_path / "raw" / "reference"
     ref.mkdir(parents=True)
-    (ref / "legislators-current.json").write_text("[]")
-    (ref / "legislators-historical.json").write_text("[]")
+    for name in (
+        "legislators-current.json",
+        "legislators-historical.json",
+        "committees-current.json",
+        "committee-membership-current.json",
+    ):
+        (ref / name).write_text("[]")
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
         raise AssertionError("no network call expected when files are present")
@@ -361,7 +371,7 @@ def test_pull_legislators_idempotent_skip(tmp_path):
     client = make_client(handler)
     result = pull_legislators(client, tmp_path, sleep=no_sleep)
     assert result["fetched"] == []
-    assert len(result["skipped"]) == 2
+    assert len(result["skipped"]) == 4
 
 
 def test_pull_legislators_uses_gh_pages_mirror(tmp_path):
@@ -377,11 +387,12 @@ def test_pull_legislators_uses_gh_pages_mirror(tmp_path):
 
     client = make_client(handler)
     pull_legislators(client, tmp_path, sleep=no_sleep)
+    base = "https://unitedstates.github.io/congress-legislators/"
     assert seen == [
-        "https://unitedstates.github.io/congress-legislators/"
-        "legislators-current.json",
-        "https://unitedstates.github.io/congress-legislators/"
-        "legislators-historical.json",
+        base + "legislators-current.json",
+        base + "legislators-historical.json",
+        base + "committees-current.json",
+        base + "committee-membership-current.json",
     ]
 
 

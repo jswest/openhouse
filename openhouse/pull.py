@@ -47,7 +47,7 @@ from tqdm import tqdm
 
 from . import __version__
 from .index import IndexTarget, build_filing_records, enumerate_targets
-from .legislators import LEGISLATORS_FILES, REFERENCE_SUBDIR
+from .legislators import COMMITTEE_FILES, LEGISLATORS_FILES, REFERENCE_SUBDIR
 
 # SPEC §2.1: one ZIP per year, refreshed daily.
 INDEX_URL_TEMPLATE = (
@@ -86,10 +86,11 @@ REPO_URL = "https://github.com/jswest/openhouse"
 # (``REFERENCE_SUBDIR`` + the file names) is owned by ``legislators.py`` — the
 # join's consumer — so producer and consumer can never drift.
 #
-# Source URL (verified 2026-06-13): the project's gh-pages mirror at
-# ``unitedstates.github.io`` is the live home of these JSON files (HTTP 200). The
-# former ``raw.githubusercontent.com/.../main/`` path is 404 and the legacy
-# ``theunitedstates.io`` distribution is 410 Gone — see SPEC.md "verified facts".
+# Source URL (verified 2026-06-13; committee files re-verified 2026-06-19): the
+# project's gh-pages mirror at ``unitedstates.github.io`` is the live home of these
+# JSON files (HTTP 200). The former ``raw.githubusercontent.com/.../main/`` path is
+# 404 and the legacy ``theunitedstates.io`` distribution is 410 Gone — see SPEC.md
+# "verified facts". The same base serves the committee files (#195).
 LEGISLATORS_URL_TEMPLATE = (
     "https://unitedstates.github.io/congress-legislators/{name}"
 )
@@ -301,22 +302,27 @@ def pull_legislators(
     delay: float = DEFAULT_DELAY_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict:
-    """Fetch the two CC0 ``congress-legislators`` bulk files into ``raw/reference/``.
+    """Fetch the CC0 ``congress-legislators`` bulk files into ``raw/reference/``.
 
-    ``legislators-current.json`` + ``legislators-historical.json`` are public
-    domain (CC0) and carry a stable ``id.bioguide`` per legislator, which ``parse``
-    joins **offline** to attach ``bioguide:<id>`` to member filings (#16). Same
-    polite floor as every other fetch (paced, backoff, 403-is-fatal via
-    :func:`polite_get`).
+    Two file groups, public domain (CC0), on the same gh-pages lane and the same
+    ``--no-reference`` gate:
 
-    Idempotent: a file already present is not re-fetched unless ``force`` — the
-    reference set changes slowly, so a re-pull is a deliberate ``--force`` choice.
-    Returns a small status dict for logging.
+    * ``legislators-{current,historical}.json`` — a stable ``id.bioguide`` per
+      legislator, joined **offline** by ``parse`` to attach ``bioguide:<id>`` (#16).
+    * ``committees-current.json`` + ``committee-membership-current.json`` — the
+      House committee definitions and *current*-congress membership, surfaced
+      offline by ``reference --committees`` (#195). No historical membership file
+      exists upstream, so this is current-congress-only.
+
+    Same polite floor as every other fetch (paced, backoff, 403-is-fatal via
+    :func:`polite_get`). Idempotent: a file already present is not re-fetched unless
+    ``force`` — the reference set changes slowly, so a re-pull is a deliberate
+    ``--force`` choice. Returns a small status dict for logging.
     """
     ref_dir = data_dir / REFERENCE_SUBDIR
     written: list[str] = []
     skipped: list[str] = []
-    for i, name in enumerate(LEGISLATORS_FILES):
+    for i, name in enumerate(LEGISLATORS_FILES + COMMITTEE_FILES):
         dest = ref_dir / name
         if dest.exists() and not force:
             print(
@@ -342,7 +348,7 @@ def pull_legislators(
         written.append(name)
     print(
         f"reference: {len(written)} fetched, {len(skipped)} present/skipped "
-        f"(CC0 congress-legislators → {ref_dir}).",
+        f"(CC0 congress-legislators, legislators + committees → {ref_dir}).",
         file=sys.stderr,
     )
     return {"fetched": written, "skipped": skipped}

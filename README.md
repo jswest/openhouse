@@ -196,6 +196,26 @@ pull`); re-pull to refresh. JSON to stdout; `--table` for human-aligned columns
 (name, id, chamber, state). No matches → empty result, exit 0. No reference
 data on disk → non-zero exit with a pointer to `clerk pull`.
 
+**Committee membership (`--committees`).** Add `--committees` to surface which
+House committees and subcommittees the matched members sit on (CC0 source, same
+`raw/reference/` cache). Each row is `{congress, committee, subcommittee?, rank,
+title, party}`; filter with `--congress N` or `--year Y` (a year resolves to its
+Congress — 2025 → the 119th). The bare lookup is unchanged — committee rows
+appear only behind the flag.
+
+```sh
+openhouse reference Adams --committees --table        # Adams' House seats
+openhouse reference Adams --committees --year 2025     # filter to the 119th
+```
+
+**Coverage (important):** membership is **current-congress-only** — the 119th
+(2025–26). The CC0 source publishes **no historical-by-congress membership**, so
+`--congress`/`--year` outside the current congress return nothing, and earlier
+years aren't available. The guarantee is **COMPLETE over the cached current
+snapshot** (every seat of every matched member is returned); the stderr residual
+names that current-congress-only limit plus any members/seats absent from the
+cache. Senate and joint committees are excluded (this is the House product).
+
 ## What's coming
 
 The `clerk` pipeline ships end to end for any year range since 2008; stable
@@ -248,9 +268,12 @@ of total influence. Out of scope:
 - Organizations are tagged by their FEC type (corporation / trade / labor /
   membership / cooperative / corp-without-stock), not mapped to sectors or
   industries.
-- Super-PAC independent expenditures, dark money, and soft money are not
-  included — only direct, itemized contributions to the candidate's principal
-  campaign committee.
+- `fec read` (the donors/pac query) covers only direct, itemized contributions
+  to the candidate's principal campaign committee. Dark money and soft money are
+  never included. **Super-PAC independent expenditures are a separate matter:**
+  `fec pull` + `fec parse` now acquire and normalize them (see below), but they
+  are a **separately-footed slice** with no `fec read` surface yet — never summed
+  with the connected-PAC contributions above.
 
 Two further limitations are declared on every `fec read` response (on stderr):
 
@@ -265,6 +288,19 @@ committees).
 - **Parent and subsidiary PACs are reported separately.** FEC data carries no
   affiliation column, so a parent organization and its subsidiary PACs appear as
   separate entries — `openhouse` never merges them from data it does not have.
+
+**Super-PAC independent expenditures are a separately-footed slice.**
+`fec pull` + `fec parse` acquire the FEC Schedule-E bulk file
+(`independent_expenditure_<cycle>.csv`) and normalize the spending **for or
+against** House candidates into `parsed/fec/<cycle>/independent-expenditures.json`
+(both directions kept and tagged). This is **uncoordinated outside spending** — it
+does **not** go to the member and is **not** the connected-PAC hard money above;
+it carries a distinct `provenance` (`"fec_ie"`) and is never summed with
+contributions. The spending committee's id and any connected-organization name are
+preserved **raw** (no industry classification). It is public-domain FEC data (the
+[§30111(a)](https://www.law.cornell.edu/uscode/text/52/30111) "sale or use" bar
+still applies). There is no `fec read` IE surface yet — the parsed JSON is the
+deliverable.
 
 ## Use restriction
 

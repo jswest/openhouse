@@ -161,11 +161,14 @@ def test_amount_range_rejects_neither_shape():
 # --- FEC lane schemas (SPEC §13, #168) --------------------------------------
 
 from openhouse.schemas import (  # noqa: E402
+    FEC_IE_SUPPORT_OPPOSE_LABELS,
     FEC_ORG_TYPE_LABELS,
     FEC_SCHEMA_VERSION,
     PROVENANCE_FEC,
+    PROVENANCE_FEC_IE,
     SCHEMA_VERSION,
     FecCommittee,
+    FecIndependentExpenditure,
     FecMemberCandidateLink,
     FecPacContribution,
 )
@@ -173,7 +176,7 @@ from openhouse.schemas import (  # noqa: E402
 
 def test_fec_schema_version_independent_of_clerk():
     """FEC_SCHEMA_VERSION is its own int, not coupled to SCHEMA_VERSION."""
-    assert FEC_SCHEMA_VERSION == 1
+    assert FEC_SCHEMA_VERSION == 2  # bumped for the super-PAC IE model (GH-0194)
     assert SCHEMA_VERSION == 11  # clerk-lane bump (GH-0166) must not touch FEC's
 
 
@@ -220,6 +223,29 @@ def test_fec_pac_contribution_double_entry_key():
     assert rec.image_number == "202307159123456789"
     assert rec.transaction_id == "SA11C.4821"
     assert rec.provenance == PROVENANCE_FEC
+
+
+def test_fec_ie_is_separately_footed_with_distinct_provenance():
+    """A super-PAC IE carries the distinct ``fec_ie`` provenance (never summed with
+    Path-1 hard money) and the support/oppose label table is just S/O (GH-0194)."""
+    assert FEC_IE_SUPPORT_OPPOSE_LABELS == {"S": "support", "O": "oppose"}
+    assert PROVENANCE_FEC_IE == "fec_ie" and PROVENANCE_FEC_IE != PROVENANCE_FEC
+
+    ie = FecIndependentExpenditure(
+        spender_committee_id="C00866517",
+        spender_name="Go America PAC",
+        candidate_id="H4CO08034",
+        support_oppose="support",
+        support_oppose_raw="S",
+        amount=9000.0,
+        date=date(2024, 10, 30),
+        transaction_id="E2D2833410CAA40CB9A5",
+    )
+    assert ie.office == "H"  # House-only slice
+    assert ie.provenance == PROVENANCE_FEC_IE
+    # cand/bioguide are optional — an unattributed IE is still a valid record.
+    blank = FecIndependentExpenditure(spender_committee_id="C90022559", amount=0.0)
+    assert blank.candidate_id is None and blank.bioguide_id is None
 
 
 def test_fec_member_candidate_link_round_trips():

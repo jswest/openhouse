@@ -493,6 +493,36 @@ bioguide on a `bioguide_id` field:
    `--no-reference`), rather than aborting before any disclosure PDFs download —
    identity is optional enrichment, never a gate. If upstream moves again, update
    `LEGISLATORS_URL_TEMPLATE` in `pull.py` and this note together.
+
+   **Committee membership — ✅ VERIFIED 2026-06-19 (#195).** The same CC0 project
+   and the same gh-pages base serve the committee data, fetched by `pull` into the
+   **same** `raw/reference/` lane and the **same** `--no-reference` gate:
+
+   - `…/committees-current.json` — committee/subcommittee **definitions** (a list;
+     each House committee has `type:"house"`, `thomas_id`, `name`, and a
+     `subcommittees[]` array of `{thomas_id, name}`).
+   - `…/committee-membership-current.json` — **membership** keyed by committee
+     thomas code → a list of member rows `{bioguide, party, rank, title}`. A
+     subcommittee's code is the parent's `thomas_id` **concatenated** with the
+     subcommittee's `thomas_id` (parent `HSAG` + sub `03` → `HSAG03`). Senate
+     (`SS…`) and joint codes also appear and are **excluded** from the House join.
+
+   **Coverage limitation (verified, not assumed).** Membership is
+   **CURRENT-CONGRESS-ONLY** — the 119th (2025–26). The membership rows carry **no
+   congress field**, and there is **no historical membership file**:
+   `committee-membership-historical.json` **404s** upstream (probed 2026-06-19).
+   `committees-historical.json` exists but carries only *definitions* (each with a
+   `congresses[]` list), never membership. So `reference --committees` can answer
+   only the current congress; `--congress N` / `--year Y` outside it return
+   nothing, declared in the stderr residual. The current congress is hard-coded as
+   `CURRENT_MEMBERSHIP_CONGRESS` (`legislators.py`); bump it the cycle the upstream
+   snapshot rolls forward. The join is offline/deterministic (`load_committee_index`
+   in `legislators.py`), surfaced by `openhouse reference <member> --committees
+   [--congress N | --year Y]`: opt-in (a bare `reference <str>` stays byte-stable),
+   one row per committee/subcommittee seat `{congress, committee, subcommittee?,
+   rank, title, party}`, **COMPLETE** over the cached snapshot with the
+   current-congress-only residual on stderr. See README *reference* and
+   `skill/reference.md`.
 2. **`name:<name_key>`** — the last resort when no seat matched. The key is the
    old normalized slug:
 
@@ -960,6 +990,34 @@ fixtures under `tests/fixtures/fec/`):
   does not carry one, so `FecCommittee.affiliation` has no bulk source and is
   left `None` for now.
 
+**Super-PAC independent expenditures (GH-0194 probe, 2024 cycle).** A *fifth*
+bulk file, acquired alongside the four above but **structurally different**:
+
+- **URL & redirect.** `https://www.fec.gov/files/bulk-downloads/<cycle>/independent_expenditure_<cycle>.csv`
+  (e.g. `…/2024/independent_expenditure_2024.csv`) — 302s to the same AWS GovCloud
+  S3 host as the four zips; the client follows redirects and records both URLs.
+- **A plain headered CSV, NOT a zip.** Unlike the four pipe-delimited files, the
+  IE file is a comma-delimited, **UTF-8**, header-row CSV served directly (no inner
+  member to extract). `fec pull` writes the response body straight to
+  `raw/fec/<cycle>/independent_expenditure_<cycle>.csv`.
+- **23 columns**, header names (the ones the parse reads):
+  `cand_id`, `cand_name`, `spe_id` (spender committee), `spe_nam`, `ele_type`,
+  `can_office_state`, `can_office_dis`, **`can_office`** (`H`/`S`/`P`/blank — we
+  keep only `H`), `cand_pty_aff`, **`exp_amo`** (amount), **`exp_date`**
+  (`DD-MON-YY`, e.g. `28-OCT-24` — *unlike* itpas2's `MMDDYYYY`), `agg_amo`,
+  **`sup_opp`** (`S` = support / `O` = oppose / blank), **`pur`** (purpose),
+  `pay`, `file_num`, `amndt_ind`, **`tran_id`**, **`image_num`**, `receipt_dat`,
+  `fec_election_yr`, `prev_file_num`, `dissem_dt`.
+- **Real 2024 size:** ~19.5 MB, ~73,449 data rows (30,900 House; of those ~23,175
+  support / ~7,631 oppose / ~94 blank; ~5,050 House rows carry a blank `cand_id`).
+  Well under the 150 MB park cap.
+- **`spe_id` / `spe_nam` carry leading/trailing whitespace** in the raw file — the
+  parse strips them. A spender id may be a normal `C########` committee (joinable
+  to `cm` for `connected_organization_name`) or a `C9#######` IE-only filer id
+  (no `cm` row → connected org left `None`).
+- **The IE file carries NO connected-organization column** — that is surfaced by
+  joining `spe_id` to `cm` (raw; no industry classification, §13.7).
+
 ### 13.6 Records & schema version
 
 The contract (`openhouse/schemas.py`): `FecCommittee` (committee id, name,
@@ -971,10 +1029,19 @@ pair lets a later pass de-duplicate the halves rather than double-count); and th
 member↔candidate link `FecMemberCandidateLink` (`bioguide_id`, `candidate_id`,
 `committee_id`).
 
+Plus, since GH-0194, `FecIndependentExpenditure` — the separately-footed
+super-PAC IE slice (`spender_committee_id`, `spender_name`,
+`connected_organization_name`, targeted `candidate_id` + bridged `bioguide_id`,
+`office` `H`, `support_oppose` + `_raw`, `amount`, `date`, `purpose`,
+`image_number` + `transaction_id`, `provenance = "fec_ie"`). See §13.7 for why it
+is never summed with `FecPacContribution`.
+
 These are versioned by **`FEC_SCHEMA_VERSION`**, **independent of** the Clerk
 lane's `SCHEMA_VERSION` — the same independence as `inspect`'s
 `LABELS_SCHEMA_VERSION` (a reshape in one lane must not force a re-parse of the
-other). It starts at `1` and is stamped into the FEC lane's own parse-manifest
+other). It is **`2`** as of GH-0194 (bumped from `1` for the IE model — adding the
+model also refreshed `schemas.fingerprint` in the same change) and is stamped into
+the FEC lane's own parse-manifest
 (a later sub-issue), the way `SCHEMA_VERSION` is stamped into the clerk
 parse-manifest (§6.5). The release fingerprint guard (§GH-0043) auto-discovers
 **all** models in `schemas.py`, so adding the FEC models refreshed
@@ -987,10 +1054,30 @@ Out of scope for Path 1 (cross-ref #167): **Path 2** (employee-bundling by
 free-text `employer` — lossy, and legally *not* institutional money); **industry
 classification** (needs OpenSecrets CRP codes, which are non-commercial /
 educational-only — importing them would re-import a license restriction we avoid;
-we roll up to **organization**, never industry); **super PACs / IEs /
-501(c)(4)** (treasury money that can't legally reach the member, or isn't
-disclosed). `read` output will state plainly that it shows the *disclosed,
-candidate-side* slice, not total influence.
+we roll up to **organization**, never industry); **501(c)(4) / soft / "dark"
+money** (undisclosed treasury money). `read` output states plainly that it shows
+the *disclosed, candidate-side* slice, not total influence.
+
+**Super-PAC independent expenditures — IN SCOPE as a separately-footed slice
+(GH-0194).** Originally listed here as a non-goal on the grounds that IE treasury
+money can't legally reach the member; that reasoning *stands*, and is exactly why
+IEs are added as a **distinct, never-summed slice** rather than folded into the
+Path-1 hard money:
+
+- **Different legal footing.** A Schedule-E independent expenditure is
+  *uncoordinated* outside spending FOR or AGAINST a candidate. The money does NOT
+  go to the member and does NOT carry Path 1's "disclosed, candidate-side hard
+  money" guarantee. It must **never** be summed with the connected-SSF set.
+- **Different provenance.** IE records carry `provenance = "fec_ie"` (vs Path 1's
+  `"fec"`), emitted to their **own** `independent-expenditures.json`, so the two
+  footings can never blur downstream.
+- **Both directions, House-only, completeness-first.** Support and oppose are both
+  kept and tagged (`support_oppose` + `_raw`); every House-candidate IE (`office
+  H`) is kept regardless of the spending committee's type; the spender's
+  `connected_organization_name` is preserved **raw** (joined from `cm`), with **no
+  industry classification** (the OpenSecrets non-goal above stays intact).
+- **`pull` + `parse` only.** No `fec read` IE surface in GH-0194 (a deferred
+  follow-up); the parsed JSON is the deliverable.
 
 ### 13.8 `fec parse` — normalization contract (#171)
 
@@ -1010,13 +1097,29 @@ no network, no wall clock (the single entry-time `generated_at` is threaded in,
   `committee_id` filled from `ccl` (candidate→principal committee, designation
   `P`). An unresolved link is **not** written here (no sentinel committee leaks
   downstream); it lands in the residual instead.
+- `independent-expenditures.json` — the kept House super-PAC IEs
+  (`FecIndependentExpenditure`, `provenance = "fec_ie"`), in first-appearance CSV
+  row order. A **separately-footed** slice (§13.7), written even when empty so a
+  consumer can tell "no House IEs" from "IE file not pulled" (the latter logs to
+  stderr; an old pre-GH-0194 cycle without the CSV is a clean skip of just this
+  output). NEVER summed with `contributions.json`.
 - `fec-parse-manifest.json` — `FEC_SCHEMA_VERSION`, counts (committees total /
   contributing, contributions kept / filtered, `by_org_type`, filtered-by-reason,
   member links resolved / unresolved, members without an FEC id, `pac_limit`
-  breaches), the `pac_limit_breaches` detail, and the affiliation limitation note.
-- `fec-unparsed-manifest.json` — every excluded contribution, every unresolved
-  member link, every member with no FEC id, each with a `reason` — never a silent
-  gap.
+  breaches; plus the IE block `ie_kept` / `ie_filtered` / `ie_by_direction` /
+  `ie_filtered_by_reason` and `source_rows.ie_data_rows`), the `pac_limit_breaches`
+  detail, and the affiliation limitation note.
+- `fec-unparsed-manifest.json` — every excluded contribution, every filtered/
+  unattributed IE (`filtered_independent_expenditures`), every unresolved member
+  link, every member with no FEC id, each with a `reason` — never a silent gap.
+
+**IE filter (§13.7, GH-0194):** keep an IE iff `can_office == H`; a non-House row
+is a `not_house_candidate` residual. Both directions kept. A House row with a blank
+`cand_id` is `unattributed` — **kept anyway** (the `bioguide_id`/`candidate_id`
+left `None`) AND recorded in the residual as `unresolved_candidate` (audit, not a
+drop). A row shorter than the header is `malformed_short_row`. Reconciliation: kept
++ filtered = raw IE data rows, with the caveat that an unattributed House IE is
+counted in **both** kept and the residual (it is kept, not dropped — CLAUDE.md).
 
 **Path-1 filter:** keep a contribution iff its **contributing** committee (joined
 via `cm`) has `organization_type ∈ {C, T, L, M, V, W}` (§13.3); retain the
