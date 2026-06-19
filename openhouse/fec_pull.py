@@ -151,56 +151,58 @@ def _extract_bulk_zip(
     return len(content)
 
 
-def pull_fec_file(
+def _pull_fec_bulk(
     client: httpx.Client,
     cycle: int,
-    stem: str,
-    inner_name: str,
+    *,
+    file_name: str,
+    inner_name: Optional[str],
     data_dir: Path,
     fetched_at: str,
-    *,
-    prior: Optional[dict] = None,
-    force: bool = False,
-    delay: float = FEC_DEFAULT_DELAY_SECONDS,
-    sleep: Callable[[float], None] = time.sleep,
-    paced: bool = True,
+    prior: Optional[dict],
+    force: bool,
+    delay: float,
+    sleep: Callable[[float], None],
+    paced: bool,
+    finalize: Callable[[bytes, Path], tuple[int, dict]],
 ) -> dict:
-    """Acquire one FEC bulk file for ``cycle`` into ``raw/fec/<cycle>/``.
+    """Shared polite/resumable/manifest core for one FEC bulk fetch (§13.5).
 
-    Downloads ``<stem><yy>.zip``, follows redirects, validates the ZIP, extracts
-    the inner ``.txt``, and returns a manifest entry dict (requested URL, final
-    redirected URL, status, byte size, sha256, fetched-at). Idempotent: a present
-    inner ``.txt`` whose on-disk size matches the recorded manifest entry is
-    skipped with no network request (``status`` ``"skipped"``).
+    The load-bearing crawl contract lives here once — size-consistent skip, the
+    polite pacing floor, the :data:`MAX_FILE_BYTES` cap, redirect-final-url capture,
+    and the manifest entry shape (requested+final URL, status, bytes, sha256,
+    fetched-at). Only how the validated body lands on disk varies, and that is the
+    ``finalize(content, cycle_dir) -> (bytes_written, extra_fields)`` callback: the
+    zip lane extracts an inner ``.txt``; the IE lane writes the raw CSV.
 
-    ``paced`` (default True) sleeps ``delay`` before the *network* request — the
-    caller sets it False for the first fetch of a run so the very first request
-    is not delayed, exactly as the Clerk lane paces "before every request but the
-    first". A skip costs no request and so no pacing delay.
-
-    ``prior`` is this file's entry from the cycle manifest already loaded by the
-    caller (``pull_fec_cycle``); it is the resumability check — a present inner
-    ``.txt`` whose on-disk size matches ``prior["bytes"]`` is skipped.
+    ``inner_name`` is the on-disk file the skip-check watches (the extracted member
+    for a zip, ``None`` when the saved file *is* ``file_name``); when set it is also
+    recorded as the manifest ``inner`` field. ``paced`` (default True) sleeps
+    ``delay`` before the *network* request — False for the first fetch of a run so
+    the very first request is not delayed. ``prior`` is this file's prior manifest
+    entry (the resumability check: a present file whose on-disk size matches
+    ``prior["bytes"]`` is skipped with no request).
 
     Raises :class:`PullError` on 403 / exhausted backoff (via :func:`polite_get`),
-    a non-zip response, a missing inner member, or a file larger than
-    :data:`MAX_FILE_BYTES` — the operator instruction is to STOP on anything
-    surprising rather than work around it.
+    a file larger than :data:`MAX_FILE_BYTES`, or whatever ``finalize`` rejects (a
+    non-zip response, a missing inner member) — STOP on anything surprising.
     """
     cycle_dir = fec_raw_dir(data_dir, cycle)
-    bulk_name = fec_bulk_name(stem, cycle)
-    url = FEC_BULK_URL_TEMPLATE.format(cycle=cycle, name=bulk_name)
-    dest = cycle_dir / inner_name
+    url = FEC_BULK_URL_TEMPLATE.format(cycle=cycle, name=file_name)
+    dest_name = inner_name if inner_name is not None else file_name
+    dest = cycle_dir / dest_name
 
-    base = {"file": bulk_name, "inner": inner_name, "requested_url": url}
+    base = {"file": file_name, "requested_url": url}
+    if inner_name is not None:
+        base["inner"] = inner_name
 
-    # Resume: a present inner .txt whose size matches the prior manifest entry is
-    # skipped with no request. We do not re-fetch the zip just to re-verify; the
-    # size match is the resumability check, mirroring pull.py's PDF skip.
+    # Resume: a present file whose size matches the prior manifest entry is skipped
+    # with no request. We do not re-fetch just to re-verify; the size match is the
+    # resumability check, mirroring pull.py's PDF skip.
     if not force and dest.exists() and dest.stat().st_size > 0:
         if prior is not None and prior.get("bytes") == dest.stat().st_size:
             print(
-                f"fec {cycle}: {inner_name} present and size-consistent; "
+                f"fec {cycle}: {dest_name} present and size-consistent; "
                 f"skipping (re-fetch with --force).",
                 file=sys.stderr,
             )
@@ -217,30 +219,64 @@ def pull_fec_file(
     content = response.content
     if len(content) > MAX_FILE_BYTES:
         raise PullError(
-            f"{bulk_name} is {len(content):,} bytes (> {MAX_FILE_BYTES:,} cap). "
-            f"pas2 is expected to be tens of MB, but this is far larger than "
-            f"expected — stopping rather than pushing through (operator: park on "
-            f"anything surprising)."
+            f"{file_name} is {len(content):,} bytes (> {MAX_FILE_BYTES:,} cap). "
+            f"FEC bulk files are expected to be tens of MB, but this is far larger "
+            f"than expected — stopping rather than pushing through (operator: park "
+            f"on anything surprising)."
         )
 
     # ``response.url`` is the FINAL url after redirects (the client follows them);
     # record it beside the requested one (#170: 302 to a storage host).
     final_url = str(response.url)
-    size = _extract_bulk_zip(content, inner_name, bulk_name, cycle_dir)
+    size, extra = finalize(content, cycle_dir)
 
-    print(
-        f"fec {cycle}: extracted {inner_name} ({size:,} bytes) into {cycle_dir}",
-        file=sys.stderr,
-    )
     return {
         **base,
         "final_url": final_url,
         "status": response.status_code,
-        "zip_bytes": len(content),
         "bytes": size,
         "sha256": hashlib.sha256(content).hexdigest(),
         "fetched_at": fetched_at,
+        **extra,
     }
+
+
+def pull_fec_file(
+    client: httpx.Client,
+    cycle: int,
+    stem: str,
+    inner_name: str,
+    data_dir: Path,
+    fetched_at: str,
+    *,
+    prior: Optional[dict] = None,
+    force: bool = False,
+    delay: float = FEC_DEFAULT_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    paced: bool = True,
+) -> dict:
+    """Acquire one zipped FEC bulk file for ``cycle`` into ``raw/fec/<cycle>/``.
+
+    Downloads ``<stem><yy>.zip``, validates the ZIP, and extracts the inner
+    ``.txt``; the manifest entry carries an extra ``zip_bytes`` (the compressed
+    download size) beside ``bytes`` (the extracted member). All the polite/resumable
+    contract is in :func:`_pull_fec_bulk`.
+    """
+    bulk_name = fec_bulk_name(stem, cycle)
+
+    def finalize(content: bytes, cycle_dir: Path) -> tuple[int, dict]:
+        size = _extract_bulk_zip(content, inner_name, bulk_name, cycle_dir)
+        print(
+            f"fec {cycle}: extracted {inner_name} ({size:,} bytes) into {cycle_dir}",
+            file=sys.stderr,
+        )
+        return size, {"zip_bytes": len(content)}
+
+    return _pull_fec_bulk(
+        client, cycle, file_name=bulk_name, inner_name=inner_name,
+        data_dir=data_dir, fetched_at=fetched_at, prior=prior, force=force,
+        delay=delay, sleep=sleep, paced=paced, finalize=finalize,
+    )
 
 
 def fec_ie_name(cycle: int) -> str:
@@ -262,68 +298,33 @@ def pull_fec_ie_file(
 ) -> dict:
     """Acquire the super-PAC IE bulk CSV for ``cycle`` (GH-0194, SPEC §13.5a).
 
-    The IE file is a **plain headered CSV, not a zip** (the by-hand probe), so
-    this mirrors :func:`pull_fec_file`'s polite/resumable/manifest contract but
-    writes the response body straight to ``raw/fec/<cycle>/`` — no inner member to
-    extract. Idempotent: a present CSV whose on-disk size matches the recorded
-    manifest entry is skipped with no request. Follows redirects (the bulk host
-    302s to a GovCloud S3 host, #170) and records the final URL beside the
-    requested one. Raises :class:`PullError` on 403 / exhausted backoff or a file
-    larger than :data:`MAX_FILE_BYTES` (park on anything surprising).
+    The IE file is a **plain headered CSV, not a zip** (the by-hand probe), so the
+    response body is written straight to ``raw/fec/<cycle>/`` with no inner member —
+    the only divergence from the zip lane, isolated in ``finalize`` below. The
+    polite/resumable/manifest contract is shared via :func:`_pull_fec_bulk`.
     """
-    cycle_dir = fec_raw_dir(data_dir, cycle)
     ie_name = fec_ie_name(cycle)
-    url = FEC_BULK_URL_TEMPLATE.format(cycle=cycle, name=ie_name)
-    dest = cycle_dir / ie_name
 
-    base = {"file": ie_name, "requested_url": url}
-
-    if not force and dest.exists() and dest.stat().st_size > 0:
-        if prior is not None and prior.get("bytes") == dest.stat().st_size:
-            print(
-                f"fec {cycle}: {ie_name} present and size-consistent; "
-                f"skipping (re-fetch with --force).",
-                file=sys.stderr,
-            )
-            entry = dict(prior)
-            entry["status"] = "skipped"
-            return entry
-
-    if paced:
-        sleep(delay)  # polite floor (10 s) before every network request
-
-    print(f"fec {cycle}: fetching {url}", file=sys.stderr)
-    response = polite_get(client, url, sleep=sleep)
-
-    content = response.content
-    if len(content) > MAX_FILE_BYTES:
-        raise PullError(
-            f"{ie_name} is {len(content):,} bytes (> {MAX_FILE_BYTES:,} cap). "
-            f"The IE file is expected to be tens of MB, but this is far larger "
-            f"than expected — stopping rather than pushing through (operator: park "
-            f"on anything surprising)."
+    def finalize(content: bytes, cycle_dir: Path) -> tuple[int, dict]:
+        cycle_dir.mkdir(parents=True, exist_ok=True)
+        # Atomic write (mirrors _extract_bulk_zip): an interrupted run must never
+        # leave a truncated CSV behind, since the skip-if-present check would then
+        # serve the partial file forever.
+        dest = cycle_dir / ie_name
+        tmp = dest.with_name(dest.name + ".part")
+        tmp.write_bytes(content)
+        tmp.replace(dest)
+        print(
+            f"fec {cycle}: saved {ie_name} ({len(content):,} bytes) into {cycle_dir}",
+            file=sys.stderr,
         )
+        return len(content), {}
 
-    final_url = str(response.url)
-    cycle_dir.mkdir(parents=True, exist_ok=True)
-    # Atomic write (mirrors _extract_bulk_zip): an interrupted run must never leave
-    # a truncated CSV behind, since the skip-if-present check would serve it forever.
-    tmp = dest.with_name(dest.name + ".part")
-    tmp.write_bytes(content)
-    tmp.replace(dest)
-
-    print(
-        f"fec {cycle}: saved {ie_name} ({len(content):,} bytes) into {cycle_dir}",
-        file=sys.stderr,
+    return _pull_fec_bulk(
+        client, cycle, file_name=ie_name, inner_name=None,
+        data_dir=data_dir, fetched_at=fetched_at, prior=prior, force=force,
+        delay=delay, sleep=sleep, paced=paced, finalize=finalize,
     )
-    return {
-        **base,
-        "final_url": final_url,
-        "status": response.status_code,
-        "bytes": len(content),
-        "sha256": hashlib.sha256(content).hexdigest(),
-        "fetched_at": fetched_at,
-    }
 
 
 def _write_manifest(
