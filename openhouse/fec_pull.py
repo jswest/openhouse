@@ -27,6 +27,10 @@ The four files per cycle (``<yy>`` = 2-digit cycle, 2024 → ``24``):
 - ``pas2<yy>.zip`` — committee→candidate contributions (line-11C PAC money),
   whose inner member is ``itpas2.txt``
 
+Plus, since GH-0194, the super-PAC **independent-expenditure** file —
+``independent_expenditure_<cycle>.csv`` (a *plain headered CSV, not a zip*; the
+Schedule-E outside-spending slice, separately footed from Path 1, SPEC §13.7).
+
 Each zip is extracted into ``raw/fec/<cycle>/`` and a ``fec-pull-manifest.json``
 is written (per file: requested URL, final redirected URL, status, byte size,
 sha256, fetched-at injected once at command entry — no wall-clock in logic).
@@ -87,6 +91,13 @@ FEC_BULK_FILES: tuple[tuple[str, str], ...] = (
 # MB) — that is expected, not weirdness. But a file larger than this after
 # following redirects is surprising enough to STOP rather than push through.
 MAX_FILE_BYTES = 150 * 1024 * 1024
+
+# The super-PAC independent-expenditure bulk file (GH-0194, SPEC §13.5a). Unlike
+# the four Path-1 files this is a **plain headered CSV, not a zip** —
+# ``independent_expenditure_<cycle>.csv`` at the same cycle path (verified by the
+# by-hand probe; the 2024 file is ~19.5 MB). Acquired alongside the four files,
+# but down a separate code path because there is no inner zip member to extract.
+FEC_IE_FILE_TEMPLATE = "independent_expenditure_{cycle}.csv"
 
 
 def cycle_suffix(cycle: int) -> str:
@@ -232,6 +243,89 @@ def pull_fec_file(
     }
 
 
+def fec_ie_name(cycle: int) -> str:
+    """The IE bulk file name for a cycle (2024 → ``independent_expenditure_2024.csv``)."""
+    return FEC_IE_FILE_TEMPLATE.format(cycle=cycle)
+
+
+def pull_fec_ie_file(
+    client: httpx.Client,
+    cycle: int,
+    data_dir: Path,
+    fetched_at: str,
+    *,
+    prior: Optional[dict] = None,
+    force: bool = False,
+    delay: float = FEC_DEFAULT_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    paced: bool = True,
+) -> dict:
+    """Acquire the super-PAC IE bulk CSV for ``cycle`` (GH-0194, SPEC §13.5a).
+
+    The IE file is a **plain headered CSV, not a zip** (the by-hand probe), so
+    this mirrors :func:`pull_fec_file`'s polite/resumable/manifest contract but
+    writes the response body straight to ``raw/fec/<cycle>/`` — no inner member to
+    extract. Idempotent: a present CSV whose on-disk size matches the recorded
+    manifest entry is skipped with no request. Follows redirects (the bulk host
+    302s to a GovCloud S3 host, #170) and records the final URL beside the
+    requested one. Raises :class:`PullError` on 403 / exhausted backoff or a file
+    larger than :data:`MAX_FILE_BYTES` (park on anything surprising).
+    """
+    cycle_dir = fec_raw_dir(data_dir, cycle)
+    ie_name = fec_ie_name(cycle)
+    url = FEC_BULK_URL_TEMPLATE.format(cycle=cycle, name=ie_name)
+    dest = cycle_dir / ie_name
+
+    base = {"file": ie_name, "requested_url": url}
+
+    if not force and dest.exists() and dest.stat().st_size > 0:
+        if prior is not None and prior.get("bytes") == dest.stat().st_size:
+            print(
+                f"fec {cycle}: {ie_name} present and size-consistent; "
+                f"skipping (re-fetch with --force).",
+                file=sys.stderr,
+            )
+            entry = dict(prior)
+            entry["status"] = "skipped"
+            return entry
+
+    if paced:
+        sleep(delay)  # polite floor (10 s) before every network request
+
+    print(f"fec {cycle}: fetching {url}", file=sys.stderr)
+    response = polite_get(client, url, sleep=sleep)
+
+    content = response.content
+    if len(content) > MAX_FILE_BYTES:
+        raise PullError(
+            f"{ie_name} is {len(content):,} bytes (> {MAX_FILE_BYTES:,} cap). "
+            f"The IE file is expected to be tens of MB, but this is far larger "
+            f"than expected — stopping rather than pushing through (operator: park "
+            f"on anything surprising)."
+        )
+
+    final_url = str(response.url)
+    cycle_dir.mkdir(parents=True, exist_ok=True)
+    # Atomic write (mirrors _extract_bulk_zip): an interrupted run must never leave
+    # a truncated CSV behind, since the skip-if-present check would serve it forever.
+    tmp = dest.with_name(dest.name + ".part")
+    tmp.write_bytes(content)
+    tmp.replace(dest)
+
+    print(
+        f"fec {cycle}: saved {ie_name} ({len(content):,} bytes) into {cycle_dir}",
+        file=sys.stderr,
+    )
+    return {
+        **base,
+        "final_url": final_url,
+        "status": response.status_code,
+        "bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "fetched_at": fetched_at,
+    }
+
+
 def _write_manifest(
     cycle_dir: Path, cycle: int, files: dict, fetched_at: str
 ) -> None:
@@ -303,6 +397,17 @@ def pull_fec_cycle(
             )
             files[entry["file"]] = entry
             counts["skipped" if entry.get("status") == "skipped" else "fetched"] += 1
+
+        # The super-PAC IE CSV (GH-0194), acquired alongside the four Path-1 files.
+        # It always paces (it follows the four files, never the run's first fetch).
+        ie_name = fec_ie_name(cycle)
+        ie_entry = pull_fec_ie_file(
+            client, cycle, data_dir, fetched_at,
+            prior=files.get(ie_name),
+            force=force, delay=delay, sleep=sleep, paced=True,
+        )
+        files[ie_entry["file"]] = ie_entry
+        counts["skipped" if ie_entry.get("status") == "skipped" else "fetched"] += 1
     finally:
         _write_manifest(cycle_dir, cycle, files, fetched_at)
 

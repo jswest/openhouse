@@ -244,9 +244,12 @@ of total influence. Out of scope:
 - Organizations are tagged by their FEC type (corporation / trade / labor /
   membership / cooperative / corp-without-stock), not mapped to sectors or
   industries.
-- Super-PAC independent expenditures, dark money, and soft money are not
-  included — only direct, itemized contributions to the candidate's principal
-  campaign committee.
+- `fec read` (the donors/pac query) covers only direct, itemized contributions
+  to the candidate's principal campaign committee. Dark money and soft money are
+  never included. **Super-PAC independent expenditures are a separate matter:**
+  `fec pull` + `fec parse` now acquire and normalize them (see below), but they
+  are a **separately-footed slice** with no `fec read` surface yet — never summed
+  with the connected-PAC contributions above.
 
 Two further limitations are declared on every `fec read` response (on stderr):
 
@@ -261,6 +264,19 @@ committees).
 - **Parent and subsidiary PACs are reported separately.** FEC data carries no
   affiliation column, so a parent organization and its subsidiary PACs appear as
   separate entries — `openhouse` never merges them from data it does not have.
+
+**Super-PAC independent expenditures are a separate, separately-footed slice.**
+`fec pull` + `fec parse` acquire the FEC Schedule-E bulk file
+(`independent_expenditure_<cycle>.csv`) and normalize the spending **for or
+against** House candidates into `parsed/fec/<cycle>/independent-expenditures.json`
+(both directions kept and tagged). This is **uncoordinated outside spending** — it
+does **not** go to the member and is **not** the connected-PAC hard money above;
+it carries a distinct `provenance` (`"fec_ie"`) and is never summed with
+contributions. The spending committee's id and any connected-organization name are
+preserved **raw** (no industry classification). It is public-domain FEC data (the
+[§30111(a)](https://www.law.cornell.edu/uscode/text/52/30111) "sale or use" bar
+still applies). There is no `fec read` IE surface yet — the parsed JSON is the
+deliverable.
 
 ## Use restriction
 

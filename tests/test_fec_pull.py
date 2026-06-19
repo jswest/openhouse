@@ -56,22 +56,32 @@ def _served_zips(cycle: int = 2024) -> dict[str, bytes]:
     }
 
 
+def _served_ie(cycle: int = 2024) -> dict[str, bytes]:
+    """The super-PAC IE CSV served as a plain (un-zipped) body (GH-0194)."""
+    name = f"independent_expenditure_{cycle}.csv"
+    return {name: (FIXTURES / name).read_bytes()}
+
+
 def make_handler(cycle: int = 2024, *, redirect: bool = True):
     """A MockTransport handler that 302s the bulk URL to the storage host, then
-    serves the matching in-memory zip (mirroring the live host, GH-0170)."""
+    serves the matching in-memory zip (mirroring the live host, GH-0170). The
+    super-PAC IE file (GH-0194) is served as a plain CSV body, not a zip."""
     zips = _served_zips(cycle)
+    csvs = _served_ie(cycle)
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         path = request.url.path  # /files/bulk-downloads/<cycle>/<name> or /bulk-downloads/...
         name = path.rsplit("/", 1)[-1]
-        if name not in zips:
+        if name not in zips and name not in csvs:
             return httpx.Response(404, text="not found")
         # First hit on the fec.gov host → 302 to the storage host (the real flow).
         if redirect and request.url.host == "www.fec.gov":
             target = f"{STORAGE_HOST}/bulk-downloads/{cycle}/{name}"
             return httpx.Response(302, headers={"location": target})
+        if name in csvs:
+            return httpx.Response(200, content=csvs[name])
         return httpx.Response(200, content=zips[name])
 
     handler.calls = calls  # type: ignore[attr-defined]
@@ -101,7 +111,7 @@ def test_pull_cycle_fetches_four_files_and_extracts(tmp_path):
     result = pull_fec_cycle(
         client, 2024, tmp_path, "2026-01-01T00:00:00", sleep=no_sleep
     )
-    assert result == {"cycle": 2024, "fetched": 4, "skipped": 0}
+    assert result == {"cycle": 2024, "fetched": 5, "skipped": 0}
 
     cycle_dir = tmp_path / "raw" / "fec" / "2024"
     for inner in ("cn.txt", "ccl.txt", "cm.txt", "itpas2.txt"):
@@ -119,7 +129,7 @@ def test_manifest_records_requested_and_final_url(tmp_path):
     )
     assert manifest["cycle"] == 2024
     assert manifest["fetched_at"] == "2026-01-01T00:00:00"
-    assert manifest["count"] == 4
+    assert manifest["count"] == 5
     entry = manifest["files"]["cn24.zip"]
     # requested URL is the polite fec.gov bulk URL; final URL is the storage host.
     assert entry["requested_url"].startswith("https://www.fec.gov/files/bulk-downloads/2024/")
@@ -149,7 +159,7 @@ def test_resume_skips_present_size_consistent_files(tmp_path):
     pull_fec_cycle(
         make_client(handler1), 2024, tmp_path, "2026-01-01T00:00:00", sleep=no_sleep
     )
-    assert len(handler1.origin_calls()) == 4  # all four fetched on the first run
+    assert len(handler1.origin_calls()) == 5  # four zips + the IE csv fetched first run
 
     # Second run against a fresh handler: everything present + size-consistent →
     # no network request at all.
@@ -157,7 +167,7 @@ def test_resume_skips_present_size_consistent_files(tmp_path):
     result = pull_fec_cycle(
         make_client(handler2), 2024, tmp_path, "2026-02-02T00:00:00", sleep=no_sleep
     )
-    assert result == {"cycle": 2024, "fetched": 0, "skipped": 4}
+    assert result == {"cycle": 2024, "fetched": 0, "skipped": 5}
     assert handler2.origin_calls() == []  # nothing re-requested
 
 
@@ -171,8 +181,8 @@ def test_force_redownloads_present_files(tmp_path):
         make_client(handler), 2024, tmp_path, "2026-02-02T00:00:00",
         force=True, sleep=no_sleep,
     )
-    assert result == {"cycle": 2024, "fetched": 4, "skipped": 0}
-    assert len(handler.origin_calls()) == 4
+    assert result == {"cycle": 2024, "fetched": 5, "skipped": 0}
+    assert len(handler.origin_calls()) == 5
 
 
 def test_partial_file_is_redownloaded(tmp_path):
@@ -188,7 +198,7 @@ def test_partial_file_is_redownloaded(tmp_path):
     result = pull_fec_cycle(
         make_client(handler), 2024, tmp_path, "2026-02-02T00:00:00", sleep=no_sleep
     )
-    assert result["fetched"] == 1 and result["skipped"] == 3
+    assert result["fetched"] == 1 and result["skipped"] == 4
     assert cn.read_text() != "truncated"  # restored from the re-download
 
 
@@ -202,7 +212,7 @@ def test_paces_between_files_not_before_first(tmp_path):
         sleep=sleeps.append,
     )
     # four files, first not paced → three 10 s sleeps between them.
-    assert sleeps == [fec.FEC_DEFAULT_DELAY_SECONDS] * 3
+    assert sleeps == [fec.FEC_DEFAULT_DELAY_SECONDS] * 4  # 5 files, first unpaced
 
 
 # ---------------------------------------------------------------------------

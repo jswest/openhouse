@@ -40,10 +40,22 @@ file; there is no recipient-side file to cross-check against. So we **dedupe by
 transaction id** and keep the **$10k/PAC/cycle invariant** as a *sanity flag*
 (breach → flagged in the manifest, never dropped — it may legitimately trip where
 affiliation can't be collapsed, §13.8).
+
+**Super-PAC IEs (GH-0194, SPEC §13.7):** a fifth source,
+``independent_expenditure_<cycle>.csv`` — a *headered CSV*, unlike the four
+pipe-delimited files. A **separately-footed** slice: uncoordinated outside
+spending FOR/AGAINST a House candidate, NEVER summed with the Path-1 connected-SSF
+hard money (a distinct ``provenance`` tag enforces this). Both directions are
+kept and tagged; House-only; the spender's ``connected_organization_name`` is
+joined from ``cm`` raw (no industry classification); the target candidate joins to
+a bioguide via the same ``id.fec[]`` bridge. Emitted to its own
+``independent-expenditures.json`` with a complete residual (kept + filtered = raw,
+an unattributed House IE kept AND flagged — never dropped).
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from collections import defaultdict
@@ -57,9 +69,11 @@ from .legislators import (
     load_legislator_index,
 )
 from .schemas import (
+    FEC_IE_SUPPORT_OPPOSE_LABELS,
     FEC_ORG_TYPE_LABELS,
     FEC_SCHEMA_VERSION,
     FecCommittee,
+    FecIndependentExpenditure,
     FecMemberCandidateLink,
     FecPacContribution,
 )
@@ -98,6 +112,33 @@ FEC_UNPARSED_REASONS = (
     "not_connected_ssf",
     "malformed_short_row",
 )
+
+# Residual reasons emitted for an IE row that is filtered or unattributed
+# (GH-0194; never a silent drop, CLAUDE.md):
+#   * not_house_candidate — the IE targets a non-House office (P/S/blank). Out of
+#     scope for this House-only slice; counted, never kept.
+#   * unresolved_candidate — a House IE whose ``cand_id`` is blank (no candidate to
+#     attribute it to). Reported ``unattributed`` and STILL KEPT (the issue is
+#     explicit: never dropped); the residual records it so the count reconciles.
+#   * malformed_short_row — the CSV row carried fewer columns than the header, so
+#     it can't be positionally trusted; kept as a residual, counted, never dropped.
+FEC_IE_UNPARSED_REASONS = (
+    "not_house_candidate",
+    "unresolved_candidate",
+    "malformed_short_row",
+)
+
+# The IE bulk file is a *headered CSV* (UTF-8, comma-delimited) — NOT the
+# pipe-delimited latin-1 layout of the four Path-1 files (SPEC §13.5a, GH-0194).
+# Named per cycle (``independent_expenditure_<cycle>.csv``), read by header name.
+IE_HOUSE_OFFICE = "H"
+
+# The IE expenditure date is ``DD-MON-YY`` (e.g. ``28-OCT-24``) — a different
+# format from itpas2's ``MMDDYYYY``. Month abbreviations are uppercase in the file.
+_IE_MONTHS = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
 
 
 class FecParseError(Exception):
@@ -254,6 +295,149 @@ def _parse_date(raw: str):
         return date(int(text[4:8]), int(text[0:2]), int(text[2:4]))
     except ValueError:
         return None
+
+
+def _read_ie_rows(path: Path) -> tuple[list[str], list[list[str]]]:
+    """Read the IE bulk CSV into ``(header, rows)`` (GH-0194, SPEC §13.5a).
+
+    The IE file is a **headered, comma-delimited, UTF-8 CSV** (the by-hand probe)
+    — wholly unlike the four pipe-delimited latin-1 Path-1 files, so it gets its
+    own reader (``csv`` handles the quoted, comma-containing purpose fields the
+    Path-1 splitter would mangle). Returns the header row and the data rows; an
+    empty file yields ``([], [])``.
+    """
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        rows = list(reader)
+    if not rows:
+        return [], []
+    return rows[0], rows[1:]
+
+
+def _parse_ie_date(raw: str):
+    """An IE ``exp_date`` (``DD-MON-YY``) → ``date``, or ``None`` if absent.
+
+    The IE file dates as ``28-OCT-24`` (2-digit year, uppercase month abbrev),
+    unlike itpas2's ``MMDDYYYY``. The 2-digit year is read as ``20YY`` (FEC cycle
+    files are recent). Anything that doesn't parse cleanly yields ``None`` — the
+    expenditure is kept regardless (the date is not its identity).
+    """
+    text = (raw or "").strip().upper()
+    parts = text.split("-")
+    if len(parts) != 3:
+        return None
+    day, mon, year = parts
+    if not day.isdigit() or not year.isdigit() or mon not in _IE_MONTHS:
+        return None
+    try:
+        return date(2000 + int(year), _IE_MONTHS[mon], int(day))
+    except ValueError:
+        return None
+
+
+def _norm_support_oppose(raw: str) -> tuple[str | None, str | None]:
+    """An IE ``sup_opp`` code → (normalized label, raw code), the §2.3 pattern.
+
+    ``S`` → ``support``, ``O`` → ``oppose``; a blank/unmapped code keeps a ``None``
+    label beside its raw value (raw alongside normalized, never dropped).
+    """
+    code = (raw or "").strip()
+    if not code:
+        return None, None
+    return FEC_IE_SUPPORT_OPPOSE_LABELS.get(code), code
+
+
+def parse_independent_expenditures(
+    header: list[str],
+    rows: list[list[str]],
+    committees: dict[str, FecCommittee],
+    candidate_to_bioguide: dict[str, str],
+) -> tuple[list[FecIndependentExpenditure], list[dict], dict[str, int]]:
+    """Filter + normalize IE CSV rows into kept House IEs + residual (GH-0194).
+
+    Columns are read by **header name** (the CSV carries a header, unlike the
+    positional Path-1 files): ``cand_id``, ``spe_id``, ``spe_nam``, ``can_office``,
+    ``sup_opp``, ``exp_amo``, ``exp_date``, ``pur``, ``image_num``, ``tran_id``.
+
+    Per row:
+
+    0. **Short rows** — a row with fewer columns than the header can't be trusted
+       by name, so it lands in the residual ``malformed_short_row`` (with the column
+       count) and is counted — NEVER silently dropped (CLAUDE.md).
+    1. **House-only filter** — a row whose ``can_office`` is not ``H`` is out of
+       scope; it lands in the residual ``not_house_candidate`` and is counted.
+    2. **Both directions kept** — a House row is kept whether ``sup_opp`` is ``S``,
+       ``O``, or blank; the raw indicator rides along beside the normalized label.
+    3. **Attribution** — the targeted ``cand_id`` is joined to a bioguide via the
+       CC0 ``id.fec[]`` bridge where the link exists (``bioguide`` else ``None``).
+       A House row with a blank ``cand_id`` is ``unattributed``: it is **still
+       kept** (never dropped, per the issue) and ALSO recorded in the residual
+       ``unresolved_candidate`` so the count reconciles.
+    4. **Connected org** — the spender ``spe_id`` is joined to ``cm`` to surface
+       ``connected_organization_name`` (raw; no industry classification, §13.7);
+       a spender absent from ``cm`` simply leaves it ``None``.
+
+    Returns ``(kept, residual, by_direction)``: ``kept`` in first-appearance row
+    order; ``residual`` one entry per filtered/unattributed row; ``by_direction`` a
+    count of kept IEs per normalized direction (``support`` / ``oppose`` /
+    ``unspecified`` for a blank indicator).
+    """
+    col = {name: i for i, name in enumerate(header)}
+    ncols = len(header)
+    kept: list[FecIndependentExpenditure] = []
+    residual: list[dict] = []
+    by_direction: dict[str, int] = defaultdict(int)
+
+    def cell(row: list[str], name: str) -> str:
+        return row[col[name]].strip() if col.get(name) is not None else ""
+
+    for row in rows:
+        if len(row) < ncols:
+            residual.append({"columns": len(row), "reason": "malformed_short_row"})
+            continue
+
+        office = cell(row, "can_office").upper()
+        spender = cell(row, "spe_id")
+        candidate = cell(row, "cand_id")
+        support_oppose, support_oppose_raw = _norm_support_oppose(cell(row, "sup_opp"))
+        base = {
+            "spender_committee_id": spender,
+            "candidate_id": candidate or None,
+            "office": office or None,
+            "support_oppose_raw": support_oppose_raw,
+        }
+
+        if office != IE_HOUSE_OFFICE:
+            residual.append({**base, "reason": "not_house_candidate"})
+            continue
+
+        # A blank cand_id is unattributed: kept (never dropped) AND flagged.
+        if not candidate:
+            residual.append({**base, "reason": "unresolved_candidate"})
+
+        committee = committees.get(spender)
+        connected = committee.connected_organization_name if committee else None
+
+        kept.append(
+            FecIndependentExpenditure(
+                spender_committee_id=spender,
+                spender_name=cell(row, "spe_nam") or None,
+                connected_organization_name=connected,
+                candidate_id=candidate or None,
+                bioguide_id=candidate_to_bioguide.get(candidate) or None,
+                office=IE_HOUSE_OFFICE,
+                support_oppose=support_oppose,
+                support_oppose_raw=support_oppose_raw,
+                amount=_parse_amount(cell(row, "exp_amo")),
+                date=_parse_ie_date(cell(row, "exp_date")),
+                purpose=cell(row, "pur") or None,
+                image_number=cell(row, "image_num") or None,
+                transaction_id=cell(row, "tran_id") or None,
+            )
+        )
+        by_direction[support_oppose or "unspecified"] += 1
+
+    return kept, residual, dict(by_direction)
 
 
 def parse_contributions(
@@ -461,8 +645,11 @@ def parse_cycle(
     ``None``) — not a crash, so a multi-cycle range survives an un-pulled cycle.
     Otherwise builds the committee + principal-committee indexes, resolves the #169
     member-link committee seam from ``ccl``, Path-1-filters + normalizes ``itpas2``,
-    flags the $10k invariant, and writes ``committees.json`` + ``contributions.json``
-    + ``member-links.json`` + ``fec-parse-manifest.json`` + ``fec-unparsed-manifest.json``.
+    flags the $10k invariant, normalizes the separately-footed super-PAC IE slice
+    (GH-0194, if the IE CSV is present), and writes ``committees.json`` +
+    ``contributions.json`` + ``member-links.json`` +
+    ``independent-expenditures.json`` + ``fec-parse-manifest.json`` +
+    ``fec-unparsed-manifest.json``.
 
     Returns a compact summary dict, or ``None`` on a missing cycle.
     """
@@ -498,6 +685,28 @@ def parse_cycle(
     limit_breaches = check_pac_limit(kept, committees)
     contributing = _kept_committees(kept, committees)
 
+    # Super-PAC IEs (GH-0194) — a SEPARATELY-FOOTED slice, read from the headered
+    # CSV ``fec pull`` saved beside the four pipe files. The candidate→bioguide map
+    # is the *inverse* of the same CC0 ``id.fec[]`` bridge the contribution links
+    # ride (§13.2), so an IE attributes to the same member, never a name match. The
+    # IE file is optional: an old-pulled cycle without it is a clean skip of just
+    # the IE outputs (the contribution parse above still ran).
+    ie_path = raw_dir / f"independent_expenditure_{cycle}.csv"
+    candidate_to_bioguide = {link.candidate_id: link.bioguide_id for link in links}
+    if ie_path.exists():
+        ie_header, ie_rows = _read_ie_rows(ie_path)
+        ie_kept, ie_residual, ie_by_direction = parse_independent_expenditures(
+            ie_header, ie_rows, committees, candidate_to_bioguide
+        )
+    else:
+        ie_rows = []  # only len(ie_rows) is read downstream (ie_data_rows)
+        ie_kept, ie_residual, ie_by_direction = [], [], {}
+        print(
+            f"fec {cycle}: independent_expenditure_{cycle}.csv absent; skipping the "
+            f"super-PAC IE slice (re-run `openhouse fec pull {cycle}` to acquire it).",
+            file=sys.stderr,
+        )
+
     parsed_dir = fec_parsed_dir(data_dir, cycle)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -513,6 +722,13 @@ def parse_cycle(
         parsed_dir / "member-links.json",
         [link.model_dump(mode="json") for link in resolved_links],
     )
+    # The IE slice gets its OWN output file so the separately-footed records never
+    # blur into contributions.json (§13.7). Written even when empty so a consumer
+    # can tell "no House IEs" from "IE file not pulled" (the latter logs to stderr).
+    _write_json(
+        parsed_dir / "independent-expenditures.json",
+        [ie.model_dump(mode="json") for ie in ie_kept],
+    )
 
     # Counts reconcile against the source: for itpas2, kept + filtered (which now
     # includes every malformed_short_row) + transaction-id duplicates == the total
@@ -522,6 +738,15 @@ def parse_cycle(
     residual_reason_counts: dict[str, int] = defaultdict(int)
     for entry in contribution_residual:
         residual_reason_counts[entry["reason"]] += 1
+
+    # IE residual reconciles the same way: kept + filtered == raw IE data rows
+    # (note an unattributed House IE is BOTH kept and in the residual, so the two
+    # don't simply sum to the total — ``ie_kept`` already includes it; the residual
+    # is the audit trail, not a partition). The counts make this explicit.
+    ie_by_direction_sorted = {k: ie_by_direction[k] for k in sorted(ie_by_direction)}
+    ie_residual_reason_counts: dict[str, int] = defaultdict(int)
+    for entry in ie_residual:
+        ie_residual_reason_counts[entry["reason"]] += 1
 
     cm_short_rows = sum(1 for row in cm_rows if len(row) < 14)
     ccl_short_rows = sum(1 for row in ccl_rows if len(row) < 6)
@@ -543,6 +768,17 @@ def parse_cycle(
             "member_links_unresolved": len(unresolved_links),
             "members_without_fec_id": len(no_fec_warnings),
             "pac_limit_breaches": len(limit_breaches),
+            # The super-PAC IE slice (GH-0194), separately footed. ``ie_filtered``
+            # excludes non-House/short rows; an unattributed House IE is counted in
+            # BOTH ie_kept and ie_filtered_by_reason.unresolved_candidate (kept, not
+            # dropped — §13.7). ie_data_rows is the raw CSV total (minus header).
+            "ie_kept": len(ie_kept),
+            "ie_filtered": len(ie_residual),
+            "ie_by_direction": ie_by_direction_sorted,
+            "ie_filtered_by_reason": {
+                k: ie_residual_reason_counts.get(k, 0)
+                for k in FEC_IE_UNPARSED_REASONS
+            },
             # Raw source row totals + reference-file short-row drops, so kept +
             # filtered (+ tran-id dupes) reconciles against the bulk file itself.
             "source_rows": {
@@ -551,6 +787,7 @@ def parse_cycle(
                 "cm_short_rows": cm_short_rows,
                 "ccl_total": len(ccl_rows),
                 "ccl_short_rows": ccl_short_rows,
+                "ie_data_rows": len(ie_rows),
             },
         },
         "pac_limit_breaches": limit_breaches,
@@ -566,6 +803,7 @@ def parse_cycle(
         "generated_at": fetched_at,
         "cycle": cycle,
         "filtered_contributions": contribution_residual,
+        "filtered_independent_expenditures": ie_residual,
         "unresolved_member_links": unresolved_links,
         "members_without_fec_id": no_fec_warnings,
         "affiliation_limitation": AFFILIATION_LIMITATION,
@@ -580,7 +818,10 @@ def parse_cycle(
             f"{residual_reason_counts.get(k, 0)} {k}" for k in FEC_UNPARSED_REASONS
         )
         + f"; {len(resolved_links)} member links resolved, "
-        f"{len(limit_breaches)} $10k-invariant flags) → {parsed_dir}.",
+        f"{len(limit_breaches)} $10k-invariant flags); "
+        f"{len(ie_kept)} House super-PAC IEs "
+        f"({', '.join(f'{ie_by_direction_sorted[k]} {k}' for k in ie_by_direction_sorted) or 'none'}) "
+        f"→ {parsed_dir}.",
         file=sys.stderr,
     )
     return {
@@ -591,6 +832,9 @@ def parse_cycle(
         "member_links_resolved": len(resolved_links),
         "member_links_unresolved": len(unresolved_links),
         "pac_limit_breaches": len(limit_breaches),
+        "ie_kept": len(ie_kept),
+        "ie_filtered": len(ie_residual),
+        "ie_by_direction": ie_by_direction_sorted,
     }
 
 
