@@ -63,6 +63,7 @@ from datetime import date
 from pathlib import Path
 
 from .cli import fec_parsed_dir, fec_raw_dir
+from .fec_pull import fec_ie_name
 from .legislators import (
     UNRESOLVED_COMMITTEE,
     build_fec_member_links,
@@ -691,18 +692,19 @@ def parse_cycle(
     # ride (§13.2), so an IE attributes to the same member, never a name match. The
     # IE file is optional: an old-pulled cycle without it is a clean skip of just
     # the IE outputs (the contribution parse above still ran).
-    ie_path = raw_dir / f"independent_expenditure_{cycle}.csv"
+    ie_path = raw_dir / fec_ie_name(cycle)
     candidate_to_bioguide = {link.candidate_id: link.bioguide_id for link in links}
     if ie_path.exists():
         ie_header, ie_rows = _read_ie_rows(ie_path)
+        ie_data_rows = len(ie_rows)
         ie_kept, ie_residual, ie_by_direction = parse_independent_expenditures(
             ie_header, ie_rows, committees, candidate_to_bioguide
         )
     else:
-        ie_rows = []  # only len(ie_rows) is read downstream (ie_data_rows)
+        ie_data_rows = 0
         ie_kept, ie_residual, ie_by_direction = [], [], {}
         print(
-            f"fec {cycle}: independent_expenditure_{cycle}.csv absent; skipping the "
+            f"fec {cycle}: {fec_ie_name(cycle)} absent; skipping the "
             f"super-PAC IE slice (re-run `openhouse fec pull {cycle}` to acquire it).",
             file=sys.stderr,
         )
@@ -787,7 +789,7 @@ def parse_cycle(
                 "cm_short_rows": cm_short_rows,
                 "ccl_total": len(ccl_rows),
                 "ccl_short_rows": ccl_short_rows,
-                "ie_data_rows": len(ie_rows),
+                "ie_data_rows": ie_data_rows,
             },
         },
         "pac_limit_breaches": limit_breaches,
