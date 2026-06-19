@@ -625,3 +625,154 @@ def test_no_schema_warning_when_versions_match(tmp_path, capsys):
     run(["trades", "2021"], data_dir=dd)
     err = capsys.readouterr().err
     assert "schema_version" not in err
+
+
+# --- holdings: Schedule A items from annual FDs --------------------------------
+
+
+def test_holdings_json_default(capsys):
+    # 2021 has 2 Schedule A items in 10100003 (Carter); 2022 has 1 in 10200003 (Green).
+    rc = run(["holdings", "2021"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    # 2 items from the single parsed FD body in 2021.
+    assert len(out) == 2
+    for h in out:
+        assert "filer_id" in h and "holding" in h
+
+
+def test_holdings_table(capsys):
+    rc = run(["--table", "holdings", "2021"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "asset" in out and "owner" in out and "value" in out
+    # Carter's name appears in the filer column.
+    assert "Carter" in out
+
+
+def test_holdings_asset_filter_completeness_leaning(capsys):
+    # --asset is COMPLETENESS-leaning: substring over verbatim asset text.
+    rc = run(["holdings", "2021", "--asset", "aapl"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    # Matches "Apple Inc. (AAPL)" but not "U.S. Treasury Note".
+    assert len(out) == 1
+    assert "AAPL" in out[0]["holding"]["asset"]
+
+
+def test_holdings_asset_declares_at_most_bound(capsys):
+    run(["holdings", "2021", "--asset", "apple"])
+    err = capsys.readouterr().err
+    assert "COMPLETENESS-leaning" in err and "AT MOST" in err
+
+
+def test_holdings_owner_filter(capsys):
+    run(["holdings", "2021", "--owner", "SP"])
+    out = json.loads(capsys.readouterr().out)
+    assert all(h["holding"]["owner"] == "SP" for h in out)
+    # Only the Treasury note is SP; Apple is JT.
+    assert len(out) == 1
+    assert "Treasury" in out[0]["holding"]["asset"]
+
+
+def test_holdings_asset_type_filter(capsys):
+    run(["holdings", "2021", "--asset-type", "ST"])
+    out = json.loads(capsys.readouterr().out)
+    assert all(h["holding"]["asset_type"] == "ST" for h in out)
+    assert len(out) == 1
+    assert "AAPL" in out[0]["holding"]["asset"]
+
+
+def test_holdings_asset_type_case_insensitive(capsys):
+    run(["holdings", "2021", "--asset-type", "st"])
+    out = json.loads(capsys.readouterr().out)
+    assert len(out) == 1
+
+
+def test_holdings_min_value_filter(capsys):
+    # Apple: $1,001-$15,000 (low=1001); Treasury: $15,001-$50,000 (low=15001).
+    run(["holdings", "2021", "--min-value", "10000"])
+    out = json.loads(capsys.readouterr().out)
+    # Only Treasury ($15,001-$50,000, low=15001) clears 10000.
+    assert len(out) == 1
+    assert "Treasury" in out[0]["holding"]["asset"]
+
+
+def test_holdings_member_filter(capsys):
+    run(["holdings", "2021", "--member", "carter"])
+    out = json.loads(capsys.readouterr().out)
+    assert all(h["filer_id"] == "tx.carter.carl" for h in out)
+    assert len(out) == 2
+
+
+def test_holdings_bioguide_filter(capsys):
+    # 2022 FD fixture (10200003) has Green with bioguide_id G000003.
+    run(["holdings", "2022", "--bioguide", "G000003"])
+    out = json.loads(capsys.readouterr().out)
+    assert len(out) == 1
+    assert "NVDA" in out[0]["holding"]["asset"]
+
+
+def test_holdings_bioguide_is_exact(capsys):
+    # Substring of G000003 must NOT match.
+    run(["holdings", "2022", "--bioguide", "G000"])
+    out = json.loads(capsys.readouterr().out)
+    assert out == []
+
+
+def test_holdings_ptr_filings_are_excluded(capsys):
+    # PTR filings have no Schedule A; only annual FDs contribute holdings.
+    # 2022 has 1 PTR (Anders, 20200001) and 2 FDs (Green). Holdings must come from FDs only.
+    run(["holdings", "2022"])
+    out = json.loads(capsys.readouterr().out)
+    # Only the FD with a body (10200003) contributes; 10200002 has no body file.
+    assert len(out) == 1
+    for h in out:
+        assert h["filer_id"] == "wa.green.grace"
+
+
+def test_holdings_range_spans_years(capsys):
+    rc = run(["holdings", "2021-2022"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    years = {h["year"] for h in out}
+    assert years == {2021, 2022}
+    # 2021: 2 items (Carter), 2022: 1 item (Green).
+    assert len(out) == 3
+
+
+def test_holdings_residual_line(capsys):
+    run(["holdings", "2021"])
+    err = capsys.readouterr().err
+    assert "residual:" in err
+    # The holdings base is e-filed non-PTR (annual FD) filings.
+    # 2021 has 3 efiled filings total; 1 is efiled FD (10100003) = 1 body-bearing base.
+    assert "e-filed" in err
+
+
+def test_holdings_residual_base_is_fd_efiled_not_all_efiled(capsys):
+    # 2021: 3 efiled total, but only 1 is a non-PTR (annual FD: 10100003).
+    # The holdings residual must report "complete over the 1 e-filed ... filings".
+    run(["holdings", "2021"])
+    err = capsys.readouterr().err
+    assert "complete over the 1" in err
+
+
+def test_holdings_no_body_silently_skipped(capsys):
+    # 10200002 (Green's annual_report in 2022) has no body file → contributes nothing.
+    # This must not error; it simply isn't in the output.
+    rc = run(["holdings", "2022"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    # Only 10200003 (with body) appears, not 10200002.
+    assert all(h["doc_id"] != "10200002" for h in out)
+
+
+def test_holdings_empty_data_dir_fails_loudly(tmp_path, capsys):
+    dd = tmp_path / "data"
+    rc = run(["holdings", "2021"], data_dir=dd)
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NOT an empty match" in captured.err

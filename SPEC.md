@@ -321,6 +321,8 @@ query the JSON files where they sit — still no load step.)
 openhouse clerk read filings 2024 --type ptr --member adams       # filtered filing index
 openhouse clerk read filing 20024277                              # one filing: metadata + body
 openhouse clerk read trades 2019-2024 --ticker ALB --owner SP     # flattened transactions across years
+openhouse clerk read holdings 2024 --asset nvda --owner SP        # Schedule A assets across annual FDs
+openhouse clerk read holdings 2024 --asset nvda --owner SP        # Schedule A assets across annual FDs
 openhouse clerk read summary 2024                                 # counts: types, efiled/scanned, errors, warnings
 ```
 
@@ -331,6 +333,8 @@ openhouse clerk read summary 2024                                 # counts: type
 | `filings <range>` | filters: `--type`, `--member`, `--state`, `--since/--until` | matching filing-metadata records |
 | `filing <doc_id>` | a DocID | that filing's metadata + body (if parsed) |
 | `trades <range>` | filters: `--ticker`, `--member`, `--owner`, `--type P\|S`, `--since/--until`, `--min-amount` | PTR transactions flattened across the range, each with its filer attached |
+| `holdings <range>` | filters: `--asset`, `--member`, `--bioguide`, `--owner`, `--asset-type`, `--min-value` | Schedule A (assets & unearned income) from annual FDs, filer attached; `--asset` is COMPLETENESS-leaning (no `--ticker` — Schedule A has no parsed ticker field; see `docs/decisions/GH-0200-read-holdings-0001.md`) |
+| `holdings <range>` | filters: `--asset`, `--member`, `--bioguide`, `--owner`, `--asset-type`, `--min-value` | Schedule A (assets & unearned income) from annual FDs, filer attached; `--asset` is COMPLETENESS-leaning (no `--ticker` — Schedule A has no parsed ticker field; see docs/decisions/GH-0200-read-holdings-0001.md) |
 | `summary <range>` | — | per-year roll-up from the manifests |
 
 **Requirements:**
