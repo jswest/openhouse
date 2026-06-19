@@ -538,7 +538,7 @@ class FdBody(BaseModel):
 # so reshaping an FEC model must not force a Clerk re-parse and vice versa. It is
 # stamped into the FEC lane's own parse-manifest (a later sub-issue), the way
 # SCHEMA_VERSION is stamped into the Clerk parse-manifest (§6.5).
-FEC_SCHEMA_VERSION = 1
+FEC_SCHEMA_VERSION = 2
 
 # The ``connected_organization`` ``organization_type`` code table (SPEC §13).
 # Per FEC: a connected SSF's sponsoring organization is one of these classes.
@@ -561,6 +561,23 @@ FEC_ORG_TYPE_LABELS: dict[str, str] = {
 # records are conceptually ``"clerk"``; FEC records carry ``"fec"``.
 PROVENANCE_FEC = "fec"
 PROVENANCE_CLERK = "clerk"
+
+# The super-PAC independent-expenditure slice (§13.7, GH-0194) carries a *distinct*
+# provenance so it can NEVER be summed with the Path-1 connected-SSF hard money:
+# an IE is uncoordinated outside spending that does not reach the member, a
+# different legal footing entirely (cross-ref the issue / §13.7). A consumer
+# filters on this tag to keep the two footings separate downstream.
+PROVENANCE_FEC_IE = "fec_ie"
+
+# The Schedule-E ``sup_opp`` indicator → normalized direction (SPEC §13.5a, the
+# §2.3 raw-alongside-normalized pattern). ``S`` = spent FOR the candidate, ``O`` =
+# spent AGAINST. The raw single-letter code is always preserved beside the label
+# (``support_oppose_raw``); a blank/unmapped code keeps a ``None`` label beside
+# its raw value, never a dropped row.
+FEC_IE_SUPPORT_OPPOSE_LABELS: dict[str, str] = {
+    "S": "support",
+    "O": "oppose",
+}
 
 
 class FecCommittee(BaseModel):
@@ -656,3 +673,61 @@ class FecMemberCandidateLink(BaseModel):
     candidate_id: str
     committee_id: str
     provenance: str = PROVENANCE_FEC
+
+
+class FecIndependentExpenditure(BaseModel):
+    """One super-PAC **independent expenditure** FOR or AGAINST a House candidate
+    (FEC Schedule E — uncoordinated outside spending; SPEC §13.7, GH-0194).
+
+    A **separately-footed** slice, legally and structurally distinct from
+    :class:`FecPacContribution`: an IE is *uncoordinated* spending by an outside
+    committee to influence a candidate's race — the money does **not** go to the
+    member and does **not** carry Path 1's "disclosed, candidate-side hard money"
+    guarantee. It must never be summed with the connected-SSF set, which the
+    distinct :data:`PROVENANCE_FEC_IE` tag enforces downstream.
+
+    Source is the FEC bulk ``independent_expenditure_<cycle>.csv`` (a *headered
+    CSV*, unlike the four pipe-delimited Path-1 files — SPEC §13.5a). Both
+    directions are kept and tagged; the operator filters either way.
+
+    - ``spender_committee_id`` — the committee that made the expenditure (``spe_id``;
+      a ``C########`` FEC committee id or a ``C9#######`` independent-only filer id),
+      preserved raw. Joined to ``cm`` where present to surface
+      ``connected_organization_name`` (raw, **no industry classification** —
+      OpenSecrets-license non-goal, §13.7).
+    - ``spender_name`` — the spending committee's name as the IE file carries it
+      (``spe_nam``), raw.
+    - ``connected_organization_name`` — the spender's sponsoring organization from
+      ``cm`` where the join lands, else ``None``. Raw; never industry-classified.
+    - ``candidate_id`` — the targeted House candidate (``H########``; ``cand_id``),
+      or ``None`` when the IE row carries no candidate id (reported ``unattributed``,
+      never dropped — §13.7).
+    - ``bioguide_id`` — the member the candidate id resolves to via the CC0
+      ``id.fec[]`` bridge (§13.2), or ``None`` when no member link exists.
+    - ``office`` — the targeted office, always ``"H"`` for this slice (the parse
+      keeps only House IEs; a non-``H`` row is a filtered residual, §13.7).
+    - ``support_oppose`` — the normalized direction (``support`` / ``oppose``) from
+      :data:`FEC_IE_SUPPORT_OPPOSE_LABELS`, or ``None`` when blank/unmapped;
+      ``support_oppose_raw`` keeps the verbatim ``S`` / ``O`` code beside it.
+    - ``amount`` — the expenditure amount in dollars (``exp_amo``); blank → ``0.0``.
+    - ``date`` — the expenditure date (``exp_date``, ``DD-MON-YY``), or ``None`` if
+      absent/unparseable (the date is not the row's identity, so it's never dropped).
+    - ``purpose`` — the expenditure's stated purpose/description (``pur``), raw.
+    - ``image_number`` + ``transaction_id`` — the FEC image and transaction ids
+      (``image_num`` / ``tran_id``), the row's opaque identity key.
+    """
+
+    spender_committee_id: str
+    spender_name: Optional[str] = None
+    connected_organization_name: Optional[str] = None
+    candidate_id: Optional[str] = None
+    bioguide_id: Optional[str] = None
+    office: str = "H"
+    support_oppose: Optional[str] = None
+    support_oppose_raw: Optional[str] = None
+    amount: float
+    date: Optional[Date] = None
+    purpose: Optional[str] = None
+    image_number: Optional[str] = None
+    transaction_id: Optional[str] = None
+    provenance: str = PROVENANCE_FEC_IE

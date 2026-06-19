@@ -106,7 +106,9 @@ def test_pull_extracts_four_bulk_files_offline(tmp_path):
     for inner in ("cn.txt", "ccl.txt", "cm.txt", "itpas2.txt"):
         assert (raw / inner).exists(), inner
     manifest = json.loads((raw / "fec-pull-manifest.json").read_text())
-    assert manifest["count"] == 4
+    # Four Path-1 zips + the super-PAC IE CSV (GH-0194).
+    assert manifest["count"] == 5
+    assert (raw / f"independent_expenditure_{CYCLE}.csv").exists()
 
 
 def test_parse_reconciles_kept_and_residual(tmp_path):

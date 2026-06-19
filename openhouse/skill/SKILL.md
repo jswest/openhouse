@@ -141,11 +141,13 @@ openhouse fec read pac MACHINISTS 2024            # org's PAC → members it gav
 
 - **`fec pull`** is the only network step. It fetches the FEC **bulk** files for
   the cycle (candidate master `cn`, candidate-committee linkage `ccl`, committee
-  master `cm`, committee→candidate contributions `pas2`/`itpas2`). It is
-  bulk-data-only (the OpenFEC API is never crawled), polite by design (sequential,
-  **10 s** between files — fec.gov's own `Crawl-delay`), `--contact`-required, and
-  idempotent. The CC0 `congress-legislators` reference set (the member↔FEC anchor)
-  is fetched by `clerk pull`; run it once if you have not.
+  master `cm`, committee→candidate contributions `pas2`/`itpas2`, and the
+  super-PAC independent-expenditure CSV `independent_expenditure_<cycle>.csv`). It
+  is bulk-data-only (the OpenFEC API is never crawled), polite by design
+  (sequential, **10 s** between files — fec.gov's own `Crawl-delay`),
+  `--contact`-required, and idempotent. The CC0 `congress-legislators` reference
+  set (the member↔FEC anchor) is fetched by `clerk pull`; run it once if you have
+  not.
 - **`fec parse`** is offline. It Path-1-filters `itpas2` to **connected
   separate-segregated-fund (SSF) committee** contributions — corporate (`C`),
   trade (`T`), labor (`L`), membership (`M`), cooperative (`V`), and
@@ -154,7 +156,12 @@ openhouse fec read pac MACHINISTS 2024            # org's PAC → members it gav
   principal-committee from the CC0 join. **Nothing is dropped**: a contribution
   whose committee isn't a connected SSF, or isn't in `cm` at all, lands in
   `fec-unparsed-manifest.json` with a reason (`not_connected_ssf` /
-  `unresolved_committee`).
+  `unresolved_committee`). It **also** normalizes the super-PAC IE slice
+  (GH-0194) into `independent-expenditures.json` — **uncoordinated outside
+  spending for/against House candidates**, both directions tagged, carrying a
+  distinct `provenance` (`"fec_ie"`). This is a **separately-footed slice**: it is
+  NOT money to the member and is never summed with the connected-PAC
+  contributions. No `fec read` IE surface yet — the parsed JSON is the deliverable.
 - **`fec read donors <member> <year>`** rolls the kept receipts up to organization
   for one member (matched by `bioguide_id` — a full id pins the member, a fragment
   fuzzy-matches), sorted by total desc. `--org-type <class>` slices to one SSF
