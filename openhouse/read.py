@@ -8,7 +8,7 @@ consumed as plain dicts by key — the on-disk JSON shape is the only contract, 
 this module imports no body/transaction schema class (the producer of PTR bodies
 runs in parallel; coupling to its class would be a cross-branch hazard).
 
-Four subcommands: ``filings`` / ``filing`` / ``trades`` / ``summary``. JSON to
+Five subcommands: ``filings`` / ``filing`` / ``trades`` / ``holdings`` / ``summary``. JSON to
 stdout is the machine/agent contract (``jq``-composable); ``--table`` is human
 garnish; all prose, progress, and **residuals** go to stderr; the exit code is 0
 unless something genuinely failed (a partial range is *not* a failure).
@@ -197,22 +197,22 @@ def _ptr_efiled_count(data_dir: Path, years: list[int]) -> int:
 
 
 def _print_residual(
-    data_dir: Path, years: list[int], *, parsed_override: Optional[int] = None
+    data_dir: Path,
+    years: list[int],
+    *,
+    parsed_override: Optional[int] = None,
+    base_label: str = "e-filed filings",
 ) -> None:
     """Emit the universal residual line to stderr for a range query (SPEC §5).
 
     ``parsed_override`` replaces the "complete over the N filings parsed" base for
-    callers (``trades``) whose body-bearing population is narrower than the
-    manifest's e-filed total — there, N is the e-filed **type-``P``** count.
+    callers whose body-bearing population is narrower than the manifest's e-filed
+    total, and ``base_label`` names that population so the guarantee is accurate:
+    ``trades`` is complete over e-filed **type-``P``** PTRs, ``holdings`` over
+    e-filed **annual FDs** — each carries the other lane's body, never both.
     """
     r = _residual_counts(data_dir, years)
     parsed = r["parsed"] if parsed_override is None else parsed_override
-    # When the base is the type-P override (trades), the body-bearing population is
-    # the e-filed **PTR** (type-P) filings specifically, not every e-filed filing
-    # (e-filed FDs carry no PTR body); say so to avoid implying the broader base.
-    base_label = (
-        "e-filed filings" if parsed_override is None else "e-filed PTR (type-P) filings"
-    )
     print(
         f"residual: complete over the {parsed} {base_label} parsed in "
         f"range; {r['unparsed']} did not parse "
@@ -530,19 +530,20 @@ def cmd_filing(args, data_dir: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _amount_low(txn: dict) -> Optional[float]:
-    """The low comparison bound of a transaction's amount, or ``None`` if absent.
+def _bucket_low(record: dict, key: str) -> Optional[float]:
+    """The low comparison bound of ``record[key]``'s amount bucket, or ``None``.
 
-    For a ``$LOW - $HIGH`` bucket this is ``low``; for an exact-dollar value
-    (GH-0049) the amount is the closed point ``[X, X]``, so the low bound is the
-    exact value ``X`` itself. Treating the point this way keeps ``--min-amount``
-    sound over exact values — an exact ``$894.97`` correctly clears
-    ``--min-amount 500`` and is correctly excluded by ``--min-amount 1000``.
+    Shared by ``--min-amount`` (``trades`` over ``amount_range``) and
+    ``--min-value`` (``holdings`` over ``value_of_asset``). For a ``$LOW - $HIGH``
+    bucket this is ``low``; for an exact-dollar value (GH-0049) the bucket is the
+    closed point ``[X, X]``, so the low bound is the exact value ``X`` itself.
+    Treating the point this way keeps the floor sound over exact values — an exact
+    ``$894.97`` correctly clears a 500 floor and is correctly excluded by 1000.
     """
-    amt = txn.get("amount_range") or {}
-    if amt.get("exact") is not None:
-        return amt["exact"]
-    return amt.get("low")
+    bucket = record.get(key) or {}
+    if bucket.get("exact") is not None:
+        return bucket["exact"]
+    return bucket.get("low")
 
 
 def _trade_matches(txn: dict, filing: dict, args) -> bool:
@@ -573,7 +574,7 @@ def _trade_matches(txn: dict, filing: dict, args) -> bool:
     if not _date_in_range(txn.get("transaction_date"), args.since, args.until):
         return False
     if args.min_amount is not None:
-        low = _amount_low(txn)
+        low = _bucket_low(txn, "amount_range")
         if low is None or low < args.min_amount:
             return False
     if args.member and not _member_matches(filing, args.member):
@@ -729,7 +730,148 @@ def cmd_trades(args, data_dir: Path, years: list[int]) -> int:
     # The body-bearing base is the e-filed type-P filings, not every e-filed
     # filing (e-filed FDs carry no PTR body) — see _ptr_efiled_count.
     _print_residual(
-        data_dir, present, parsed_override=_ptr_efiled_count(data_dir, present)
+        data_dir,
+        present,
+        parsed_override=_ptr_efiled_count(data_dir, present),
+        base_label="e-filed PTR (type-P) filings",
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: holdings <range>
+# ---------------------------------------------------------------------------
+
+
+def _fd_efiled_count(data_dir: Path, years: list[int]) -> int:
+    """Count e-filed **annual-FD** (non-PTR) filings across years from filings.json.
+
+    The body-bearing base for holdings: only e-filed annual FDs carry Schedule A
+    bodies. by_pdf_class.efiled in the manifest counts e-filed PTRs too (which
+    have no FD schedule body), so it overstates the population a holdings answer
+    is complete over. Counted from filings.json (the per-record source of truth)
+    rather than the manifest roll-up, which has no e-filed-by-type breakdown.
+    """
+    count = 0
+    for year in years:
+        for f in _load_year_filings(data_dir, year) or []:
+            if (f.get("filing_type") or {}).get("code") == "P":
+                continue  # PTRs have no FD schedule body
+            if f.get("pdf_class") == "efiled":
+                count += 1
+    return count
+
+
+def _holding_matches(holding: dict, filing: dict, args) -> bool:
+    """Apply the holdings item-level filters to one (holding, filer) pair.
+
+    --asset is the COMPLETENESS-leaning filter (substring over verbatim asset
+    text; may over-match). --owner / --asset-type narrow within it.
+    There is no --ticker for holdings: Schedule A items carry no separate
+    ticker field — the symbol (when present) is embedded in the asset string
+    as (TICKER); use --asset with the symbol to find it (see decision doc
+    GH-0200-read-holdings-0001).
+    """
+    # COMPLETENESS-leaning: substring over verbatim asset text.
+    if args.asset and not _ci_contains(holding.get("asset"), args.asset):
+        return False
+    if args.owner and (holding.get("owner") or "").upper() != args.owner.upper():
+        return False
+    if args.asset_type and (holding.get("asset_type") or "").upper() != args.asset_type.upper():
+        return False
+    if args.min_value is not None:
+        low = _bucket_low(holding, "value_of_asset")
+        if low is None or low < args.min_value:
+            return False
+    if args.member and not _member_matches(filing, args.member):
+        return False
+    if args.bioguide and not _bioguide_matches(filing, args.bioguide):
+        return False
+    return True
+
+
+def _collect_holdings(data_dir: Path, years: list[int], args) -> list[dict]:
+    """Flatten Schedule A items from annual-FD bodies across years, filer attached.
+
+    Joins a body to its filer by **DocID** against the year's filings.json.
+    Only annual-FD (non-type-P) filings have FD bodies; a filing whose body
+    JSON is absent (scanned/missing/PTR) simply contributes nothing.
+    Output order is deterministic: year, then filings.json order, then item order.
+    """
+    holdings: list[dict] = []
+    for year in years:
+        filings = _load_year_filings(data_dir, year) or []
+        for filing in filings:
+            if (filing.get("filing_type") or {}).get("code") == "P":
+                continue  # PTR filings have no Schedule A
+            doc_id = filing.get("doc_id")
+            body = _load_fd_body(data_dir, year, doc_id)
+            if not body:
+                continue
+            for item in (body.get("schedules") or {}).get("A") or []:
+                if _holding_matches(item, filing, args):
+                    holdings.append(
+                        {
+                            "doc_id": doc_id,
+                            "year": year,
+                            "filer_id": filing.get("filer_id"),
+                            "filer": filing.get("filer"),
+                            "state_district": filing.get("state_district"),
+                            "holding": item,
+                        }
+                    )
+    return holdings
+
+
+def _holdings_table(holdings: list[dict]):
+    headers = [
+        "doc_id", "filer_id", "filer", "owner", "asset_type",
+        "asset", "value", "income",
+    ]
+    rows = []
+    for h in holdings:
+        item = h["holding"]
+        val = item.get("value_of_asset") or {}
+        inc = item.get("income_amount") or {}
+        rows.append(
+            [
+                h.get("doc_id", ""),
+                h.get("filer_id") or "",
+                _filer_name(h.get("filer")),
+                item.get("owner") or "",
+                item.get("asset_type") or "",
+                (item.get("asset") or "")[:48],
+                val.get("label") or "",
+                inc.get("label") or "",
+            ]
+        )
+    return headers, rows
+
+
+def cmd_holdings(args, data_dir: Path, years: list[int]) -> int:
+    present, skipped = _resolve_years(data_dir, years)
+    _print_skipped(skipped)
+    _require_present(data_dir, present, years)
+    _warn_schema_drift(data_dir, present)
+
+    holdings = _collect_holdings(data_dir, present, args)
+    cli_mod._emit(holdings, table=args.table, table_fn=_holdings_table)
+
+    # Declared-guarantee note on stderr.
+    if args.asset:
+        print(
+            f"guarantee: --asset is COMPLETENESS-leaning — substring over the "
+            f"verbatim asset text; these are AT MOST the {args.asset!r} holdings "
+            f"(may include spurious hits to discard).",
+            file=sys.stderr,
+        )
+
+    # The body-bearing base for holdings is e-filed non-PTR (annual FD) filings.
+    _print_residual(
+        data_dir,
+        present,
+        parsed_override=_fd_efiled_count(data_dir, present),
+        base_label="e-filed annual-FD (non-P) filings",
     )
     return 0
 
@@ -928,6 +1070,53 @@ def build_read_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # holdings <range>
+    p_holdings = sub.add_parser(
+        "holdings",
+        parents=[common],
+        help="Schedule A (assets & unearned income) flattened across the range, filer attached",
+    )
+    _add_range_arg(
+        p_holdings,
+        help="YYYY or YYYY-YYYY — range = filing year of the annual FD.",
+    )
+    p_holdings.add_argument(
+        "--asset",
+        help="COMPLETENESS-leaning query: case-insensitive substring over the "
+        "verbatim asset text (which may embed a ticker symbol as '(TICKER)'). "
+        "Over-matches — these are AT MOST the matching holdings, possibly with "
+        "spurious hits to discard. Use --asset when you would rather not miss a "
+        "holding; note that Schedule A carries no separate parsed ticker field "
+        "(see docs/decisions/GH-0200-read-holdings-0001.md).",
+    )
+    p_holdings.add_argument(
+        "--member",
+        help="case-insensitive substring over filer_id AND raw names "
+        "(name-string matching, NOT true identity — SPEC §6.2)",
+    )
+    p_holdings.add_argument(
+        "--bioguide",
+        help="SOUND query: exact (case-insensitive) match on the verified "
+        "bioguide_id of the filer. The PRECISE alternative to --member's fuzzy "
+        "substring — no false positives, every hit is the pinned member "
+        "(SPEC §6.2). Independent of --member; passing both ANDs them.",
+    )
+    p_holdings.add_argument("--owner", help="owner code: SP | DC | JT | self (exact)")
+    p_holdings.add_argument(
+        "--asset-type",
+        dest="asset_type",
+        help="asset type code (exact, case-insensitive), e.g. ST (stock), CS, RE, OL",
+    )
+    p_holdings.add_argument(
+        "--min-value",
+        type=int,
+        dest="min_value",
+        help=(
+            "minimum value (dollars): a value_of_asset bucket's low end; "
+            "excludes holdings with no value bucket"
+        ),
+    )
+
     # summary <range>
     p_summary = sub.add_parser(
         "summary", parents=[common], help="per-year roll-up from the manifests"
@@ -972,6 +1161,8 @@ def run(remainder: list[str], *, current_year: int) -> int:
             return cmd_filings(args, data_dir, years)
         if args.subcommand == "trades":
             return cmd_trades(args, data_dir, years)
+        if args.subcommand == "holdings":
+            return cmd_holdings(args, data_dir, years)
         if args.subcommand == "summary":
             return cmd_summary(args, data_dir, years)
     except ReadError as exc:

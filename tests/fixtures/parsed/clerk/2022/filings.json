@@ -22,5 +22,18 @@
     "source_pdf": "raw/clerk/2022/fd/10200002.pdf",
     "pdf_class": "efiled",
     "parse_status": "ok"
+  },
+  {
+    "doc_id": "10200003",
+    "year": 2022,
+    "filer": { "prefix": null, "first": "Grace", "last": "Green", "suffix": null },
+    "filer_id": "wa.green.grace",
+    "bioguide_id": "G000003",
+    "state_district": { "raw": "WA09", "state": "WA", "district": 9 },
+    "filing_type": { "code": "O", "label": "annual_report" },
+    "filing_date": "2022-05-20",
+    "source_pdf": "raw/clerk/2022/fd/10200003.pdf",
+    "pdf_class": "efiled",
+    "parse_status": "ok"
   }
 ]

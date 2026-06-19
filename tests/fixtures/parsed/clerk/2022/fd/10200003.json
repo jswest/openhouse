@@ -1,0 +1,26 @@
+{
+  "schedules": {
+    "A": [
+      {
+        "asset": "Nvidia Corporation (NVDA)",
+        "owner": "SP",
+        "asset_type": "ST",
+        "value_of_asset": {
+          "low": 50001,
+          "high": 100000,
+          "label": "$50,001 - $100,000"
+        },
+        "income_type": "Dividends",
+        "income_amount": {
+          "low": 201,
+          "high": 1000,
+          "label": "$201 - $1,000"
+        },
+        "income_preceding": null,
+        "location": null,
+        "description": null,
+        "raw_text": "Nvidia Corporation (NVDA) [ST] SP $50,001 - $100,000 Dividends $201 - $1,000"
+      }
+    ]
+  }
+}

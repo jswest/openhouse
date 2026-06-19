@@ -226,7 +226,7 @@ class AmountRange(BaseModel):
       ``None``. It is **not** coerced into a ``{low: 894.97, high: 894.97}``
       fake range — a point is not a bucket. For comparisons (``read``'s
       ``--min-amount`` filter) an exact value ``X`` is treated as the closed
-      point ``[X, X]`` — see ``read._amount_low``.
+      point ``[X, X]`` — see ``read._bucket_low``.
 
     ``label`` is the verbatim amount string from the form (``"$1,001 - $15,000"``
     or ``"$894.97"``) so the original wording is never lost. Exactly one of
