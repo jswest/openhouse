@@ -192,6 +192,26 @@ pull`); re-pull to refresh. JSON to stdout; `--table` for human-aligned columns
 (name, id, chamber, state). No matches → empty result, exit 0. No reference
 data on disk → non-zero exit with a pointer to `clerk pull`.
 
+**Committee membership (`--committees`).** Add `--committees` to surface which
+House committees and subcommittees the matched members sit on (CC0 source, same
+`raw/reference/` cache). Each row is `{congress, committee, subcommittee?, rank,
+title, party}`; filter with `--congress N` or `--year Y` (a year resolves to its
+Congress — 2025 → the 119th). The bare lookup is unchanged — committee rows
+appear only behind the flag.
+
+```sh
+openhouse reference Adams --committees --table        # Adams' House seats
+openhouse reference Adams --committees --year 2025     # filter to the 119th
+```
+
+**Coverage (important):** membership is **current-congress-only** — the 119th
+(2025–26). The CC0 source publishes **no historical-by-congress membership**, so
+`--congress`/`--year` outside the current congress return nothing, and earlier
+years aren't available. The guarantee is **COMPLETE over the cached current
+snapshot** (every seat of every matched member is returned); the stderr residual
+names that current-congress-only limit plus any members/seats absent from the
+cache. Senate and joint committees are excluded (this is the House product).
+
 ## What's coming
 
 The `clerk` pipeline ships end to end for any year range since 2008; stable

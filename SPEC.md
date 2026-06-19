@@ -491,6 +491,36 @@ bioguide on a `bioguide_id` field:
    `--no-reference`), rather than aborting before any disclosure PDFs download —
    identity is optional enrichment, never a gate. If upstream moves again, update
    `LEGISLATORS_URL_TEMPLATE` in `pull.py` and this note together.
+
+   **Committee membership — ✅ VERIFIED 2026-06-19 (#195).** The same CC0 project
+   and the same gh-pages base serve the committee data, fetched by `pull` into the
+   **same** `raw/reference/` lane and the **same** `--no-reference` gate:
+
+   - `…/committees-current.json` — committee/subcommittee **definitions** (a list;
+     each House committee has `type:"house"`, `thomas_id`, `name`, and a
+     `subcommittees[]` array of `{thomas_id, name}`).
+   - `…/committee-membership-current.json` — **membership** keyed by committee
+     thomas code → a list of member rows `{bioguide, party, rank, title}`. A
+     subcommittee's code is the parent's `thomas_id` **concatenated** with the
+     subcommittee's `thomas_id` (parent `HSAG` + sub `03` → `HSAG03`). Senate
+     (`SS…`) and joint codes also appear and are **excluded** from the House join.
+
+   **Coverage limitation (verified, not assumed).** Membership is
+   **CURRENT-CONGRESS-ONLY** — the 119th (2025–26). The membership rows carry **no
+   congress field**, and there is **no historical membership file**:
+   `committee-membership-historical.json` **404s** upstream (probed 2026-06-19).
+   `committees-historical.json` exists but carries only *definitions* (each with a
+   `congresses[]` list), never membership. So `reference --committees` can answer
+   only the current congress; `--congress N` / `--year Y` outside it return
+   nothing, declared in the stderr residual. The current congress is hard-coded as
+   `CURRENT_MEMBERSHIP_CONGRESS` (`legislators.py`); bump it the cycle the upstream
+   snapshot rolls forward. The join is offline/deterministic (`load_committee_index`
+   in `legislators.py`), surfaced by `openhouse reference <member> --committees
+   [--congress N | --year Y]`: opt-in (a bare `reference <str>` stays byte-stable),
+   one row per committee/subcommittee seat `{congress, committee, subcommittee?,
+   rank, title, party}`, **COMPLETE** over the cached snapshot with the
+   current-congress-only residual on stderr. See README *reference* and
+   `skill/reference.md`.
 2. **`name:<name_key>`** — the last resort when no seat matched. The key is the
    old normalized slug:
 

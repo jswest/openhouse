@@ -40,9 +40,38 @@ from typing import Iterable, Optional
 
 from openhouse.schemas import FecMemberCandidateLink
 
-# Where ``pull`` caches the two CC0 bulk files and where ``parse`` reads them.
+# Where ``pull`` caches the CC0 bulk files and where the offline joins read them.
 REFERENCE_SUBDIR = "raw/reference"
 LEGISLATORS_FILES = ("legislators-current.json", "legislators-historical.json")
+
+# CC0 committee files (#195), fetched into the same lane as the legislator files.
+# ``committees-current.json`` carries the committee/subcommittee *definitions*
+# (names keyed by ``thomas_id``); ``committee-membership-current.json`` carries
+# the *current*-congress membership (member rows keyed by committee thomas code).
+# **There is NO historical membership file** — ``committee-membership-historical
+# .json`` 404s upstream (probed 2026-06-19) — so committee membership is
+# **current-congress-only** (the 119th, 2025–26). See SPEC §6.2.
+COMMITTEE_FILES = (
+    "committees-current.json",
+    "committee-membership-current.json",
+)
+
+# The CC0 membership snapshot is the *current* congress only. Hard-coded because
+# the source carries no congress field on the membership rows; bump it the cycle
+# the upstream snapshot rolls forward (verified against the 119th, 2025–26).
+CURRENT_MEMBERSHIP_CONGRESS = 119
+
+
+def year_to_congress(year: int) -> int:
+    """Map a calendar year to its House Congress number (#195).
+
+    Each Congress spans a two-year term beginning in an odd year: the 1st sat
+    1789–90, so the 119th sits 2025–26. Both years of a term fold to the same
+    number (2025 → 119, 2026 → 119). Pure and wall-clock-free, mirroring the FEC
+    :func:`~openhouse.cli.year_to_cycle` pattern — the caller passes an
+    already-validated 4-digit year.
+    """
+    return (year - 1789) // 2 + 1
 
 
 def _norm_name(s: str) -> str:
@@ -353,3 +382,142 @@ def build_fec_member_links(
                 )
             )
     return links, warnings
+
+
+# ===========================================================================
+# Committee membership (#195): which House committees a member sits on.
+# ===========================================================================
+#
+# A second CC0 enrichment off the same ``raw/reference/`` lane. The source
+# publishes committee *definitions* (``committees-current.json`` — names keyed by
+# ``thomas_id``, with a ``subcommittees`` array) and *current*-congress
+# *membership* (``committee-membership-current.json`` — member rows keyed by a
+# committee thomas code). A subcommittee's membership code is the parent's
+# ``thomas_id`` concatenated with the subcommittee's own ``thomas_id`` (e.g. parent
+# ``HSAG`` + sub ``03`` → ``HSAG03``). There is NO historical membership file
+# upstream, so this join is **current-congress-only** — the residual the surface
+# declares (SPEC §6.2). Pure, offline, deterministic: read the cached JSON, build a
+# bioguide → memberships index once, answer with no network and no wall-clock.
+
+
+@dataclass(frozen=True)
+class CommitteeIndex:
+    """An offline (bioguide → committee memberships) index, House committees only.
+
+    ``by_bioguide`` maps a bioguide to a tuple of membership dicts
+    ``{congress, committee, subcommittee?, rank, title, party}`` — ``subcommittee``
+    present only for a subcommittee seat, ``title`` ``None`` for a rank-and-file
+    member. ``found_any`` records whether the committee files were on disk at all
+    (so the caller can distinguish "no memberships" from "never fetched").
+    Memberships are sorted by (committee, subcommittee, rank) for deterministic
+    output. Senate/joint committees are excluded — this is the House product.
+    """
+
+    by_bioguide: dict[str, tuple[dict, ...]]
+    found_any: bool
+
+    def memberships(
+        self, bioguide: str, congress: Optional[int] = None
+    ) -> tuple[dict, ...]:
+        """Every committee membership for ``bioguide``, optionally one congress.
+
+        COMPLETE over the cached membership snapshot: every seat the member holds
+        is returned. ``congress`` filters to that Congress number; since the source
+        is current-congress-only, any value other than
+        :data:`CURRENT_MEMBERSHIP_CONGRESS` yields ``()`` (the residual case).
+        """
+        rows = self.by_bioguide.get(bioguide, ())
+        if congress is not None:
+            rows = tuple(r for r in rows if r["congress"] == congress)
+        return rows
+
+
+def load_committee_index(data_dir: Path) -> CommitteeIndex:
+    """Build the offline bioguide → committee-membership index from the cache.
+
+    Reads ``committees-current.json`` (definitions) and
+    ``committee-membership-current.json`` (membership) under ``raw/reference/``. A
+    missing/unreadable file yields an empty index with ``found_any=False`` — the
+    surface then reports the cache as not fetched rather than crashing (the fetch is
+    optional enrichment, never a gate). Pure + offline + deterministic.
+    """
+    ref_dir = data_dir / REFERENCE_SUBDIR
+    defs = _read_committee_json(ref_dir / "committees-current.json")
+    membership = _read_committee_json(ref_dir / "committee-membership-current.json")
+    found_any = defs is not None and membership is not None
+    if not found_any:
+        return CommitteeIndex(by_bioguide={}, found_any=False)
+
+    # Map every House committee thomas code → display label. Parent codes map to
+    # (committee_name, None); subcommittee codes (parent_thomas + sub_thomas) map to
+    # (committee_name, subcommittee_name). Non-House committees are skipped so they
+    # never enter the join.
+    labels: dict[str, tuple[str, Optional[str]]] = {}
+    for c in defs:
+        if c.get("type") != "house":
+            continue
+        thomas = c.get("thomas_id")
+        if not thomas:
+            continue
+        committee_name = c.get("name") or ""
+        labels[thomas] = (committee_name, None)
+        for sub in c.get("subcommittees") or []:
+            sub_thomas = sub.get("thomas_id")
+            if sub_thomas:
+                labels[thomas + sub_thomas] = (committee_name, sub.get("name") or "")
+
+    by_bioguide: dict[str, list[dict]] = {}
+    for code, members in membership.items():
+        label = labels.get(code)
+        if label is None:
+            continue  # Senate/joint code, or a committee not in the House defs.
+        committee, subcommittee = label
+        for m in members:
+            bioguide = m.get("bioguide")
+            if not bioguide:
+                continue
+            row = {
+                "congress": CURRENT_MEMBERSHIP_CONGRESS,
+                "committee": committee,
+                "subcommittee": subcommittee,
+                "rank": m.get("rank"),
+                "title": m.get("title"),
+                "party": m.get("party"),
+            }
+            by_bioguide.setdefault(bioguide, []).append(row)
+
+    frozen = {
+        b: tuple(
+            sorted(
+                rows,
+                key=lambda r: (
+                    r["committee"],
+                    r["subcommittee"] or "",
+                    r["rank"] if r["rank"] is not None else 1_000_000,
+                ),
+            )
+        )
+        for b, rows in by_bioguide.items()
+    }
+    return CommitteeIndex(by_bioguide=frozen, found_any=True)
+
+
+def _read_committee_json(path: Path):
+    """Read one committee JSON file, or ``None`` if absent/unreadable.
+
+    A present-but-unreadable file warns loudly (so a corrupt cache is not silently
+    treated as "no committees") and returns ``None``, matching
+    :func:`load_legislator_records`'s degrade-with-a-signal posture.
+    """
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        print(
+            f"warning: committee file {path} is present but unreadable ({exc}); "
+            f"skipping it — committee membership will be unavailable. Delete the "
+            f"file and re-run `openhouse clerk pull` to re-fetch it.",
+            file=sys.stderr,
+        )
+        return None
