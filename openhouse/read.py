@@ -197,22 +197,22 @@ def _ptr_efiled_count(data_dir: Path, years: list[int]) -> int:
 
 
 def _print_residual(
-    data_dir: Path, years: list[int], *, parsed_override: Optional[int] = None
+    data_dir: Path,
+    years: list[int],
+    *,
+    parsed_override: Optional[int] = None,
+    base_label: str = "e-filed filings",
 ) -> None:
     """Emit the universal residual line to stderr for a range query (SPEC §5).
 
     ``parsed_override`` replaces the "complete over the N filings parsed" base for
-    callers (``trades``) whose body-bearing population is narrower than the
-    manifest's e-filed total — there, N is the e-filed **type-``P``** count.
+    callers whose body-bearing population is narrower than the manifest's e-filed
+    total, and ``base_label`` names that population so the guarantee is accurate:
+    ``trades`` is complete over e-filed **type-``P``** PTRs, ``holdings`` over
+    e-filed **annual FDs** — each carries the other lane's body, never both.
     """
     r = _residual_counts(data_dir, years)
     parsed = r["parsed"] if parsed_override is None else parsed_override
-    # When the base is the type-P override (trades), the body-bearing population is
-    # the e-filed **PTR** (type-P) filings specifically, not every e-filed filing
-    # (e-filed FDs carry no PTR body); say so to avoid implying the broader base.
-    base_label = (
-        "e-filed filings" if parsed_override is None else "e-filed PTR (type-P) filings"
-    )
     print(
         f"residual: complete over the {parsed} {base_label} parsed in "
         f"range; {r['unparsed']} did not parse "
@@ -530,19 +530,20 @@ def cmd_filing(args, data_dir: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _amount_low(txn: dict) -> Optional[float]:
-    """The low comparison bound of a transaction's amount, or ``None`` if absent.
+def _bucket_low(record: dict, key: str) -> Optional[float]:
+    """The low comparison bound of ``record[key]``'s amount bucket, or ``None``.
 
-    For a ``$LOW - $HIGH`` bucket this is ``low``; for an exact-dollar value
-    (GH-0049) the amount is the closed point ``[X, X]``, so the low bound is the
-    exact value ``X`` itself. Treating the point this way keeps ``--min-amount``
-    sound over exact values — an exact ``$894.97`` correctly clears
-    ``--min-amount 500`` and is correctly excluded by ``--min-amount 1000``.
+    Shared by ``--min-amount`` (``trades`` over ``amount_range``) and
+    ``--min-value`` (``holdings`` over ``value_of_asset``). For a ``$LOW - $HIGH``
+    bucket this is ``low``; for an exact-dollar value (GH-0049) the bucket is the
+    closed point ``[X, X]``, so the low bound is the exact value ``X`` itself.
+    Treating the point this way keeps the floor sound over exact values — an exact
+    ``$894.97`` correctly clears a 500 floor and is correctly excluded by 1000.
     """
-    amt = txn.get("amount_range") or {}
-    if amt.get("exact") is not None:
-        return amt["exact"]
-    return amt.get("low")
+    bucket = record.get(key) or {}
+    if bucket.get("exact") is not None:
+        return bucket["exact"]
+    return bucket.get("low")
 
 
 def _trade_matches(txn: dict, filing: dict, args) -> bool:
@@ -573,7 +574,7 @@ def _trade_matches(txn: dict, filing: dict, args) -> bool:
     if not _date_in_range(txn.get("transaction_date"), args.since, args.until):
         return False
     if args.min_amount is not None:
-        low = _amount_low(txn)
+        low = _bucket_low(txn, "amount_range")
         if low is None or low < args.min_amount:
             return False
     if args.member and not _member_matches(filing, args.member):
@@ -729,7 +730,10 @@ def cmd_trades(args, data_dir: Path, years: list[int]) -> int:
     # The body-bearing base is the e-filed type-P filings, not every e-filed
     # filing (e-filed FDs carry no PTR body) — see _ptr_efiled_count.
     _print_residual(
-        data_dir, present, parsed_override=_ptr_efiled_count(data_dir, present)
+        data_dir,
+        present,
+        parsed_override=_ptr_efiled_count(data_dir, present),
+        base_label="e-filed PTR (type-P) filings",
     )
     return 0
 
@@ -758,15 +762,6 @@ def _fd_efiled_count(data_dir: Path, years: list[int]) -> int:
     return count
 
 
-def _value_low(holding: dict) -> Optional[float]:
-    """The low bound of a holding's value_of_asset bucket, or None if absent.
-
-    Used by --min-value: a bucket's low end, or None (no value, excluded).
-    """
-    val = holding.get("value_of_asset") or {}
-    return val.get("low")
-
-
 def _holding_matches(holding: dict, filing: dict, args) -> bool:
     """Apply the holdings item-level filters to one (holding, filer) pair.
 
@@ -785,7 +780,7 @@ def _holding_matches(holding: dict, filing: dict, args) -> bool:
     if args.asset_type and (holding.get("asset_type") or "").upper() != args.asset_type.upper():
         return False
     if args.min_value is not None:
-        low = _value_low(holding)
+        low = _bucket_low(holding, "value_of_asset")
         if low is None or low < args.min_value:
             return False
     if args.member and not _member_matches(filing, args.member):
@@ -873,7 +868,10 @@ def cmd_holdings(args, data_dir: Path, years: list[int]) -> int:
 
     # The body-bearing base for holdings is e-filed non-PTR (annual FD) filings.
     _print_residual(
-        data_dir, present, parsed_override=_fd_efiled_count(data_dir, present)
+        data_dir,
+        present,
+        parsed_override=_fd_efiled_count(data_dir, present),
+        base_label="e-filed annual-FD (non-P) filings",
     )
     return 0
 

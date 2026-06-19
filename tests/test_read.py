@@ -324,7 +324,7 @@ def test_min_amount_treats_exact_value_as_its_own_point():
     # one > X. A range {low, high} keeps using `low`. Sound, no fabricated range.
     from argparse import Namespace
 
-    from openhouse.read import _amount_low, _trade_matches
+    from openhouse.read import _bucket_low, _trade_matches
 
     exact_txn = {
         "amount_range": {"exact": 894.97, "label": "$894.97"},
@@ -334,8 +334,8 @@ def test_min_amount_treats_exact_value_as_its_own_point():
         "amount_range": {"low": 1001, "high": 15000, "label": "$1,001 - $15,000"},
         "transaction_date": "2021-03-01",
     }
-    assert _amount_low(exact_txn) == 894.97
-    assert _amount_low(range_txn) == 1001
+    assert _bucket_low(exact_txn, "amount_range") == 894.97
+    assert _bucket_low(range_txn, "amount_range") == 1001
 
     def _args(min_amount):
         return Namespace(
@@ -698,6 +698,16 @@ def test_holdings_min_value_filter(capsys):
     assert "Treasury" in out[0]["holding"]["asset"]
 
 
+def test_holdings_min_value_treats_exact_as_its_own_point():
+    # A Schedule A value can be an exact-dollar figure (GH-0166), not a bucket;
+    # --min-value must treat the point [X, X] as X, not drop it for a null `low`.
+    exact = {"value_of_asset": {"exact": 4425.09, "label": "$4,425.09"}}
+    assert read_mod._bucket_low(exact, "value_of_asset") == 4425.09
+    bucket = {"value_of_asset": {"low": 1001, "high": 15000, "label": "x"}}
+    assert read_mod._bucket_low(bucket, "value_of_asset") == 1001
+    assert read_mod._bucket_low({}, "value_of_asset") is None
+
+
 def test_holdings_member_filter(capsys):
     run(["holdings", "2021", "--member", "carter"])
     out = json.loads(capsys.readouterr().out)
@@ -747,7 +757,10 @@ def test_holdings_residual_line(capsys):
     assert "residual:" in err
     # The holdings base is e-filed non-PTR (annual FD) filings.
     # 2021 has 3 efiled filings total; 1 is efiled FD (10100003) = 1 body-bearing base.
-    assert "e-filed" in err
+    assert "e-filed annual-FD (non-P) filings" in err
+    # Holdings come from FD bodies, never PTR bodies — the guarantee must not
+    # claim completeness over the PTR population (the trades label).
+    assert "PTR (type-P)" not in err
 
 
 def test_holdings_residual_base_is_fd_efiled_not_all_efiled(capsys):
