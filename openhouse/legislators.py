@@ -459,11 +459,12 @@ def load_committee_index(data_dir: Path) -> CommitteeIndex:
         thomas = c.get("thomas_id")
         if not thomas:
             continue
-        labels[thomas] = (c.get("name") or "", None)
+        committee_name = c.get("name") or ""
+        labels[thomas] = (committee_name, None)
         for sub in c.get("subcommittees") or []:
             sub_thomas = sub.get("thomas_id")
             if sub_thomas:
-                labels[thomas + sub_thomas] = (c.get("name") or "", sub.get("name") or "")
+                labels[thomas + sub_thomas] = (committee_name, sub.get("name") or "")
 
     by_bioguide: dict[str, list[dict]] = {}
     for code, members in membership.items():
