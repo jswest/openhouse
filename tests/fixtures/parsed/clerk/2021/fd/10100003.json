@@ -3,22 +3,43 @@
     "A": [
       {
         "asset": "Apple Inc. (AAPL)",
+        "owner": "JT",
         "asset_type": "ST",
-        "description": null,
+        "value_of_asset": {
+          "high": 15000,
+          "label": "$1,001 - $15,000",
+          "low": 1001
+        },
+        "income_type": "Dividends",
         "income_amount": {
           "high": 1000,
           "label": "$201 - $1,000",
           "low": 201
         },
-        "income_type": "Dividends",
+        "income_preceding": null,
         "location": null,
-        "owner": "JT",
-        "raw_text": "Apple Inc. (AAPL) [ST] JT $1,001 - $15,000 Dividends $201 - $1,000 gfedc",
+        "description": null,
+        "raw_text": "Apple Inc. (AAPL) [ST] JT $1,001 - $15,000 Dividends $201 - $1,000 gfedc"
+      },
+      {
+        "asset": "U.S. Treasury Note 3% 2030",
+        "owner": "SP",
+        "asset_type": "CS",
         "value_of_asset": {
-          "high": 15000,
-          "label": "$1,001 - $15,000",
-          "low": 1001
-        }
+          "high": 50000,
+          "label": "$15,001 - $50,000",
+          "low": 15001
+        },
+        "income_type": "Interest",
+        "income_amount": {
+          "high": 1000,
+          "label": "$201 - $1,000",
+          "low": 201
+        },
+        "income_preceding": null,
+        "location": null,
+        "description": null,
+        "raw_text": "U.S. Treasury Note 3% 2030 [CS] SP $15,001 - $50,000 Interest $201 - $1,000"
       }
     ]
   }

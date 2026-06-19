@@ -152,10 +152,11 @@ Queries the parsed JSON. JSON to stdout (one object per line for lists,
 openhouse clerk read filings 2024 --type ptr --state NY     # matching filing-metadata records
 openhouse clerk read filing 20024001                        # one filing: metadata + body
 openhouse clerk read trades 2024 --ticker NVDA --table      # PTR transactions, filer attached
+openhouse clerk read holdings 2024 --asset nvda --table     # Schedule A assets from annual FDs
 openhouse clerk read summary 2020-2024                       # per-year roll-up from the manifests
 ```
 
-Identity filters on `filings` and `trades`:
+Identity filters on `filings`, `trades`, and `holdings`:
 
 - `--member <substring>` — case-insensitive substring over the filer id and raw
   names. Fuzzy name matching, **not** verified identity (SPEC §6.2).
@@ -167,9 +168,12 @@ Identity filters on `filings` and `trades`:
 
 On `trades`, `--ticker` is a sound query (no false positives — exact symbol
 match) while `--asset` leans toward completeness (substring over the verbatim
-asset text, no false negatives). `read` errors with a non-zero exit when the
-target years aren't parsed under the data dir, so an empty result is never
-mistaken for "no matches" (run `parse` first).
+asset text, no false negatives). On `holdings`, `--asset` is the only asset-text
+filter — Schedule A items carry no separate parsed ticker field; use
+`--asset <SYMBOL>` to find by symbol (see
+`docs/decisions/GH-0200-read-holdings-0001.md`). `read` errors with a non-zero
+exit when the target years aren't parsed under the data dir, so an empty result
+is never mistaken for "no matches" (run `parse` first).
 
 ### reference (offline)
 

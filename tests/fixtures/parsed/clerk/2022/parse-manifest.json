@@ -3,11 +3,11 @@
   "generated_at": "2026-06-11T12:00:00",
   "year": 2022,
   "counts": {
-    "total": 2,
-    "by_filing_type": { "O": 1, "P": 1 },
-    "by_pdf_class": { "efiled": 2, "scanned": 0, "missing": 0 },
+    "total": 3,
+    "by_filing_type": { "O": 2, "P": 1 },
+    "by_pdf_class": { "efiled": 3, "scanned": 0, "missing": 0 },
     "not_classified": 0,
-    "by_parse_status": { "ok": 2, "error": 0 }
+    "by_parse_status": { "ok": 3, "error": 0 }
   },
   "identity_warnings": []
 }

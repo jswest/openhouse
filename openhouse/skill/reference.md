@@ -124,6 +124,22 @@ Note: the range is the **filing** year; a transaction can predate its filing (a
 Dec-2023 trade in a 2024 filing), so widen the range when bounding by
 transaction date.
 
+**All Schedule A holdings (assets) filed by a member in a year:**
+```
+openhouse clerk read holdings 2024 --member pelosi
+```
+
+**Holdings by asset name (completeness-leaning — "at most these"):**
+```
+openhouse clerk read holdings 2024 --asset nvidia
+```
+Note: no `--ticker` filter — use `--asset NVDA` to match the embedded symbol.
+
+**Holdings over a value threshold, joint-owned only:**
+```
+openhouse clerk read holdings 2023-2024 --min-value 50000 --owner JT
+```
+
 **Per-year roll-up:**
 ```
 openhouse clerk read summary 2019-2024 --table
@@ -143,6 +159,9 @@ openhouse clerk read trades 2024 --ticker AAPL
   residual).
 - `trades --asset` — **complete-leaning**: substring over verbatim asset text;
   results are an upper bound ("at most these"), with spurious hits to discard.
+- `holdings --asset` — **complete-leaning**: substring over verbatim asset text.
+  Schedule A has no separate parsed ticker field; use `--asset <SYMBOL>` to find
+  by symbol (see `docs/decisions/GH-0200-read-holdings-0001.md`).
 - Every range query prints a residual to stderr — the count of in-range filings
   that did not parse. A count is only meaningful read together with its residual:
   "complete over K parsed; M did not parse."
