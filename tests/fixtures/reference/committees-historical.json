@@ -1,0 +1,12 @@
+[
+ {
+  "type": "house",
+  "name": "House Select Subcommittee on the Coronavirus Pandemic",
+  "thomas_id": "HSVC",
+  "house_committee_id": "VC",
+  "congresses": [
+   117,
+   118
+  ]
+ }
+]

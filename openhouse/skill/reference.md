@@ -51,6 +51,42 @@ records it in `identity_warnings` with a classified `reason` (`candidate`,
 match the filer — is surfaced per-name on stderr; the rest collapse into a
 one-line per-year summary (`match_summary` in the manifest).
 
+### Committee membership (`reference --committees`)
+
+`openhouse reference <member> --committees` surfaces the House committees and
+subcommittees the matched members sit on, from the CC0 `congress-legislators`
+committee files cached in `raw/reference/` (fetched by `clerk pull` on the same
+lane / `--no-reference` gate as the legislator files). The bare lookup is
+unchanged — committee rows appear only behind `--committees`.
+
+One row per committee/subcommittee seat:
+
+```json
+{
+  "name": "Alma S. Adams",
+  "bioguide_id": "A000370",
+  "congress": 119,
+  "committee": "House Committee on Agriculture",
+  "subcommittee": "Nutrition and Foreign Agriculture",
+  "rank": 3,
+  "title": null,
+  "party": "minority"
+}
+```
+
+`subcommittee` is `null` for a full-committee seat; `title` is `null` for a
+rank-and-file member (else the verbatim role, e.g. `Chair`, `Ranking Member`).
+Filter with `--congress N` or `--year Y` (a year resolves to its Congress —
+2025 → the 119th, via `year_to_congress`).
+
+**Coverage / guarantee.** Membership is **CURRENT-CONGRESS-ONLY** (the 119th,
+2025–26): the source publishes no historical-by-congress membership file. The
+guarantee is **COMPLETE over the cached current snapshot** — every seat of every
+matched member is returned; the stderr residual names the current-congress-only
+limit plus members/seats absent from the cache. `--congress`/`--year` outside the
+current congress return an empty list (the residual still prints). Senate and
+joint committees are excluded.
+
 ### Filing bodies
 
 One JSON per filing under `parsed/clerk/<year>/ptr/<DocID>.json` (PTR transactions) or
@@ -103,6 +139,12 @@ openhouse clerk read filings 2024 --member pelosi --type ptr
 **One filing in full (metadata + body):**
 ```
 openhouse clerk read filing 20024277
+```
+
+**Which House committees a member sits on (current congress, complete over the
+cached snapshot):**
+```
+openhouse reference Adams --committees --year 2025 --table
 ```
 
 **Every trade in a symbol, soundly (no false positives — "at least these"):**
