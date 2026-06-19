@@ -285,7 +285,7 @@ committees).
   affiliation column, so a parent organization and its subsidiary PACs appear as
   separate entries — `openhouse` never merges them from data it does not have.
 
-**Super-PAC independent expenditures are a separate, separately-footed slice.**
+**Super-PAC independent expenditures are a separately-footed slice.**
 `fec pull` + `fec parse` acquire the FEC Schedule-E bulk file
 (`independent_expenditure_<cycle>.csv`) and normalize the spending **for or
 against** House candidates into `parsed/fec/<cycle>/independent-expenditures.json`
